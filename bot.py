@@ -153,20 +153,30 @@ class BotService:
 
             if report_files or csv_files:
                 try:
-                    if report_files:
-                        with open(report_files[0], "rb") as f:
+                    for rf in report_files:
+                        with open(rf, "rb") as f:
                             await update.message.chat.send_document(
                                 document=f,
-                                filename="penetration_test_report.md",
-                                caption="Reporte de seguridad generado por Strix."
+                                filename=rf.name,
+                                caption=f"Reporte: {rf.parent.name if rf.parent != job_state.work_dir else 'general'}"
                             )
-                    if csv_files:
-                        with open(csv_files[0], "rb") as f:
+                    for cf in csv_files:
+                        with open(cf, "rb") as f:
                             await update.message.chat.send_document(
                                 document=f,
-                                filename="vulnerabilities.csv",
+                                filename=cf.name,
                                 caption="Vulnerabilidades encontradas."
                             )
+                    # También enviar vulnerabilidades individuales si no se envió reporte consolidado
+                    if not report_files:
+                        vuln_files = sorted(job_state.work_dir.rglob("vulnerabilities/vuln-*.md"))
+                        for vf in vuln_files:
+                            with open(vf, "rb") as f:
+                                await update.message.chat.send_document(
+                                    document=f,
+                                    filename=f"{vf.parent.name}/{vf.name}",
+                                    caption=f"Vulnerabilidad: {vf.stem}"
+                                )
                 except Exception:
                     log.exception("Error sending report for job %s", job_state.job_id)
 
@@ -201,20 +211,29 @@ class BotService:
                     report_files = list(job_state.work_dir.rglob("penetration_test_report.md"))
                     csv_files = list(job_state.work_dir.rglob("vulnerabilities.csv"))
 
-                    if report_files:
-                        with open(report_files[0], "rb") as f:
+                    for rf in report_files:
+                        with open(rf, "rb") as f:
                             await update.message.chat.send_document(
                                 document=f,
-                                filename="penetration_test_report.md",
-                                caption="Reporte de seguridad generado por Strix."
+                                filename=rf.name,
+                                caption=f"Reporte: {rf.parent.name if rf.parent != job_state.work_dir else 'general'}"
                             )
-                    if csv_files:
-                        with open(csv_files[0], "rb") as f:
+                    for cf in csv_files:
+                        with open(cf, "rb") as f:
                             await update.message.chat.send_document(
                                 document=f,
-                                filename="vulnerabilities.csv",
+                                filename=cf.name,
                                 caption="Listado de vulnerabilidades en CSV."
                             )
+                    if not report_files:
+                        vuln_files = sorted(job_state.work_dir.rglob("vulnerabilities/vuln-*.md"))
+                        for vf in vuln_files:
+                            with open(vf, "rb") as f:
+                                await update.message.chat.send_document(
+                                    document=f,
+                                    filename=f"{vf.parent.name}/{vf.name}",
+                                    caption=f"Vulnerabilidad: {vf.stem}"
+                                )
                 except Exception:
                     log.exception("Error sending final files for job %s", job_state.job_id)
 

@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -266,7 +267,7 @@ class JobRunner:
                 container_name = f"strix-scan-{state.job_id}"
                 proc = await asyncio.create_subprocess_exec(
                     "docker", "rm", "-f", container_name,
-                    stdout=asyncio.DEVNULL, stderr=asyncio.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(proc.wait(), timeout=10)
                 if proc.returncode == 0:
@@ -305,6 +306,7 @@ class JobRunner:
         was_waiting = False
         pending_content = ""
         last_content_time = 0.0
+        _auto_continued = False
 
         while not agent_task.done():
             await asyncio.sleep(0.5)
@@ -333,9 +335,14 @@ class JobRunner:
                     await on_new_message(state, pending_content)
                     pending_content = ""
                 await on_waiting(state)
-                if getattr(state, '_reports_pre_sent', False):
-                    agent_task.cancel()
-                    break
+                # Si enviamos reportes y el agente pregunta si continuar,
+                # responderle automáticamente que sí para que siga con los
+                # siguientes targets (solo la primera vez)
+                if getattr(state, '_reports_pre_sent', False) and not _auto_continued:
+                    _auto_continued = True
+                    log.info("Auto-continuing job %s after report delivery", state.job_id)
+                    agent.state.add_message("user", "continua con el siguiente target")
+                    agent.state.resume_from_waiting()
             elif pending_content and (now - last_content_time) >= 1.5:
                 state.last_output = pending_content
                 await on_new_message(state, pending_content)
