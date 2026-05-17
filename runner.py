@@ -47,6 +47,9 @@ def _is_private_target(token: str) -> bool:
     if "://" in token:
         parsed = urlparse(token)
         host = parsed.hostname or token
+    elif ":" in host and host.count(":") > 1:
+        # Likely IPv6 — use raw host, skip port splitting
+        host = host.split("/")[0].split("]")[0].lstrip("[")
     else:
         host = host.split("/")[0].split(":")[0]
     try:
