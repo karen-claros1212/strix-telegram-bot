@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.strix.telegram-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dianamilena/.local/pipx/venvs/strix-agent/bin/python</string>
+        <string>-m</string>
+        <string>strix_telegram_bot</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dianamilena/.openclaw/workspace</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/dianamilena/.openclaw/workspace/strix_telegram_bot/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/dianamilena/.openclaw/workspace/strix_telegram_bot/stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DOCKER_HOST</key>
+        <string>unix:///Users/dianamilena/.colima/default/docker.sock</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

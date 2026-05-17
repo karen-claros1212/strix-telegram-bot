@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
+import subprocess
 import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -38,6 +40,69 @@ def setup_logging() -> None:
 log = logging.getLogger("strix_bot")
 
 
+def cleanup_stale_containers() -> int:
+    """Remove any orphaned strix-scan-* containers from previous bot runs."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=strix-scan-", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        containers = [c.strip() for c in result.stdout.splitlines() if c.strip()]
+        if not containers:
+            log.debug("No stale strix containers found")
+            return 0
+
+        removed = 0
+        for name in containers:
+            proc = subprocess.run(
+                ["docker", "rm", "-f", name],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0:
+                log.info("🧹 Removed stale container: %s", name)
+                removed += 1
+            else:
+                log.warning("Failed to remove stale container %s: %s", name, proc.stderr.strip())
+        return removed
+    except subprocess.TimeoutExpired:
+        log.warning("Timeout listing stale containers")
+        return 0
+    except FileNotFoundError:
+        log.debug("Docker not available, skipping container cleanup")
+        return 0
+    except Exception as e:
+        log.warning("Error cleaning stale containers: %s", e)
+        return 0
+
+
+def cleanup_orphaned_runs(work_root: Path, max_age_hours: int = 2) -> int:
+    """Remove run directories whose containers are already gone (orphaned)."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=strix-scan-", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        active_containers = set(c.strip() for c in result.stdout.splitlines() if c.strip())
+    except Exception:
+        active_containers = set()
+
+    cutoff = time.time() - (max_age_hours * 3600)
+    removed = 0
+    for entry in work_root.iterdir():
+        if not entry.is_dir() or len(entry.name) < 8:
+            continue
+        job_id = entry.name
+        container_name = f"strix-scan-{job_id}"
+        if container_name in active_containers:
+            continue
+        mtime = entry.stat().st_mtime
+        if mtime < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+            log.info("Removed orphaned run: %s (no container, age > %dh)", job_id, max_age_hours)
+            removed += 1
+    return removed
+
+
 def cleanup_old_runs(work_root: Path, max_age_days: int = 7) -> int:
     cutoff = time.time() - (max_age_days * 86_400)
     removed = 0
@@ -58,13 +123,23 @@ def main() -> None:
     log.info("Strix Telegram Bot starting...")
 
     settings = load_settings()
-    log.info("Settings: users=%s chats=%s timeout=%ds work_root=%s",
+    log.info("Settings: users=%s chats=%s timeout=%ds work_root=%s max_jobs=%d",
              settings.allowed_users, settings.allowed_chats,
-             settings.job_timeout_seconds, settings.work_root)
+             settings.job_timeout_seconds, settings.work_root,
+             settings.max_concurrent_jobs)
+
+    # Startup cleanup: stale containers + orphaned runs
+    stale_containers = cleanup_stale_containers()
+    if stale_containers:
+        log.info("Startup: removed %d stale container(s)", stale_containers)
+
+    orphaned = cleanup_orphaned_runs(settings.work_root)
+    if orphaned:
+        log.info("Startup: removed %d orphaned run(s)", orphaned)
 
     cleaned = cleanup_old_runs(settings.work_root)
     if cleaned:
-        log.info("Cleanup removed %d old run(s)", cleaned)
+        log.info("Startup: removed %d old run(s)", cleaned)
     else:
         log.debug("No old runs to clean up")
 

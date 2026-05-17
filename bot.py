@@ -43,6 +43,8 @@ class BotService:
         )
         self.runner = JobRunner(settings.work_root, settings.job_timeout_seconds)
         self.active_jobs: dict[int, JobState] = {}
+        self._active_job_count = 0
+        self._job_count_lock = asyncio.Lock()
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat:
@@ -76,6 +78,17 @@ class BotService:
                 self.active_jobs.pop(user_id, None)
                 log.info("Cleaned up finished job for user %d, treating as new scan", user_id)
 
+        # Rate limiting: check concurrent job capacity
+        async with self._job_count_lock:
+            if self._active_job_count >= self.settings.max_concurrent_jobs:
+                await update.message.reply_text(
+                    "⚠️ Strix está al máximo de trabajos concurrentes "
+                    f"({self.settings.max_concurrent_jobs}). "
+                    "Esperá a que termine uno e intentá de nuevo."
+                )
+                return
+            self._active_job_count += 1
+
         ctx = JobContext(
             user_id=user_id,
             chat_id=chat_id,
@@ -91,6 +104,8 @@ class BotService:
         except Exception:
             self.active_jobs.pop(user_id, None)
             shutil.rmtree(state.work_dir, ignore_errors=True)
+            async with self._job_count_lock:
+                self._active_job_count -= 1
             await update.message.reply_text("Error descargando archivos adjuntos.")
             return
 
@@ -190,6 +205,8 @@ class BotService:
 
             job_state._on_complete_done = True
             self.active_jobs.pop(user_id, None)
+            async with self._job_count_lock:
+                self._active_job_count -= 1
 
         task = asyncio.create_task(self.runner.run_job(ctx, state, on_new_message, on_waiting, on_complete))
         self.runner._tasks[state.job_id] = task
