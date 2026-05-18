@@ -307,6 +307,7 @@ class JobRunner:
         pending_content = ""
         last_content_time = 0.0
         _auto_continued = False
+        _finalized = False
 
         while not agent_task.done():
             await asyncio.sleep(0.5)
@@ -335,14 +336,24 @@ class JobRunner:
                     await on_new_message(state, pending_content)
                     pending_content = ""
                 await on_waiting(state)
-                # Si enviamos reportes y el agente pregunta si continuar,
-                # responderle automáticamente que sí para que siga con los
-                # siguientes targets (solo la primera vez)
+
                 if getattr(state, '_reports_pre_sent', False) and not _auto_continued:
+                    # Primer waiting: hay más targets por escanear — auto-continuar
                     _auto_continued = True
                     log.info("Auto-continuing job %s after report delivery", state.job_id)
                     agent.state.add_message("user", "continua con el siguiente target")
                     agent.state.resume_from_waiting()
+                elif getattr(state, '_reports_pre_sent', False) and _auto_continued and not _finalized:
+                    # Segundo waiting: ya no hay más targets — finalizar el scan
+                    _finalized = True
+                    log.info("Finalizing job %s — all targets scanned, signaling agent to complete", state.job_id)
+                    agent.state.add_message("user", "el scan ha terminado, finaliza el reporte y completa el trabajo")
+                    agent.state.resume_from_waiting()
+                elif getattr(state, '_reports_pre_sent', False) and _auto_continued and _finalized:
+                    # Tercer waiting: el agente no procesó la señal de finalización
+                    log.info("Agent unresponsive after finalization signal, canceling job %s", state.job_id)
+                    agent_task.cancel()
+                    break
             elif pending_content and (now - last_content_time) >= 1.5:
                 state.last_output = pending_content
                 await on_new_message(state, pending_content)
