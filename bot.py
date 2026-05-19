@@ -77,7 +77,7 @@ class BotService:
             if self.runner.is_running(state.job_id):
                 agent = self.runner.get_agent(state.job_id)
                 if agent and agent.state.is_waiting_for_input():
-                    if getattr(state, '_reports_pre_sent', False):
+                    if state.status in (JobStatus.COMPLETED, JobStatus.STOPPED, JobStatus.FAILED):
                         await update.message.reply_text("⏹️ El scan anterior ya finalizó. Mandá un nuevo target para empezar otro.")
                         return
                     agent.state.add_message("user", text)
@@ -337,7 +337,8 @@ def build_app(settings: Settings) -> Application:
     app = Application.builder().token(settings.token).build()
     app.add_handler(CallbackQueryHandler(service.on_stop, pattern=f"^{STOP_CALLBACK}$"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, service.on_message))
-    app.add_error_handler(lambda update, context: log.exception(
+    app.add_error_handler(lambda update, context: log.error(
         "Telegram polling error: %s", context.error,
+        exc_info=context.error,
     ))
     return app
