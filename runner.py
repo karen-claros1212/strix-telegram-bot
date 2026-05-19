@@ -159,50 +159,51 @@ class JobRunner:
             "run_name": state.job_id,
         }
 
-        tracer = Tracer(state.job_id)
-        tracer.set_scan_config(scan_config)
-        set_global_tracer(tracer)
-
-        agent = StrixAgent(agent_config)
-        self._agents[state.job_id] = agent
-
-        agent_task = asyncio.create_task(agent.execute_scan(scan_config))
-        log.info("Job %s running: target=%s interactive=True timeout=%ds",
-                 state.job_id, target_info_list, self.timeout_seconds)
-
-        if ctx.attachments:
-            try:
-                container_name = f"strix-scan-{state.job_id}"
-                container_ready = False
-                for _ in range(30):
-                    proc = await asyncio.create_subprocess_exec(
-                        "docker", "inspect", "-f", "{{.State.Status}}", container_name,
-                        stdout=asyncio.PIPE, stderr=asyncio.DEVNULL,
-                    )
-                    stdout, _ = await proc.communicate()
-                    if stdout.strip() == b"running":
-                        container_ready = True
-                        break
-                    await asyncio.sleep(1)
-
-                if not container_ready:
-                    log.warning("Container %s not ready after 30s, skipping file copy", container_name)
-                else:
-                    for file_path in ctx.attachments:
-                        dest = f"{container_name}:/workspace/{file_path.name}"
-                        proc = await asyncio.create_subprocess_exec(
-                            "docker", "cp", str(file_path), dest,
-                            stdout=asyncio.DEVNULL, stderr=asyncio.PIPE,
-                        )
-                        _, stderr = await proc.communicate()
-                        if proc.returncode == 0:
-                            log.info("Copied %s to sandbox:/workspace/", file_path.name)
-                        else:
-                            log.warning("docker cp failed for %s: %s", file_path.name, stderr.decode().strip())
-            except Exception as e:
-                log.warning("Error copying files to sandbox: %s", e)
-
+        agent_task = None
         try:
+            tracer = Tracer(state.job_id)
+            tracer.set_scan_config(scan_config)
+            set_global_tracer(tracer)
+
+            agent = StrixAgent(agent_config)
+            self._agents[state.job_id] = agent
+
+            agent_task = asyncio.create_task(agent.execute_scan(scan_config))
+            log.info("Job %s running: target=%s interactive=True timeout=%ds",
+                     state.job_id, target_info_list, self.timeout_seconds)
+
+            if ctx.attachments:
+                try:
+                    container_name = f"strix-scan-{state.job_id}"
+                    container_ready = False
+                    for _ in range(30):
+                        proc = await asyncio.create_subprocess_exec(
+                            "docker", "inspect", "-f", "{{.State.Status}}", container_name,
+                            stdout=asyncio.PIPE, stderr=asyncio.DEVNULL,
+                        )
+                        stdout, _ = await proc.communicate()
+                        if stdout.strip() == b"running":
+                            container_ready = True
+                            break
+                        await asyncio.sleep(1)
+
+                    if not container_ready:
+                        log.warning("Container %s not ready after 30s, skipping file copy", container_name)
+                    else:
+                        for file_path in ctx.attachments:
+                            dest = f"{container_name}:/workspace/{file_path.name}"
+                            proc = await asyncio.create_subprocess_exec(
+                                "docker", "cp", str(file_path), dest,
+                                stdout=asyncio.DEVNULL, stderr=asyncio.PIPE,
+                            )
+                            _, stderr = await proc.communicate()
+                            if proc.returncode == 0:
+                                log.info("Copied %s to sandbox:/workspace/", file_path.name)
+                            else:
+                                log.warning("docker cp failed for %s: %s", file_path.name, stderr.decode().strip())
+                except Exception as e:
+                    log.warning("Error copying files to sandbox: %s", e)
+
             try:
                 await asyncio.wait_for(
                     self._monitor_agent(state, agent, agent_task, on_new_message, on_waiting),
@@ -235,11 +236,12 @@ class JobRunner:
             state.status = JobStatus.COMPLETED
             await on_complete(state)
         except asyncio.CancelledError:
-            agent_task.cancel()
-            try:
-                await agent_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if agent_task is not None:
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if getattr(state, '_reports_pre_sent', False):
                 state.exit_code = 0
                 state.status = JobStatus.COMPLETED
@@ -247,20 +249,22 @@ class JobRunner:
                 state.status = JobStatus.STOPPED
             await on_complete(state)
         except Exception as e:
-            agent_task.cancel()
-            try:
-                await agent_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if agent_task is not None:
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             state.status = JobStatus.FAILED
             state.last_output = str(e)
             await on_complete(state)
         except BaseException:
-            agent_task.cancel()
-            try:
-                await agent_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if agent_task is not None:
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             state.status = JobStatus.FAILED
             state.last_output = "Job interrumpido"
             await on_complete(state)
