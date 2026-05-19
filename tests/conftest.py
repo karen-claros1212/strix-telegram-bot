@@ -1,6 +1,5 @@
 """Pytest configuration for Strix Telegram Bot tests."""
 
-import pytest
 
 
 def pytest_configure(config):

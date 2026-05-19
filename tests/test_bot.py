@@ -17,12 +17,16 @@ try:
 except ImportError:
     HAS_STRIX = False
 
-from strix_telegram_bot.config import Settings, _parse_id_list, load_env_file
-from strix_telegram_bot.security import AccessPolicy
+try:
+    from strix_telegram_bot.bot import _safe_filename
+    HAS_BOT = True
+except ImportError:
+    HAS_BOT = False
+
+from strix_telegram_bot.config import _parse_id_list, load_env_file
 from strix_telegram_bot.instructions import build_instruction
 from strix_telegram_bot.models import JobState, JobStatus, utc_now
-from strix_telegram_bot.bot import _safe_filename
-
+from strix_telegram_bot.security import AccessPolicy
 
 # ═══════════════════════════════════════════════════════════════
 # config.py
@@ -206,34 +210,56 @@ class TestSettings:
         for k in list(os.environ):
             if k.startswith("STRIX_") or k == "LLM_API_KEY":
                 os.environ.pop(k, None)
-        # Create a temp .env_bot without token
-        with tempfile.TemporaryDirectory() as tmp:
-            fake_env = Path(tmp) / ".env_bot"
-            fake_env.write_text('STRIX_TG_ALLOWED_USERS="1"\n')
-            old_cwd = os.getcwd()
-            os.chdir(tmp)
-            try:
-                from strix_telegram_bot.config import load_settings
-                with pytest.raises(ValueError, match="STRIX_TG_TOKEN"):
-                    load_settings()
-            finally:
-                os.chdir(old_cwd)
+        # Temporarily remove real .env_bot if it exists alongside config.py
+        # __file__ = .../strix_telegram_bot/tests/test_bot.py,
+        # so .parent.parent = .../strix_telegram_bot/
+        pkg_dir = Path(__file__).resolve().parent.parent
+        real_env = pkg_dir / ".env_bot"
+        moved = False
+        if real_env.exists():
+            real_env.rename(real_env.with_suffix(".env_bot.bak"))
+            moved = True
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_env = Path(tmp) / ".env_bot"
+                fake_env.write_text('STRIX_TG_ALLOWED_USERS="1"\n')
+                old_cwd = os.getcwd()
+                os.chdir(tmp)
+                try:
+                    from strix_telegram_bot.config import load_settings
+                    with pytest.raises(ValueError, match="STRIX_TG_TOKEN"):
+                        load_settings()
+                finally:
+                    os.chdir(old_cwd)
+        finally:
+            if moved:
+                real_env.with_suffix(".env_bot.bak").rename(real_env)
 
     def test_raises_without_users(self):
         for k in list(os.environ):
             if k.startswith("STRIX_") or k == "LLM_API_KEY":
                 os.environ.pop(k, None)
-        with tempfile.TemporaryDirectory() as tmp:
-            fake_env = Path(tmp) / ".env_bot"
-            fake_env.write_text('STRIX_TG_TOKEN="t"\n')
-            old_cwd = os.getcwd()
-            os.chdir(tmp)
-            try:
-                from strix_telegram_bot.config import load_settings
-                with pytest.raises(ValueError, match="STRIX_TG_ALLOWED_USERS"):
-                    load_settings()
-            finally:
-                os.chdir(old_cwd)
+        pkg_dir = Path(__file__).resolve().parent.parent
+        real_env = pkg_dir / ".env_bot"
+        moved = False
+        if real_env.exists():
+            real_env.rename(real_env.with_suffix(".env_bot.bak"))
+            moved = True
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_env = Path(tmp) / ".env_bot"
+                fake_env.write_text('STRIX_TG_TOKEN="t"\n')
+                old_cwd = os.getcwd()
+                os.chdir(tmp)
+                try:
+                    from strix_telegram_bot.config import load_settings
+                    with pytest.raises(ValueError, match="STRIX_TG_ALLOWED_USERS"):
+                        load_settings()
+                finally:
+                    os.chdir(old_cwd)
+        finally:
+            if moved:
+                real_env.with_suffix(".env_bot.bak").rename(real_env)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -460,6 +486,7 @@ class TestResolveTarget:
 # bot.py
 # ═══════════════════════════════════════════════════════════════
 
+@pytest.mark.skipif(not HAS_BOT, reason="bot module not available (strix missing)")
 class TestSafeFilename:
     def test_basic(self):
         assert _safe_filename("test.txt") == "test.txt"
