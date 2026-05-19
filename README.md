@@ -8,7 +8,7 @@ Send a URL, domain, or file to the bot, and Strix runs a full penetration test. 
 
 - Send URLs, domains, IPs, or files as targets
 - Real-time scan progress updates
-- STOP button to cancel any scan
+- STOP button always visible on status message throughout the scan
 - Auto-generated Markdown report + CSV on completion
 - Interactive mode — Strix asks questions, you answer in the chat
 - User/chat whitelist for access control

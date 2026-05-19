@@ -42,10 +42,24 @@ You receive:
 
 | Status | Meaning |
 |---|---|
-| COMPLETED | Scan finished with report |
-| FAILED | Scan encountered an error |
-| STOPPED | User pressed STOP |
-| Timeout | Job exceeded time limit (2h default) |
+| 🟢 COMPLETED | Scan finished with report |
+| 🔴 FAILED | Scan encountered an error |
+| 🛑 STOPPED | User pressed STOP |
+| ⏰ Timeout | Job exceeded time limit (2h default) |
+
+### Status message
+
+A persistent status message at the top of the chat keeps you informed:
+
+| Icon | Phase |
+|---|---|
+| 🚀 | Scan starting |
+| 🔍 *preview* | Strix working — latest action shown |
+| 📤 | Reports delivered, scan continuing |
+| ⏸ | Strix waiting for your input |
+| 🏁 | Scan completed |
+
+The **STOP button** stays visible on the status message throughout the entire scan until completion.
 
 ## Best Practices
 

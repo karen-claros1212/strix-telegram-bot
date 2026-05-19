@@ -141,11 +141,30 @@ class BotService:
             try:
                 for i in range(0, len(text), 4000):
                     await update.message.chat.send_message(text[i:i+4000])
+                # Mantener STOP visible — actualizar status_msg
+                preview = text[:80].replace('\n', ' ')
+                if len(text) > 80:
+                    preview += '…'
+                try:
+                    await status_msg.edit_text(
+                        f"🔍 Strix trabajando…\n{preview}",
+                        reply_markup=stop_keyboard
+                    )
+                except Exception:
+                    pass
             except Exception:
                 log.exception("Error sending message for job %s", job_state.job_id)
 
         async def on_waiting(job_state: JobState) -> None:
             if getattr(job_state, '_reports_pre_sent', False):
+                # Mantener STOP visible mientras espera
+                try:
+                    await status_msg.edit_text(
+                        "⏸ Strix procesando resultados…",
+                        reply_markup=stop_keyboard
+                    )
+                except Exception:
+                    pass
                 return
 
             report_files = list(job_state.work_dir.rglob("penetration_test_report.md"))
@@ -181,8 +200,22 @@ class BotService:
                     log.exception("Error sending report for job %s", job_state.job_id)
 
                 job_state._reports_pre_sent = True
+                try:
+                    await status_msg.edit_text(
+                        "📤 Reportes enviados. Strix continúa…",
+                        reply_markup=stop_keyboard
+                    )
+                except Exception:
+                    pass
                 return
 
+            try:
+                await status_msg.edit_text(
+                    "⏸ Strix esperando instrucciones. Respondé acá.",
+                    reply_markup=stop_keyboard
+                )
+            except Exception:
+                pass
             try:
                 await update.message.chat.send_message("🧠 *Strix está esperando instrucciones.* Responde enviando un mensaje normal aquí.", parse_mode="Markdown")
             except Exception:
