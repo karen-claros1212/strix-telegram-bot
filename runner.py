@@ -326,6 +326,17 @@ class JobRunner:
                             else:
                                 pending_content = content
                                 last_content_time = now
+                    # Detectar mensaje del usuario (no auto-generado) y resetear estado
+                    if msg.get("role") == "user" and msg.get("content"):
+                        content = msg.get("content", "").strip()
+                        if content and content not in (
+                            "continua con el siguiente target",
+                            "el scan ha terminado, finaliza el reporte y completa el trabajo",
+                        ):
+                            if _auto_continued or _finalized:
+                                _auto_continued = False
+                                _finalized = False
+                                log.info("User injected message, reset auto-continue state for job %s", state.job_id)
                 last_msg_count = len(current_msgs)
 
             is_waiting = agent.state.is_waiting_for_input()
