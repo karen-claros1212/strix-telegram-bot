@@ -148,7 +148,7 @@ class BotService:
         async def on_new_message(job_state: JobState, text: str) -> None:
             try:
                 for i in range(0, len(text), 4000):
-                    await update.message.chat.send_message(text[i:i+4000])
+                    await update.message.chat.send_message(text[i:i+4000], parse_mode=None)
                 # Mantener STOP visible — actualizar status_msg
                 preview = text[:80].replace('\n', ' ')
                 if len(text) > 80:

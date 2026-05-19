@@ -65,7 +65,8 @@ def _resolve_target(text: str, attachments: list[Path], work_root: Path | None =
     if attachments:
         targets.extend([str(path) for path in attachments])
 
-    for token in text.split():
+    for raw_token in text.split():
+        token = raw_token.rstrip(".,;:!?)>\"'")
         if _is_private_target(token):
             continue
         if token.startswith("http://") or token.startswith("https://"):
@@ -254,6 +255,16 @@ class JobRunner:
             state.status = JobStatus.FAILED
             state.last_output = str(e)
             await on_complete(state)
+        except BaseException:
+            agent_task.cancel()
+            try:
+                await agent_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            state.status = JobStatus.FAILED
+            state.last_output = "Job interrumpido"
+            await on_complete(state)
+            raise
         finally:
             self._tasks.pop(state.job_id, None)
             self._agents.pop(state.job_id, None)
