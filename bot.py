@@ -126,7 +126,15 @@ class BotService:
 
         ctx.attachments = attachments
         instruction = build_instruction(text, attachments)
-        state.instruction_path.write_text(instruction)
+        try:
+            state.instruction_path.write_text(instruction)
+        except Exception:
+            self.active_jobs.pop(user_id, None)
+            shutil.rmtree(state.work_dir, ignore_errors=True)
+            async with self._job_count_lock:
+                self._active_job_count -= 1
+            await update.message.reply_text("Error escribiendo instrucción del scan.")
+            return
 
         log.info("Job %s created: user=%d text_len=%d attachments=%d text=%s",
                  state.job_id, user_id, len(text), len(attachments), ctx.text)
