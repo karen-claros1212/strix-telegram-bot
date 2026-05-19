@@ -30,11 +30,11 @@ from telegram.ext import (
     filters,
 )
 
-from config import Settings
-from instructions import build_instruction
-from models import JobContext, JobState, JobStatus
-from runner import JobRunner
-from security import AccessPolicy
+from .config import Settings
+from .instructions import build_instruction
+from .models import JobContext, JobState, JobStatus
+from .runner import JobRunner
+from .security import AccessPolicy
 
 log = logging.getLogger("strix_bot")
 
@@ -139,15 +139,8 @@ class BotService:
 
         async def on_new_message(job_state: JobState, text: str) -> None:
             try:
-                import re
-                # Filtrar tool calls XML intermedios de Strix
-                clean = re.sub(r"<function=[^>]+>.*?</function>", "", text, flags=re.DOTALL)
-                clean = re.sub(r"<parameter=[^>]+>.*?</parameter>", "", clean, flags=re.DOTALL)
-                clean = clean.strip()
-                if not clean:
-                    return
-                for i in range(0, len(clean), 4000):
-                    await update.message.chat.send_message(clean[i:i+4000])
+                for i in range(0, len(text), 4000):
+                    await update.message.chat.send_message(text[i:i+4000])
             except Exception:
                 log.exception("Error sending message for job %s", job_state.job_id)
 

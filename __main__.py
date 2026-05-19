@@ -25,8 +25,8 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from bot import build_app
-from config import load_settings
+from .bot import build_app
+from .config import load_settings
 
 
 def setup_logging() -> None:
