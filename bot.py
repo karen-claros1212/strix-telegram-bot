@@ -239,7 +239,7 @@ class BotService:
             except Exception:
                 log.exception("Error editing status message for job %s", job_state.job_id)
 
-            if job_state.status == JobStatus.COMPLETED and not getattr(job_state, '_reports_pre_sent', False):
+            if job_state.status == JobStatus.COMPLETED:
                 try:
                     report_files = list(job_state.work_dir.rglob("penetration_test_report.md"))
                     csv_files = list(job_state.work_dir.rglob("vulnerabilities.csv"))
