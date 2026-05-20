@@ -61,6 +61,9 @@ class BotService:
         self._active_job_count = 0
         self._job_count_lock = asyncio.Lock()
 
+    async def on_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        log.error("Telegram polling error: %s", context.error, exc_info=context.error)
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat:
             return
@@ -345,8 +348,5 @@ def build_app(settings: Settings) -> Application:
     app = Application.builder().token(settings.token).build()
     app.add_handler(CallbackQueryHandler(service.on_stop, pattern=f"^{STOP_CALLBACK}$"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, service.on_message))
-    app.add_error_handler(lambda update, context: log.error(
-        "Telegram polling error: %s", context.error,
-        exc_info=context.error,
-    ))
+    app.add_error_handler(service.on_error)
     return app
