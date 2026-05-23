@@ -291,7 +291,7 @@ class JobRunner:
                     log.debug("Contenedor %s no existia (ya limpio)", container_name)
                 else:
                     log.warning("docker rm -f %s retorno codigo %d", container_name, proc.returncode)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("Timeout eliminando contenedor %s", container_name)
             except Exception as e:
                 log.debug("Fallback cleanup para %s: %s", container_name, e)

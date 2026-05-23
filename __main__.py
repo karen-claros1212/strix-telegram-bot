@@ -15,9 +15,7 @@ limitations under the License.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
 import shutil
 import subprocess
 import time
@@ -35,8 +33,9 @@ def setup_logging() -> None:
         return
     logger.setLevel(logging.DEBUG)
 
+    Path("logs").mkdir(exist_ok=True)
     handler = RotatingFileHandler(
-        "bot.log",
+        "logs/bot.log",
         maxBytes=10_485_760,
         backupCount=5,
         encoding="utf-8",

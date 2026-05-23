@@ -62,7 +62,10 @@ class BotService:
         self._job_count_lock = asyncio.Lock()
 
     async def on_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        log.error("Telegram polling error: %s", context.error, exc_info=context.error)
+        try:
+            log.error("Telegram polling error: %s", context.error, exc_info=context.error)
+        except Exception:
+            pass
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat:
