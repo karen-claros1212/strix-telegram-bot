@@ -1,23 +1,10 @@
-"""Copyright 2026 Diego Claros
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -38,7 +25,37 @@ from .security import AccessPolicy
 
 log = logging.getLogger("strix_bot")
 
+MODE_CALLBACK_CHAT = "mode_chat"
+MODE_CALLBACK_SCAN = "mode_scan"
 STOP_CALLBACK = "stop_job"
+
+
+@dataclass
+class PendingContext:
+    text: str
+    message_id: int
+    has_attachments: bool = False
+
+
+_GREETINGS = frozenset({
+    "hola", "buenas", "buen dia", "buenos dias", "buenas tardes", "buenas noches",
+    "que tal", "como estas", "como andas", "hello", "hi", "hey", "que onda",
+})
+
+
+def _is_greeting(text: str) -> bool:
+    cleaned = text.strip().lower().rstrip("!.,;?¡¿")
+    if cleaned in _GREETINGS:
+        return True
+    if len(cleaned) > 25 or not cleaned:
+        return False
+    if "://" in cleaned:
+        return False
+    if re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", cleaned):
+        return False
+    if re.search(r"\b[a-z0-9]([a-z0-9-]*[a-z0-9])?\.[a-z]{2,}\b", cleaned):
+        return False
+    return cleaned in _GREETINGS or cleaned.split()[0] in _GREETINGS
 
 
 def _safe_filename(filename: str) -> str:
@@ -47,6 +64,28 @@ def _safe_filename(filename: str) -> str:
     safe = safe.replace("..", "_")
     safe = safe.replace("\x00", "")
     return safe or "attachment"
+
+
+def _mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💬 Chat", callback_data=MODE_CALLBACK_CHAT),
+            InlineKeyboardButton("🔍 Scan", callback_data=MODE_CALLBACK_SCAN),
+        ]
+    ])
+
+
+def _stop_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏹ STOP", callback_data=STOP_CALLBACK)]]
+    )
+
+
+def _has_attachments(message) -> bool:
+    return bool(message and (
+        message.document or message.photo or message.audio
+        or message.video or message.voice
+    ))
 
 
 class BotService:
@@ -60,6 +99,7 @@ class BotService:
         self.active_jobs: dict[int, JobState] = {}
         self._active_job_count = 0
         self._job_count_lock = asyncio.Lock()
+        self.pending_context: dict[int, PendingContext] = {}
 
     async def on_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -77,6 +117,7 @@ class BotService:
             return
 
         text = update.message.text or update.message.caption or ""
+        attachments_present = _has_attachments(update.message)
 
         if user_id in self.active_jobs:
             state = self.active_jobs[user_id]
@@ -95,42 +136,111 @@ class BotService:
                     await update.message.reply_text("Ya hay un job en curso. Strix esta procesando, usa STOP si quieres cancelarlo.")
                     return
             else:
-                # Job anterior ya terminó — limpiar y tratar como nuevo scan
                 self.active_jobs.pop(user_id, None)
                 log.info("Cleaned up finished job for user %d, treating as new scan", user_id)
 
-        # Rate limiting: check concurrent job capacity
-        async with self._job_count_lock:
-            if self._active_job_count >= self.settings.max_concurrent_jobs:
-                await update.message.reply_text(
-                    "⚠️ Strix está al máximo de trabajos concurrentes "
-                    f"({self.settings.max_concurrent_jobs}). "
-                    "Esperá a que termine uno e intentá de nuevo."
-                )
-                return
-            self._active_job_count += 1
+        if _is_greeting(text) and not attachments_present:
+            await update.message.reply_text(
+                "👋 ¡Hola! Soy **Strix**, tu asistente de ciberseguridad.\n\n"
+                "Para realizar un análisis enviame un mensaje con:\n"
+                "• Una **URL** o **IP** para escanear\n"
+                "• Un **archivo** para analizar\n"
+                "• Una **descripción** del target\n\n"
+                "Ej: *\"Escaneá este sitio: https://ejemplo.com\"* o *\"analizá este APK\"*"
+            )
+            return
 
+        if attachments_present:
+            async with self._job_count_lock:
+                if self._active_job_count >= self.settings.max_concurrent_jobs:
+                    await update.message.reply_text(
+                        "⚠️ Strix está al máximo de trabajos concurrentes "
+                        f"({self.settings.max_concurrent_jobs}). "
+                        "Esperá a que termine uno e intentá de nuevo."
+                    )
+                    return
+                self._active_job_count += 1
+
+            try:
+                attachments = await self._download_attachments(update, context)
+            except Exception:
+                async with self._job_count_lock:
+                    self._active_job_count -= 1
+                await update.message.reply_text("Error descargando archivos adjuntos.")
+                return
+
+            status_msg = await update.message.reply_text(
+                "🚀 Iniciando sesión de Strix...",
+                reply_markup=_stop_keyboard(),
+            )
+            await self._run_scan(
+                chat=update.message.chat,
+                user_id=user_id, chat_id=chat_id,
+                text=text, message_id=update.message.message_id,
+                attachments=attachments,
+                status_msg=status_msg,
+            )
+            return
+
+        self.pending_context[user_id] = PendingContext(
+            text=text,
+            message_id=update.message.message_id,
+            has_attachments=attachments_present,
+        )
+        await update.message.reply_text(
+            "¿Qué querés hacer con esto?",
+            reply_markup=_mode_keyboard(),
+        )
+
+    async def on_mode_select(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        if not query.from_user or not query.message:
+            return
+        user_id = query.from_user.id
+        chat_id = query.message.chat.id
+
+        pending = self.pending_context.pop(user_id, None)
+        if not pending:
+            try:
+                await query.edit_message_text("⏳ Ese mensaje ya expiró. Mandá uno nuevo.")
+            except Exception:
+                pass
+            return
+
+        if query.data == MODE_CALLBACK_CHAT:
+            await self._handle_chat_mode(query, user_id, chat_id, pending)
+        elif query.data == MODE_CALLBACK_SCAN:
+            await self._handle_scan_mode(query, user_id, chat_id, pending)
+
+    async def _handle_chat_mode(
+        self, query, user_id: int, chat_id: int, pending: PendingContext,
+    ) -> None:
+        try:
+            await query.edit_message_text("💬 Modo chat activado.")
+        except Exception:
+            pass
+
+    async def _run_scan(
+        self,
+        chat,
+        user_id: int,
+        chat_id: int,
+        text: str,
+        message_id: int,
+        attachments: list[Path],
+        status_msg,
+    ) -> None:
         ctx = JobContext(
             user_id=user_id,
             chat_id=chat_id,
-            message_id=update.message.message_id,
+            message_id=message_id,
             text=text,
-            attachments=[],
+            attachments=attachments,
         )
         state = self.runner.create_job(ctx)
         self.active_jobs[user_id] = state
 
-        try:
-            attachments = await self._download_attachments(update, context, state.work_dir / "attachments")
-        except Exception:
-            self.active_jobs.pop(user_id, None)
-            shutil.rmtree(state.work_dir, ignore_errors=True)
-            async with self._job_count_lock:
-                self._active_job_count -= 1
-            await update.message.reply_text("Error descargando archivos adjuntos.")
-            return
-
-        ctx.attachments = attachments
         instruction = build_instruction(text, attachments)
         try:
             state.instruction_path.write_text(instruction)
@@ -139,30 +249,25 @@ class BotService:
             shutil.rmtree(state.work_dir, ignore_errors=True)
             async with self._job_count_lock:
                 self._active_job_count -= 1
-            await update.message.reply_text("Error escribiendo instrucción del scan.")
+            await status_msg.edit_text("Error escribiendo instrucción del scan.")
             return
 
         log.info("Job %s created: user=%d text_len=%d attachments=%d text=%s",
-                 state.job_id, user_id, len(text), len(attachments), ctx.text)
+                 state.job_id, user_id, len(text), len(attachments), text)
 
-        await update.message.chat.send_action(ChatAction.TYPING)
-        stop_keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("STOP", callback_data=STOP_CALLBACK)]]
-        )
-        status_msg = await update.message.reply_text("🚀 Iniciando sesión de Strix...", reply_markup=stop_keyboard)
+        await chat.send_action(ChatAction.TYPING)
 
         async def on_new_message(job_state: JobState, text: str) -> None:
             try:
                 for i in range(0, len(text), 4000):
-                    await update.message.chat.send_message(text[i:i+4000], parse_mode=None)
-                # Mantener STOP visible — actualizar status_msg
+                    await chat.send_message(text[i:i+4000], parse_mode=None)
                 preview = text[:80].replace('\n', ' ')
                 if len(text) > 80:
                     preview += '…'
                 try:
                     await status_msg.edit_text(
                         f"🔍 Strix trabajando…\n{preview}",
-                        reply_markup=stop_keyboard
+                        reply_markup=_stop_keyboard()
                     )
                 except Exception:
                     pass
@@ -171,11 +276,10 @@ class BotService:
 
         async def on_waiting(job_state: JobState) -> None:
             if getattr(job_state, '_reports_pre_sent', False):
-                # Mantener STOP visible mientras espera
                 try:
                     await status_msg.edit_text(
                         "⏸ Strix procesando resultados…",
-                        reply_markup=stop_keyboard
+                        reply_markup=_stop_keyboard()
                     )
                 except Exception:
                     pass
@@ -188,24 +292,23 @@ class BotService:
                 try:
                     for rf in report_files:
                         with open(rf, "rb") as f:
-                            await update.message.chat.send_document(
+                            await chat.send_document(
                                 document=f,
                                 filename=rf.name,
                                 caption=f"Reporte: {rf.parent.name if rf.parent != job_state.work_dir else 'general'}"
                             )
                     for cf in csv_files:
                         with open(cf, "rb") as f:
-                            await update.message.chat.send_document(
+                            await chat.send_document(
                                 document=f,
                                 filename=cf.name,
                                 caption="Vulnerabilidades encontradas."
                             )
-                    # También enviar vulnerabilidades individuales si no se envió reporte consolidado
                     if not report_files:
                         vuln_files = sorted(job_state.work_dir.rglob("vulnerabilities/vuln-*.md"))
                         for vf in vuln_files:
                             with open(vf, "rb") as f:
-                                await update.message.chat.send_document(
+                                await chat.send_document(
                                     document=f,
                                     filename=f"{vf.parent.name}/{vf.name}",
                                     caption=f"Vulnerabilidad: {vf.stem}"
@@ -217,7 +320,7 @@ class BotService:
                 try:
                     await status_msg.edit_text(
                         "📤 Reportes enviados. Strix continúa…",
-                        reply_markup=stop_keyboard
+                        reply_markup=_stop_keyboard()
                     )
                 except Exception:
                     pass
@@ -226,12 +329,15 @@ class BotService:
             try:
                 await status_msg.edit_text(
                     "⏸ Strix esperando instrucciones. Respondé acá.",
-                    reply_markup=stop_keyboard
+                    reply_markup=_stop_keyboard()
                 )
             except Exception:
                 pass
             try:
-                await update.message.chat.send_message("🧠 *Strix está esperando instrucciones.* Responde enviando un mensaje normal aquí.", parse_mode="Markdown")
+                await chat.send_message(
+                    "🧠 *Strix está esperando instrucciones.* Responde enviando un mensaje normal aquí.",
+                    parse_mode="Markdown"
+                )
             except Exception:
                 pass
 
@@ -247,9 +353,7 @@ class BotService:
             log.info("Job %s finished: status=%s exit_code=%s",
                      job_state.job_id, job_state.status.value, job_state.exit_code)
             try:
-                await status_msg.edit_text(
-                    f"🏁 Sesión {result}."
-                )
+                await status_msg.edit_text(f"🏁 Sesión {result}.")
             except Exception:
                 log.exception("Error editing status message for job %s", job_state.job_id)
 
@@ -260,14 +364,14 @@ class BotService:
 
                     for rf in report_files:
                         with open(rf, "rb") as f:
-                            await update.message.chat.send_document(
+                            await chat.send_document(
                                 document=f,
                                 filename=rf.name,
                                 caption=f"Reporte: {rf.parent.name if rf.parent != job_state.work_dir else 'general'}"
                             )
                     for cf in csv_files:
                         with open(cf, "rb") as f:
-                            await update.message.chat.send_document(
+                            await chat.send_document(
                                 document=f,
                                 filename=cf.name,
                                 caption="Listado de vulnerabilidades en CSV."
@@ -276,7 +380,7 @@ class BotService:
                         vuln_files = sorted(job_state.work_dir.rglob("vulnerabilities/vuln-*.md"))
                         for vf in vuln_files:
                             with open(vf, "rb") as f:
-                                await update.message.chat.send_document(
+                                await chat.send_document(
                                     document=f,
                                     filename=f"{vf.parent.name}/{vf.name}",
                                     caption=f"Vulnerabilidad: {vf.stem}"
@@ -292,26 +396,64 @@ class BotService:
         task = asyncio.create_task(self.runner.run_job(ctx, state, on_new_message, on_waiting, on_complete))
         self.runner._tasks[state.job_id] = task
 
+    async def _handle_scan_mode(
+        self, query, user_id: int, chat_id: int, pending: PendingContext,
+    ) -> None:
+        async with self._job_count_lock:
+            if self._active_job_count >= self.settings.max_concurrent_jobs:
+                try:
+                    await query.edit_message_text(
+                        "⚠️ Strix está al máximo de trabajos concurrentes "
+                        f"({self.settings.max_concurrent_jobs}). "
+                        "Esperá a que termine uno e intentá de nuevo."
+                    )
+                except Exception:
+                    pass
+                return
+            self._active_job_count += 1
+
+        status_msg = await query.message.chat.send_message(
+            "🚀 Inicializando scan...",
+            reply_markup=_stop_keyboard(),
+        )
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        await self._run_scan(
+            chat=query.message.chat,
+            user_id=user_id, chat_id=chat_id,
+            text=pending.text,
+            message_id=pending.message_id,
+            attachments=[],
+            status_msg=status_msg,
+        )
+
     async def on_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_user or not update.effective_chat:
+        query = update.callback_query
+        if not query or not query.from_user:
             return
-        user_id = update.effective_user.id
-        chat_id = update.effective_chat.id
-        if not self.policy.is_allowed(user_id, chat_id):
+        user_id = query.from_user.id
+        if not self.policy.is_allowed(user_id, query.message.chat.id if query.message else 0):
             return
         state = self.active_jobs.get(user_id)
         if not state:
             try:
-                await update.callback_query.answer("No hay job activo")
+                await query.answer("No hay job activo")
             except Exception:
                 pass
             return
         try:
-            await update.callback_query.answer("Deteniendo...")
+            await query.answer("⏹ Deteniendo scan...")
         except Exception:
             pass
         log.info("Stop requested for job %s by user %d", state.job_id, user_id)
         await self.runner.stop_job(state)
+        try:
+            await query.edit_message_text("⏹ Scan detenido.")
+        except Exception:
+            pass
 
     async def _download_attachments(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -349,6 +491,7 @@ class BotService:
 def build_app(settings: Settings) -> Application:
     service = BotService(settings)
     app = Application.builder().token(settings.token).build()
+    app.add_handler(CallbackQueryHandler(service.on_mode_select, pattern="^mode_(chat|scan)$"))
     app.add_handler(CallbackQueryHandler(service.on_stop, pattern=f"^{STOP_CALLBACK}$"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, service.on_message))
     app.add_error_handler(service.on_error)
