@@ -42,6 +42,12 @@ _GREETINGS = frozenset({
     "que tal", "como estas", "como andas", "hello", "hi", "hey", "que onda",
 })
 
+_SCAN_INTENT = frozenset({
+    "scan", "scanea", "escanea", "analiza", "analizá", "analizar",
+    "escanear", "scanear", "scannear", "hacer scan", "hacer un scan",
+    "analizalo", "escanearlo", "scanea esto", "escanea esto",
+})
+
 
 def _is_greeting(text: str) -> bool:
     cleaned = text.strip().lower().rstrip("!.,;?¡¿")
@@ -82,10 +88,26 @@ def _stop_keyboard() -> InlineKeyboardMarkup:
 
 
 def _has_attachments(message) -> bool:
-    return bool(message and (
+    if not message:
+        return False
+    return bool(
         message.document or message.photo or message.audio
         or message.video or message.voice
-    ))
+    )
+
+
+def _has_real_target(text: str) -> bool:
+    if not text.strip():
+        return False
+    if "://" in text:
+        return True
+    if re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", text):
+        return True
+    if re.search(r"\b[a-z0-9]([a-z0-9-]*[a-z0-9])?\.[a-z]{2,}\b", text):
+        return True
+    if len(text.strip()) > 100:
+        return True
+    return False
 
 
 class BotService:
@@ -100,6 +122,7 @@ class BotService:
         self._active_job_count = 0
         self._job_count_lock = asyncio.Lock()
         self.pending_context: dict[int, PendingContext] = {}
+        self.last_target: dict[int, str] = {}
 
     async def on_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -157,43 +180,42 @@ class BotService:
             return
 
         if attachments_present:
-            async with self._job_count_lock:
-                if self._active_job_count >= self.settings.max_concurrent_jobs:
-                    await update.message.reply_text(
-                        "⚠️ Strix está al máximo de trabajos concurrentes "
-                        f"({self.settings.max_concurrent_jobs}). "
-                        "Esperá a que termine uno e intentá de nuevo."
-                    )
-                    return
-                self._active_job_count += 1
-
             try:
                 attachments = await self._download_attachments(update, context)
             except Exception:
-                async with self._job_count_lock:
-                    self._active_job_count -= 1
                 await update.message.reply_text("Error descargando archivos adjuntos.")
                 return
 
-            try:
-                status_msg = await update.message.reply_text(
-                    "🚀 Iniciando sesión de Strix...",
-                    reply_markup=_stop_keyboard(),
-                )
-            except Exception:
-                async with self._job_count_lock:
-                    self._active_job_count -= 1
-                return
-
-            await self._run_scan(
-                chat=update.message.chat,
+            await self._trigger_scan(
+                update=update,
                 user_id=user_id, chat_id=chat_id,
-                text=text, message_id=update.message.message_id,
+                text=text,
+                target_message_id=update.message.message_id,
                 attachments=attachments,
-                status_msg=status_msg,
             )
             return
 
+        cleaned_text = text.strip().lower().rstrip("!.,;?¡¿")
+        if cleaned_text in _SCAN_INTENT and not attachments_present:
+            prev = self.pending_context.pop(user_id, None)
+            scan_text = None
+            if prev is not None and _has_real_target(prev.text):
+                scan_text = prev.text
+            else:
+                scan_text = self.last_target.get(user_id)
+            if scan_text:
+                log.info("Scan intent detected for user %d — scanning last target", user_id)
+                await self._trigger_scan(
+                    update=update,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    text=scan_text,
+                    target_message_id=prev.message_id if prev else 0,
+                )
+                return
+
+        if _has_real_target(text):
+            self.last_target[user_id] = text
         self.pending_context[user_id] = PendingContext(
             text=text,
             message_id=update.message.message_id,
@@ -213,12 +235,23 @@ class BotService:
         chat_id = query.message.chat.id
 
         pending = self.pending_context.pop(user_id, None)
-        if not pending:
-            try:
-                await query.edit_message_text("⏳ Ese mensaje ya expiró. Mandá uno nuevo.")
-            except Exception:
-                pass
-            return
+
+        if not pending or not pending.has_attachments and not _has_real_target(pending.text):
+            saved = self.last_target.get(user_id)
+            if saved:
+                pending = PendingContext(text=saved, message_id=0, has_attachments=False)
+            elif not pending:
+                try:
+                    await query.edit_message_text("⏳ Ese mensaje ya expiró. Mandá uno nuevo.")
+                except Exception:
+                    pass
+                return
+            else:
+                try:
+                    await query.edit_message_text("⏳ Ese contenido no es un target válido. Mandá URLs, IPs o un archivo.")
+                except Exception:
+                    pass
+                return
 
         if query.data == MODE_CALLBACK_CHAT:
             await self._handle_chat_mode(query, user_id, chat_id, pending)
@@ -232,6 +265,67 @@ class BotService:
             await query.edit_message_text("💬 Modo chat activado.")
         except Exception:
             pass
+
+    async def _trigger_scan(
+        self,
+        *,
+        update: Update | None = None,
+        query=None,
+        user_id: int,
+        chat_id: int,
+        text: str,
+        target_message_id: int,
+        attachments: list[Path] | None = None,
+    ) -> None:
+        async with self._job_count_lock:
+            if self._active_job_count >= self.settings.max_concurrent_jobs:
+                msg = (
+                    "⚠️ Strix está al máximo de trabajos concurrentes "
+                    f"({self.settings.max_concurrent_jobs}). "
+                    "Esperá a que termine uno e intentá de nuevo."
+                )
+                if query:
+                    try:
+                        await query.edit_message_text(msg)
+                    except Exception:
+                        pass
+                elif update:
+                    await update.message.reply_text(msg)
+                return
+            self._active_job_count += 1
+
+        try:
+            if query:
+                chat = query.message.chat
+                status_msg = await chat.send_message(
+                    "🚀 Inicializando scan...",
+                    reply_markup=_stop_keyboard(),
+                )
+            else:
+                chat = update.message.chat
+                status_msg = await update.message.reply_text(
+                    "🚀 Inicializando scan...",
+                    reply_markup=_stop_keyboard(),
+                )
+        except Exception:
+            async with self._job_count_lock:
+                self._active_job_count -= 1
+            return
+
+        try:
+            if query:
+                await query.message.delete()
+        except Exception:
+            pass
+
+        await self._run_scan(
+            chat=chat,
+            user_id=user_id, chat_id=chat_id,
+            text=text,
+            message_id=target_message_id,
+            attachments=attachments or [],
+            status_msg=status_msg,
+        )
 
     async def _run_scan(
         self,
@@ -414,41 +508,11 @@ class BotService:
     async def _handle_scan_mode(
         self, query, user_id: int, chat_id: int, pending: PendingContext,
     ) -> None:
-        async with self._job_count_lock:
-            if self._active_job_count >= self.settings.max_concurrent_jobs:
-                try:
-                    await query.edit_message_text(
-                        "⚠️ Strix está al máximo de trabajos concurrentes "
-                        f"({self.settings.max_concurrent_jobs}). "
-                        "Esperá a que termine uno e intentá de nuevo."
-                    )
-                except Exception:
-                    pass
-                return
-            self._active_job_count += 1
-
-        try:
-            status_msg = await query.message.chat.send_message(
-                "🚀 Inicializando scan...",
-                reply_markup=_stop_keyboard(),
-            )
-        except Exception:
-            async with self._job_count_lock:
-                self._active_job_count -= 1
-            return
-
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-
-        await self._run_scan(
-            chat=query.message.chat,
+        await self._trigger_scan(
+            query=query,
             user_id=user_id, chat_id=chat_id,
             text=pending.text,
-            message_id=pending.message_id,
-            attachments=[],
-            status_msg=status_msg,
+            target_message_id=pending.message_id,
         )
 
     async def on_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
