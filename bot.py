@@ -17,11 +17,11 @@ from telegram.ext import (
     filters,
 )
 
-from .config import Settings
-from .instructions import build_instruction
-from .models import JobContext, JobState, JobStatus
-from .runner import JobRunner
-from .security import AccessPolicy
+from config import Settings
+from instructions import build_instruction
+from models import JobContext, JobState, JobStatus
+from runner import JobRunner
+from security import AccessPolicy
 
 log = logging.getLogger("strix_bot")
 

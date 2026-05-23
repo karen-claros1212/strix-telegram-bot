@@ -32,7 +32,7 @@ from strix.llm.config import LLMConfig
 from strix.runtime import cleanup_runtime
 from strix.telemetry.tracer import Tracer, set_global_tracer
 
-from .models import JobContext, JobState, JobStatus, utc_now
+from models import JobContext, JobState, JobStatus, utc_now
 
 log = logging.getLogger("strix_bot")
 
