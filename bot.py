@@ -127,6 +127,12 @@ class BotService:
                     if state.status in (JobStatus.COMPLETED, JobStatus.STOPPED, JobStatus.FAILED):
                         await update.message.reply_text("⏹️ El scan anterior ya finalizó. Mandá un nuevo target para empezar otro.")
                         return
+                    if attachments_present:
+                        await update.message.reply_text("⚠️ No puedo recibir archivos a mitad de un análisis. Respondé solo con texto.")
+                        return
+                    if not text.strip():
+                        await update.message.reply_text("⚠️ Por favor, respondé con texto.")
+                        return
                     agent.state.add_message("user", text)
                     agent.state.resume_from_waiting()
                     log.info("Injected user response into job %s", state.job_id)
@@ -169,10 +175,16 @@ class BotService:
                 await update.message.reply_text("Error descargando archivos adjuntos.")
                 return
 
-            status_msg = await update.message.reply_text(
-                "🚀 Iniciando sesión de Strix...",
-                reply_markup=_stop_keyboard(),
-            )
+            try:
+                status_msg = await update.message.reply_text(
+                    "🚀 Iniciando sesión de Strix...",
+                    reply_markup=_stop_keyboard(),
+                )
+            except Exception:
+                async with self._job_count_lock:
+                    self._active_job_count -= 1
+                return
+
             await self._run_scan(
                 chat=update.message.chat,
                 user_id=user_id, chat_id=chat_id,
@@ -255,7 +267,10 @@ class BotService:
         log.info("Job %s created: user=%d text_len=%d attachments=%d text=%s",
                  state.job_id, user_id, len(text), len(attachments), text)
 
-        await chat.send_action(ChatAction.TYPING)
+        try:
+            await chat.send_action(ChatAction.TYPING)
+        except Exception:
+            pass
 
         async def on_new_message(job_state: JobState, text: str) -> None:
             try:
@@ -412,10 +427,16 @@ class BotService:
                 return
             self._active_job_count += 1
 
-        status_msg = await query.message.chat.send_message(
-            "🚀 Inicializando scan...",
-            reply_markup=_stop_keyboard(),
-        )
+        try:
+            status_msg = await query.message.chat.send_message(
+                "🚀 Inicializando scan...",
+                reply_markup=_stop_keyboard(),
+            )
+        except Exception:
+            async with self._job_count_lock:
+                self._active_job_count -= 1
+            return
+
         try:
             await query.message.delete()
         except Exception:

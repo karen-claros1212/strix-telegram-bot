@@ -81,10 +81,11 @@ def _resolve_target(text: str, attachments: list[Path], work_root: Path | None =
                     continue
             targets.append(token)
         elif re.match(r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', token):
-            # Dominio válido (ej: credialianza.com, sub.domain.com.co)
             if not token.startswith("http"):
                 token = "https://" + token
             targets.append(token)
+        elif re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', token):
+            targets.append(f"http://{token}")
 
     return targets
 
