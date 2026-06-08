@@ -7,13 +7,14 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/dianamilena/.local/pipx/venvs/strix-agent/bin/python</string>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
         <string>-m</string>
         <string>strix_telegram_bot</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/dianamilena/.openclaw/workspace</string>
+    <string>__BOT_DIR__</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -22,18 +23,20 @@
     <true/>
 
     <key>ThrottleInterval</key>
-    <integer>5</integer>
+    <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/dianamilena/.openclaw/workspace/strix_telegram_bot/stdout.log</string>
+    <string>__BOT_DIR__/logs/strix_bot_stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/dianamilena/.openclaw/workspace/strix_telegram_bot/stderr.log</string>
+    <string>__BOT_DIR__/logs/strix_bot_stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>DOCKER_HOST</key>
-        <string>unix:///Users/dianamilena/.colima/default/docker.sock</string>
+        <key>STRIX_BOT_DIR</key>
+        <string>__BOT_DIR__</string>
+        <key>STRIX_BIN</key>
+        <string>__STRIX_BIN__</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>

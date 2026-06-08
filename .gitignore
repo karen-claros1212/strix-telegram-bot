@@ -1,6 +1,6 @@
 # Environment / secrets
-.env_bot
 .env
+.env_bot
 *.env
 
 # Python
@@ -17,10 +17,11 @@ build/
 
 # Strix run output
 strix_runs/
+test_strix_runs/
 
 # Logs
 *.log
-bot.log
+logs/
 
 # IDE
 .vscode/
@@ -39,8 +40,5 @@ htmlcov/
 .coverage.*
 .pytest_cache/
 
-# Local
+# Local runtime artifacts
 scripts/
-logs/
-reports/
-backup_corrupt/

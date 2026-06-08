@@ -1,1 +1,0 @@
-"""Strix Telegram bot package."""
