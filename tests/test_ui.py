@@ -7,7 +7,6 @@ from strix_telegram_bot.ui.keyboards import (
     target_type_selector,
     depth_selector,
     job_panel,
-    approval_keyboard,
     parse_callback,
 )
 from strix_telegram_bot.ui.messages import (
@@ -51,12 +50,6 @@ class TestKeyboards:
         kb = job_panel(running=False)
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
         assert "STOP" not in texts
-
-    def test_approval_keyboard(self):
-        kb = approval_keyboard()
-        texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Authorize" in texts
-        assert "Cancel" in texts
 
     def test_parse_callback(self):
         parts = parse_callback("menu:new_pentest")

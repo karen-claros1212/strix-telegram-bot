@@ -7,7 +7,6 @@ from strix_telegram_bot.models import (
     JobPhase,
     ScanMode,
     TargetType,
-    ApprovalRequest,
 )
 
 
@@ -58,11 +57,4 @@ def test_target_type_values():
     assert TargetType.MULTI.value == "multi"
 
 
-def test_approval_request():
-    req = ApprovalRequest(
-        job_run_name="test", target=["x"],
-        mode=ScanMode.DEEP, reason="deep scan",
-        chat_id=123, message_id=456,
-    )
-    assert req.resolved is False
-    assert req.job_run_name == "test"
+

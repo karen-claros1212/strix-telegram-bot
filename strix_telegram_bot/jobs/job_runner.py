@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from pathlib import Path
@@ -32,6 +33,7 @@ class JobRunner:
         self._on_update: Optional[Callable[[JobState], None]] = None
         self._on_input_request: Optional[Callable[[str, str], None]] = None
         self._lock = threading.Lock()
+        self.update_queue: queue.Queue[JobState] = queue.Queue()
 
     def set_update_callback(self, func: Callable[[JobState], None]) -> None:
         self._on_update = func
@@ -128,17 +130,15 @@ class JobRunner:
 
             if self._reader:
                 self._reader.poll()
-                # Caido URL detection from stderr
-                if self._cli:
-                    _, stderr = self._cli.poll_output()
-                    if stderr:
-                        caido_url = self._caido.update_from_text(stderr)
-                        if caido_url:
-                            with self._lock:
-                                if self._state:
-                                    self._state.caido_url = caido_url
-                                    self._store.save(self._state)
-                            self._emit_update()
+                _, stderr = self._cli.poll_output()
+                if stderr:
+                    caido_url = self._caido.update_from_text(stderr)
+                    if caido_url:
+                        with self._lock:
+                            if self._state:
+                                self._state.caido_url = caido_url
+                                self._store.save(self._state)
+                        self._emit_update()
 
             with self._lock:
                 if self._state:
@@ -157,8 +157,11 @@ class JobRunner:
 
     def _emit_update(self) -> None:
         with self._lock:
-            if self._on_update and self._state:
-                self._on_update(self._state)
+            if self._state:
+                try:
+                    self.update_queue.put_nowait(self._state)
+                except queue.Full:
+                    pass
 
     def stop(self) -> bool:
         self._stop_event.set()
@@ -172,17 +175,21 @@ class JobRunner:
             return res
         return False
 
-    def inject_input(self, text: str) -> None:
-        if self._state:
-            self._state.chat_history.append({
-                "role": "user",
-                "text": text,
-                "timestamp": time.time(),
-            })
-            self._state.awaiting_input = False
-            self._state.input_prompt = None
-            self._store.save(self._state)
-            self._emit_update()
+    def inject_input(self, text: str) -> bool:
+        with self._lock:
+            if self._state:
+                self._state.chat_history.append({
+                    "role": "user",
+                    "text": text,
+                    "timestamp": time.time(),
+                })
+                self._state.awaiting_input = False
+                self._state.input_prompt = None
+                self._store.save(self._state)
+
+        if self._cli:
+            return self._cli.send_input(text)
+        return False
 
     def cleanup(self) -> None:
         self._stop_event.set()

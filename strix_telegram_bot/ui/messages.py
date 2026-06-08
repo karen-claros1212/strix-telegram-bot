@@ -122,15 +122,6 @@ def help_text() -> str:
     )
 
 
-def approval_text(targets: list[str], mode: ScanMode, reason: str) -> str:
-    return (
-        "Approval Required\n"
-        f"Target: {escape_md(', '.join(targets))}\n"
-        f"Mode: {_MODE_ICONS.get(mode, mode.value)}\n"
-        f"Reason: {escape_md(reason)}"
-    )
-
-
 def config_text(settings_dict: dict) -> str:
     lines = ["Configuration:"]
     for k, v in settings_dict.items():

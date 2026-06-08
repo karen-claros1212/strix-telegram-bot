@@ -81,19 +81,6 @@ def job_panel(running: bool = False) -> dict:
     ])
 
 
-def approval_keyboard() -> dict:
-    return build_inline_keyboard([
-        [
-            _btn("Authorize", _cb("approve", "yes")),
-            _btn("Cancel", _cb("approve", "no")),
-        ],
-        [
-            _btn("Authorize Deep", _cb("approve", "deep")),
-            _btn("Change Scope", _cb("approve", "scope")),
-        ],
-    ])
-
-
 def active_jobs_list(job_names: list[str]) -> dict:
     rows = []
     for name in job_names[:8]:
@@ -136,7 +123,6 @@ def menu_from_state(state: MenuState, **kwargs) -> dict:
         MenuState.MAIN: main_menu,
         MenuState.NEW_PENTEST_TARGET: target_type_selector,
         MenuState.NEW_PENTEST_DEPTH: depth_selector,
-        MenuState.APPROVAL: approval_keyboard,
         MenuState.CONFIG: config_menu,
     }
     builder = mapping.get(state, main_menu)

@@ -25,9 +25,11 @@ _PHASE_KEYWORDS: dict[str, JobPhase] = {
     "run.stopped": JobPhase.STOPPED,
 }
 
+_CHECKPOINT_FILE = "events_checkpoint.json"
+
 
 class EventStreamReader:
-    def __init__(self, run_name: str, poll_interval: float = 1.0) -> None:
+    def __init__(self, run_name: str, poll_interval: float = 1.0, restored: bool = False) -> None:
         self.run_name = run_name
         self.poll_interval = poll_interval
         self._event_path: Optional[Path] = None
@@ -35,6 +37,7 @@ class EventStreamReader:
         self._on_event: Optional[Callable[[StrixEvent], None]] = None
         self._on_phase_change: Optional[Callable[[JobPhase], None]] = None
         self._last_phase: Optional[JobPhase] = None
+        self._restored = restored
 
     def set_event_callback(self, func: Callable[[StrixEvent], None]) -> None:
         self._on_event = func
@@ -51,12 +54,38 @@ class EventStreamReader:
                 return candidate
         return None
 
+    def _checkpoint_path(self) -> Path:
+        base = self._event_path.parent if self._event_path else settings.strix_runs_dir / self.run_name
+        return base / _CHECKPOINT_FILE
+
+    def _load_checkpoint(self) -> int:
+        cp = self._checkpoint_path()
+        if cp.exists():
+            try:
+                data = json.loads(cp.read_text())
+                return data.get("position", 0)
+            except (json.JSONDecodeError, OSError):
+                pass
+        return 0
+
+    def _save_checkpoint(self) -> None:
+        cp = self._checkpoint_path()
+        try:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(json.dumps({"position": self._last_position, "updated_at": time.time()}))
+        except OSError:
+            pass
+
     def poll(self) -> list[StrixEvent]:
         if self._event_path is None:
             self._event_path = self._resolve_path()
             if self._event_path is None:
                 return []
-            self._last_position = self._event_path.stat().st_size
+
+            if self._restored:
+                self._last_position = self._load_checkpoint()
+            else:
+                self._last_position = 0
 
         current_size = self._event_path.stat().st_size
         if current_size <= self._last_position:
@@ -82,6 +111,7 @@ class EventStreamReader:
 
             self._last_position = f.tell()
 
+        self._save_checkpoint()
         return events
 
     def _parse(self, raw: dict) -> StrixEvent:
@@ -129,5 +159,6 @@ class EventStreamReader:
         return None
 
     def close(self) -> None:
+        self._save_checkpoint()
         self._on_event = None
         self._on_phase_change = None

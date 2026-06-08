@@ -39,9 +39,10 @@ class StrixBot:
         self._job_store = JobStore()
         self._process_controller = ProcessController()
         self._job_runner = JobRunner(self._job_store, self._process_controller)
-        self._job_runner.set_update_callback(self._on_job_update)
         self._chat_wizard: dict[int, bool] = {}
         self._last_broadcast: dict[str, float] = {}
+        self._active_job_chat_id: Optional[int] = None
+        self._active_job_message_id: Optional[int] = None
 
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
@@ -74,7 +75,6 @@ class StrixBot:
             "job": callback_jobs,
             "job_detail": self._callback_job_detail,
             "report": callback_reports,
-            "approve": self._callback_approve,
             "config": callback_config,
             "health": callback_health,
         }
@@ -244,40 +244,39 @@ class StrixBot:
                 "Job not found.", reply_markup=back_to_menu(),
             )
 
-    def _callback_approve(self, bot: Any, update: dict) -> None:
-        cb = update.get("callback_query", {})
-        data = cb.get("data", "")
-        chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
-        msg_id = cb.get("message", {}).get("message_id", "")
-        parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
-
-        if len(parts) < 2:
+    def _drain_update_queue(self) -> None:
+        if self._active_job_chat_id is None or self._active_job_message_id is None:
+            self._job_runner.update_queue.queue.clear()
             return
 
-        decision = parts[1]
-        from .safety.approval_gate import get_gate
-        gate = get_gate()
-        pending = gate.list_pending()
-        if pending:
-            req = pending[0]
-            approved = decision in ("yes", "deep")
-            gate.resolve(req.job_run_name, approved)
-            edit_message(
-                bot, chat_id, msg_id,
-                f"{'Approved' if approved else 'Cancelled'}",
-                reply_markup=back_to_menu(),
-            )
-            if approved:
-                self._launch_scan(
-                    bot, chat_id, msg_id,
-                    targets=req.target,
-                    mode=req.mode,
-                    force=True,
-                )
+        processed = False
+        while not self._job_runner.update_queue.empty():
+            try:
+                job = self._job_runner.update_queue.get_nowait()
+                if job:
+                    text = job_status_text(job)
+                    edit_message(
+                        self,
+                        self._active_job_chat_id,
+                        self._active_job_message_id,
+                        text,
+                        reply_markup=job_panel(running=job.is_active),
+                    )
+                    processed = True
+            except Exception:
+                break
 
-    def _on_job_update(self, job) -> None:
-        pass
+        if not processed:
+            job = self._job_runner.state
+            if job:
+                text = job_status_text(job)
+                edit_message(
+                    self,
+                    self._active_job_chat_id,
+                    self._active_job_message_id,
+                    text,
+                    reply_markup=job_panel(running=job.is_active),
+                )
 
     def _launch_scan(
         self,
@@ -286,7 +285,6 @@ class StrixBot:
         msg_id: int,
         targets: Optional[list[str]] = None,
         mode: Optional[ScanMode] = None,
-        force: bool = False,
     ) -> None:
         pm = get_panel_manager()
 
@@ -299,12 +297,6 @@ class StrixBot:
             edit_message(bot, chat_id, msg_id, "No target specified.", reply_markup=back_to_menu())
             return
 
-        from .safety.scope_policy import validate_scope
-        ok, msg = validate_scope(targets)
-        if not ok and not force:
-            edit_message(bot, chat_id, msg_id, f"Scope issue: {msg}", reply_markup=back_to_menu())
-            return
-
         ok, start_msg = self._job_runner.start(
             targets=targets,
             mode=mode,
@@ -312,6 +304,8 @@ class StrixBot:
         )
 
         if ok:
+            self._active_job_chat_id = chat_id
+            self._active_job_message_id = msg_id
             pm.reset_wizard()
             job = self._job_runner.state
             text = job_status_text(job) if job else "Scan started"
@@ -335,6 +329,7 @@ class StrixBot:
                 for upd in updates:
                     self._updates_offset = upd["update_id"] + 1
                     self.process_update(upd)
+                self._drain_update_queue()
             except KeyboardInterrupt:
                 logger.info("Shutdown requested.")
                 break

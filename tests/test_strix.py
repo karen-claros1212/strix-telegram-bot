@@ -35,6 +35,11 @@ class TestCliAdapter:
         args = cli.build_args(targets=["https://example.com"])
         assert "--target" in args
         assert "https://example.com" in args
+        assert "--non-interactive" not in args
+
+    def test_build_args_non_interactive(self):
+        cli = StrixCliAdapter()
+        args = cli.build_args(targets=["x"], non_interactive=True)
         assert "--non-interactive" in args
 
     def test_build_args_quick_mode(self):

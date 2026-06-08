@@ -50,7 +50,6 @@ class MenuState(str, Enum):
     CAIDO = "caido"
     HEALTH = "health"
     CONFIG = "config"
-    APPROVAL = "approval"
 
 
 @dataclass
@@ -134,18 +133,6 @@ class StrixEvent:
     data: dict = field(default_factory=dict)
     phase: Optional[JobPhase] = None
     message: str = ""
-
-
-@dataclass
-class ApprovalRequest:
-    job_run_name: str
-    target: list[str]
-    mode: ScanMode
-    reason: str
-    chat_id: int
-    message_id: int
-    timestamp: float = field(default_factory=time.time)
-    resolved: bool = False
 
 
 def _fmt_duration(seconds: float) -> str:

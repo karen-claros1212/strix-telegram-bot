@@ -1,72 +1,96 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
-_MAX_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
-_ALLOWED_MIME_PREFIXES = [
-    "text/",
-    "application/json",
-    "application/pdf",
-    "application/zip",
-    "application/gzip",
-    "application/x-tar",
-    "application/x-gtar",
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "application/octet-stream",
-]
+def classify_attachment(
+    file_path: Path,
+    original_name: str,
+) -> dict:
+    stat = file_path.stat()
+    sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    ext = file_path.suffix.lower()
+    size_mb = stat.st_size / (1024 * 1024)
 
-_ALLOWED_EXTENSIONS = {
-    ".txt", ".md", ".json", ".csv", ".xml", ".yaml", ".yml",
-    ".zip", ".tar", ".gz", ".tgz", ".7z",
-    ".pdf", ".png", ".jpg", ".jpeg", ".gif",
-    ".py", ".js", ".ts", ".go", ".rs", ".java", ".kt",
-    ".env", ".env.example",
-    ".pem", ".key", ".crt",
-    ".log",
-}
-
-
-def validate_attachment(
-    file_name: str,
-    file_size: int,
-    mime_type: Optional[str] = None,
-) -> tuple[bool, str]:
-    if file_size > _MAX_SIZE_BYTES:
-        return (
-            False,
-            f"File too large ({file_size / 1024 / 1024:.1f} MB). Max: {_MAX_SIZE_BYTES / 1024 / 1024:.0f} MB",
-        )
-
-    ext = Path(file_name).suffix.lower()
-    if ext and ext not in _ALLOWED_EXTENSIONS:
-        return (
-            False,
-            f"Extension '{ext}' not allowed. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS)[:10])}...",
-        )
-
-    if mime_type and not any(
-        mime_type.startswith(p) for p in _ALLOWED_MIME_PREFIXES
-    ):
-        return (
-            False,
-            f"MIME type '{mime_type}' not allowed",
-        )
-
-    return True, "OK"
+    return {
+        "original_name": original_name,
+        "safe_name": _safe_name(original_name),
+        "size_bytes": stat.st_size,
+        "size_mb": round(size_mb, 1),
+        "sha256": sha256,
+        "extension": ext,
+        "mime_type": _guess_mime(ext),
+        "over_limit_telegram": size_mb > 50,
+    }
 
 
 def sanitize_target(target: str) -> tuple[bool, str]:
-    import re
-
     if not target or len(target) > 4096:
         return False, "Target too long or empty"
     if re.search(r"[;\x00-\x1f]", target):
         return False, "Target contains invalid characters"
-    if target.startswith("file://") or target.startswith("localhost"):
-        return False, "Local targets not allowed"
     return True, "OK"
+
+
+def _safe_name(name: str) -> str:
+    return "".join(c if c.isalnum() or c in ".-_" else "_" for c in name)
+
+
+_MIME_MAP = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".xml": "application/xml",
+    ".yaml": "application/x-yaml",
+    ".yml": "application/x-yaml",
+    ".zip": "application/zip",
+    ".tar": "application/x-tar",
+    ".gz": "application/gzip",
+    ".tgz": "application/gzip",
+    ".7z": "application/x-7z-compressed",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".py": "text/x-python",
+    ".js": "text/javascript",
+    ".ts": "text/typescript",
+    ".go": "text/x-go",
+    ".rs": "text/x-rust",
+    ".java": "text/x-java",
+    ".kt": "text/x-kotlin",
+    ".log": "text/plain",
+    ".pem": "application/x-pem-file",
+    ".key": "application/x-pem-file",
+    ".crt": "application/x-x509-ca-cert",
+    ".pcap": "application/vnd.tcpdump.pcap",
+    ".har": "application/json",
+    ".exe": "application/x-msdownload",
+    ".dll": "application/x-msdownload",
+    ".apk": "application/vnd.android.package-archive",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".wasm": "application/wasm",
+    ".bin": "application/octet-stream",
+    ".dump": "application/octet-stream",
+    ".dmp": "application/octet-stream",
+    ".elf": "application/x-elf",
+    ".ttf": "font/ttf",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ico": "image/x-icon",
+}
+
+
+def _guess_mime(ext: str) -> str:
+    return _MIME_MAP.get(ext, "application/octet-stream")
