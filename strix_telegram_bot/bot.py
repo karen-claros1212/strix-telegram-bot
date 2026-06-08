@@ -75,6 +75,7 @@ class StrixBot:
             "job": callback_jobs,
             "job_detail": self._callback_job_detail,
             "report": callback_reports,
+            "caido": self._callback_caido,
             "config": callback_config,
             "health": callback_health,
         }
@@ -243,6 +244,61 @@ class StrixBot:
                 bot, chat_id, msg_id,
                 "Job not found.", reply_markup=back_to_menu(),
             )
+
+    def _callback_caido(self, bot: Any, update: dict) -> None:
+        cb = update.get("callback_query", {})
+        data = cb.get("data", "")
+        chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
+        msg_id = cb.get("message", {}).get("message_id", "")
+        parts = parse_callback(data)
+        answer_callback(bot, cb.get("id", ""))
+
+        if len(parts) < 2:
+            return
+
+        action = parts[1]
+        from strix_telegram_bot.strix.caido_panel import CaidoPanel
+        from strix_telegram_bot.ui.keyboards import caido_main_menu, back_to_menu
+
+        store = self._job_store
+        active = store.list_active()
+        job = active[0] if active else None
+        run_name = job.run_name if job else ""
+        cp = CaidoPanel()
+
+        if action == "detect" or action == "status":
+            if run_name:
+                status = cp.build_caido_panel(run_name)
+            else:
+                status = "No active job to detect Caido on."
+            edit_message(bot, chat_id, msg_id, status, reply_markup=caido_main_menu())
+
+        elif action == "artifacts":
+            if run_name:
+                artifacts = cp.collect_caido_artifacts(run_name)
+                if artifacts:
+                    lines = ["Caido Artifacts:"]
+                    for a in artifacts:
+                        lines.append(f"  {a['name']} ({a['size']/1024:.1f} KB)")
+                    text = "\n".join(lines)
+                else:
+                    text = "No Caido artifacts found."
+            else:
+                text = "No active job."
+            edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())
+
+        elif action == "instructions":
+            text = (
+                "Caido is a web proxy for manual traffic inspection.\n\n"
+                "STRIX exposes Caido when running scans.\n"
+                "Use the URL above to:\n"
+                "  - Inspect HTTP requests/responses\n"
+                "  - Replay and modify requests\n"
+                "  - Explore the sitemap\n"
+                "  - Test manually alongside the agent\n\n"
+                "Caido runs on localhost only."
+            )
+            edit_message(bot, chat_id, msg_id, text, reply_markup=caido_main_menu())
 
     def _drain_update_queue(self) -> None:
         if self._active_job_chat_id is None or self._active_job_message_id is None:

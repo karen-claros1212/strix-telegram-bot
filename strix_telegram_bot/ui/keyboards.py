@@ -11,7 +11,7 @@ _MAX_CALLBACK_LEN = 64
 
 def _cb(*parts: str) -> str:
     raw = _CALLBACK_SEP.join(parts)
-    return raw[:64]
+    return raw[:_MAX_CALLBACK_LEN]
 
 
 def _btn(text: str, callback_data: str) -> dict:
@@ -39,6 +39,60 @@ def main_menu() -> dict:
         [
             _btn("Config", _cb("menu", "config")),
             _btn("Help", _cb("menu", "help")),
+        ],
+    ])
+
+
+def jobs_main_menu() -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Active", _cb("job", "active")),
+            _btn("Completed", _cb("job", "completed")),
+        ],
+        [
+            _btn("Failed", _cb("job", "failed")),
+            _btn("Stopped", _cb("job", "stopped")),
+        ],
+        [
+            _btn("Back to Menu", _cb("menu", "main")),
+        ],
+    ])
+
+
+def reports_main_menu() -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Latest Report", _cb("report", "latest")),
+            _btn("History", _cb("report", "history")),
+        ],
+        [
+            _btn("Executive Summary", _cb("report", "summary")),
+            _btn("Evidence", _cb("report", "evidence")),
+        ],
+        [
+            _btn("Markdown", _cb("report", "markdown")),
+            _btn("CSV", _cb("report", "csv")),
+            _btn("JSON", _cb("report", "json")),
+        ],
+        [
+            _btn("Cleanup Old", _cb("report", "cleanup")),
+            _btn("Back to Menu", _cb("menu", "main")),
+        ],
+    ])
+
+
+def caido_main_menu() -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Detect Caido", _cb("caido", "detect")),
+            _btn("Status", _cb("caido", "status")),
+        ],
+        [
+            _btn("Artifacts", _cb("caido", "artifacts")),
+            _btn("Instructions", _cb("caido", "instructions")),
+        ],
+        [
+            _btn("Back to Menu", _cb("menu", "main")),
         ],
     ])
 
@@ -95,6 +149,20 @@ def reports_list(report_names: list[str]) -> dict:
         rows.append([_btn(name, _cb("report", name))])
     rows.append([_btn("Back", _cb("menu", "main"))])
     return build_inline_keyboard(rows)
+
+
+def report_detail_menu() -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Markdown", _cb("report", "markdown")),
+            _btn("CSV", _cb("report", "csv")),
+        ],
+        [
+            _btn("Evidence", _cb("report", "evidence")),
+            _btn("Download", _cb("report", "download")),
+        ],
+        [_btn("Back to Reports", _cb("report", "list"))],
+    ])
 
 
 def config_menu() -> dict:

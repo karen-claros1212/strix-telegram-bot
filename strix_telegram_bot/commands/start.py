@@ -49,7 +49,6 @@ def callback_menu(bot: Any, update: dict) -> None:
     elif action == "new_pentest":
         pm.push(MenuState.NEW_PENTEST_TARGET)
         from strix_telegram_bot.ui.keyboards import target_type_selector
-        from strix_telegram_bot.ui.messages import escape_md
         edit_message(
             bot, chat_id, msg_id,
             "Select target type:",
@@ -57,7 +56,6 @@ def callback_menu(bot: Any, update: dict) -> None:
         )
 
     elif action == "chat":
-        from strix_telegram_bot.ui.messages import escape_md
         edit_message(
             bot, chat_id, msg_id,
             "Send a message to interact with STRIX.\n\n"
@@ -67,23 +65,14 @@ def callback_menu(bot: Any, update: dict) -> None:
         )
 
     elif action == "jobs":
-        from strix_telegram_bot.ui.keyboards import back_to_menu
         _show_jobs(bot, chat_id, msg_id)
 
     elif action == "reports":
-        from strix_telegram_bot.ui.keyboards import back_to_menu
-        edit_message(
-            bot, chat_id, msg_id,
-            "Reports feature coming in Phase 2.",
-            reply_markup=back_to_menu(),
-        )
+        from strix_telegram_bot.commands.reports import _show_reports
+        _show_reports(bot, chat_id, msg_id)
 
     elif action == "caido":
-        from strix_telegram_bot.ui.messages import caido_panel_text
-        from strix_telegram_bot.ui.keyboards import back_to_menu
-        from strix_telegram_bot.jobs.job_runner import get_job_runner  # will need
-        text = caido_panel_text(None, False)
-        edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())
+        _show_caido_panel(bot, chat_id, msg_id)
 
     elif action == "health":
         _show_health(bot, chat_id, msg_id)
@@ -91,7 +80,6 @@ def callback_menu(bot: Any, update: dict) -> None:
     elif action == "config":
         pm.push(MenuState.CONFIG)
         from strix_telegram_bot.ui.keyboards import config_menu
-        from strix_telegram_bot.ui.messages import escape_md
         edit_message(
             bot, chat_id, msg_id,
             "Configuration:", reply_markup=config_menu(),
@@ -117,35 +105,52 @@ def _chat_id(update: dict) -> int:
 
 
 def _show_jobs(bot, chat_id, msg_id) -> None:
-    from strix_telegram_bot.ui.keyboards import active_jobs_list, back_to_menu
+    from strix_telegram_bot.ui.keyboards import jobs_main_menu, back_to_menu
     from strix_telegram_bot.jobs.job_store import JobStore
-    from strix_telegram_bot.jobs.process_control import ProcessController
     from strix_telegram_bot.ui.messages import escape_md
 
     store = JobStore()
     active = store.list_active()
+    all_jobs = store.list_recent(limit=5)
+
+    lines = ["Jobs Overview:"]
     if active:
-        names = [j.run_name for j in active]
-        names = [n for n in names if n != "pending"]
-        if not names:
-            text = "No named active jobs."
-        else:
-            text = "Active jobs:"
-        edit_message(
-            bot, chat_id, msg_id, text,
-            reply_markup=active_jobs_list(names) if names else back_to_menu(),
-        )
+        lines.append(f"Active: {len(active)}")
+    lines.append(f"Recent: {len(all_jobs)}")
+
+    if active:
+        for j in active[:3]:
+            lines.append(
+                f"  {j.run_name[:30]} [{j.phase.value}] {j.elapsed}"
+            )
+
+    edit_message(
+        bot, chat_id, msg_id, "\n".join(lines),
+        reply_markup=jobs_main_menu(),
+    )
+
+
+def _show_caido_panel(bot, chat_id, msg_id) -> None:
+    from strix_telegram_bot.ui.keyboards import caido_main_menu
+    from strix_telegram_bot.strix.caido_panel import CaidoPanel
+    from strix_telegram_bot.jobs.job_store import JobStore
+
+    store = JobStore()
+    active = store.list_active()
+    cp = CaidoPanel()
+
+    if active:
+        job = active[0]
+        status = cp.build_caido_panel(job.run_name)
     else:
-        edit_message(
-            bot, chat_id, msg_id,
-            "No active jobs.", reply_markup=back_to_menu(),
-        )
+        status = cp.build_caido_panel("")
+
+    edit_message(bot, chat_id, msg_id, status, reply_markup=caido_main_menu())
 
 
 def _show_health(bot, chat_id, msg_id) -> None:
     from strix_telegram_bot.ui.messages import health_text
     from strix_telegram_bot.ui.keyboards import back_to_menu
-    from strix_telegram_bot.config import settings
 
     import subprocess
     import platform
@@ -160,7 +165,7 @@ def _show_health(bot, chat_id, msg_id) -> None:
 
     from strix_telegram_bot.jobs.job_store import JobStore
     store = JobStore()
-    active_count = len(store.list_active())
+    active_count = store.count_active()
 
     text = health_text(
         strix_version=ver,

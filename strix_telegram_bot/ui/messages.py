@@ -93,7 +93,27 @@ def health_text(
 
 
 def reports_menu_text() -> str:
-    return "Available reports:"
+    return (
+        "Report Center\n"
+        "\n"
+        "Browse, download, and review STRIX scan results."
+    )
+
+
+def evidence_text(manifest: dict) -> str:
+    artifacts = manifest.get("artifacts", [])
+    if not artifacts:
+        return "No evidence stored."
+
+    total_size = sum(a.get("size_bytes", 0) for a in artifacts)
+    sensitive = sum(1 for a in artifacts if a.get("sensitive"))
+
+    return (
+        f"Evidence Vault\n"
+        f"Artifacts: {len(artifacts)}\n"
+        f"Size: {total_size / 1024:.1f} KB\n"
+        f"Sensitive items: {sensitive}"
+    )
 
 
 def caido_panel_text(url: Optional[str], active: bool) -> str:
