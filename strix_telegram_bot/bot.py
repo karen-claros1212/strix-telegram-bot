@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import settings
@@ -30,6 +31,23 @@ from .jobs.job_runner import JobRunner
 from .jobs.process_control import ProcessController
 
 logger = logging.getLogger("strix_bot")
+
+_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".md", ".json", ".csv", ".xml", ".yaml", ".yml",
+    ".py", ".js", ".ts", ".go", ".rs", ".java", ".kt",
+    ".html", ".htm", ".css", ".log", ".cfg", ".ini", ".conf",
+    ".sh", ".bash", ".zsh", ".env", ".toml",
+})
+
+
+def _is_likely_binary(path: Path) -> bool:
+    if path.suffix.lower() not in _TEXT_EXTENSIONS:
+        return True
+    try:
+        head = path.read_bytes(8192)
+        return b"\x00" in head
+    except OSError:
+        return True
 
 
 class StrixBot:
@@ -260,18 +278,20 @@ class StrixBot:
     def _handle_document(self, update: dict) -> None:
         msg = update.get("message", {})
         chat_id = msg.get("chat", {}).get("id", 0)
-        doc = msg.get("document") or msg.get("photo", [None])[-1] if msg.get("photo") else None
+
+        doc = msg.get("document")
+        if not doc and msg.get("photo"):
+            doc = msg.get("photo", [None])[-1]
         if not doc:
             send_message(self, chat_id, "Could not read file.")
             return
 
         from .telegram import get_file
-        import tempfile
         from pathlib import Path
         from .strix.evidence_vault import EvidenceVault
 
         file_id = doc.get("file_id", "")
-        file_name = doc.get("file_name", "upload.bin")
+        file_name = doc.get("file_name", "upload.bin") if "file_name" in doc else "photo.jpg"
 
         file_bytes = get_file(self, file_id)
         if file_bytes is None:
@@ -290,12 +310,12 @@ class StrixBot:
             send_message(self, chat_id, "Failed to store file in evidence vault.")
             return
 
-        save_path = Path(artifact["path"])
-        abs_path = save_path.resolve()
+        abs_path = Path(artifact["absolute_path"])
 
         send_message(
             self, chat_id,
             f"File saved: {file_name}\nSHA256: {artifact['sha256'][:16]}...\n"
+            f"Path: {abs_path}"
         )
 
         if pm.current == MenuState.NEW_PENTEST_ATTACHMENT:
@@ -483,8 +503,17 @@ class StrixBot:
                 if vault_dir:
                     full_path = vault_dir / artifact_id
                     if full_path.exists():
-                        content = full_path.read_text(encoding="utf-8", errors="replace")
-                        send_message(bot, chat_id, f"RAW artifact:\n\n{content[:3500]}")
+                        if _is_likely_binary(full_path):
+                            send_message(
+                                bot, chat_id,
+                                f"RAW artifact is binary ({full_path.suffix}). "
+                                f"File path: {full_path}\n"
+                                f"Size: {full_path.stat().st_size / 1024:.1f} KB\n"
+                                f"SHA256: {match.get('sha256', '?')[:16]}..."
+                            )
+                        else:
+                            content = full_path.read_text(encoding="utf-8", errors="replace")
+                            send_message(bot, chat_id, f"RAW artifact:\n\n{content[:3500]}")
                         edit_message(bot, chat_id, msg_id, "RAW sent.", reply_markup=evidence_detail_menu(artifact_id))
                         return
             edit_message(bot, chat_id, msg_id, "Artifact not found.", reply_markup=back_to_menu())

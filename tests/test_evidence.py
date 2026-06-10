@@ -21,6 +21,8 @@ class TestEvidenceVault:
         assert artifact is not None
         assert artifact["sha256"] is not None
         assert artifact["size_bytes"] == 11
+        assert "absolute_path" in artifact
+        assert Path(artifact["absolute_path"]).exists()
 
         manifest = vault.get_manifest()
         assert len(manifest["artifacts"]) == 1
@@ -34,6 +36,8 @@ class TestEvidenceVault:
         artifact = vault.store_bytes(b"binary data", "data.bin", subdir="raw")
         assert artifact is not None
         assert artifact["size_bytes"] == 11
+        assert "absolute_path" in artifact
+        assert Path(artifact["absolute_path"]).exists()
 
     def test_hash_file(self, tmp_path):
         f = tmp_path / "data.bin"
