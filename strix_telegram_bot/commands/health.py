@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import subprocess
 from typing import Any
 
@@ -8,6 +9,33 @@ from strix_telegram_bot.telegram import send_message, edit_message, answer_callb
 from strix_telegram_bot.ui.keyboards import back_to_menu
 from strix_telegram_bot.ui.messages import health_text
 from strix_telegram_bot.security import authorized_only
+
+_STRIX_MIN_VERSION = (1, 0, 4)
+_PYTHON_MIN_VERSION = (3, 12)
+
+
+def _parse_version(ver_str: str) -> tuple[int, ...]:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", ver_str)
+    if match:
+        return tuple(int(g) for g in match.groups())
+    return (0, 0, 0)
+
+
+def _version_warning(ver: str, py_ver: str) -> str:
+    warnings: list[str] = []
+    strix_ver = _parse_version(ver)
+    if strix_ver < _STRIX_MIN_VERSION:
+        warnings.append(
+            f"STRIX {ver} is outdated. Minimum recommended: "
+            f"{'.'.join(str(v) for v in _STRIX_MIN_VERSION)}"
+        )
+    py_parsed = _parse_version(py_ver)
+    if py_parsed < _PYTHON_MIN_VERSION:
+        warnings.append(
+            f"Python {py_ver} is below STRIX minimum: "
+            f"{'.'.join(str(v) for v in _PYTHON_MIN_VERSION)}"
+        )
+    return "\n".join(warnings)
 
 
 @authorized_only
@@ -26,9 +54,13 @@ def cmd_version(bot: Any, update: dict) -> None:
         ).stdout.strip()
     except Exception:
         ver = "unknown"
+    py_ver = platform.python_version()
+    warning = _version_warning(ver, py_ver)
+    text = f"STRIX version: {ver}\nPython: {py_ver}"
+    if warning:
+        text += "\n\n⚠️ WARNING:\n" + warning
     send_message(
-        bot, chat_id,
-        f"STRIX version: {ver}\nPython: {platform.python_version()}",
+        bot, chat_id, text,
         reply_markup=back_to_menu(),
     )
 
@@ -73,17 +105,22 @@ def _send_health(bot, chat_id, msg_id=None) -> None:
     except Exception:
         ver = "unknown"
 
+    py_ver = platform.python_version()
+    warning = _version_warning(ver, py_ver)
+
     from strix_telegram_bot.jobs.job_store import JobStore
     store = JobStore()
     active_count = len(store.list_active())
 
     text = health_text(
         strix_version=ver,
-        python_version=platform.python_version(),
+        python_version=py_ver,
         uptime="N/A",
         active_jobs=active_count,
         caido_status="N/A",
     )
+    if warning:
+        text += "\n\n⚠️ WARNING:\n" + warning
 
     if msg_id:
         edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())

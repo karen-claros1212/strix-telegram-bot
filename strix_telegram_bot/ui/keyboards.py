@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from strix_telegram_bot.models import MenuState, ScanMode, TargetType
+from strix_telegram_bot.models import FocusPreset, MenuState, ProfileType, ScanMode, ScopeMode, TargetType
 
 
 _CALLBACK_SEP = ":"
@@ -31,6 +31,10 @@ def main_menu() -> dict:
         [
             _btn("Active Jobs", _cb("menu", "jobs")),
             _btn("Reports", _cb("menu", "reports")),
+        ],
+        [
+            _btn("Evidence", _cb("menu", "evidence")),
+            _btn("Tools", _cb("menu", "tools")),
         ],
         [
             _btn("Caido Proxy", _cb("menu", "caido")),
@@ -120,6 +124,77 @@ def depth_selector() -> dict:
     ])
 
 
+def profile_selector() -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Interactive / TUI", _cb("profile", "interactive")),
+            _btn("Headless / CI", _cb("profile", "headless")),
+        ],
+        [_btn("Back", _cb("menu", "new_pentest"))],
+    ])
+
+
+def scope_mode_selector() -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Auto", _cb("scope", "auto")),
+            _btn("Diff", _cb("scope", "diff")),
+            _btn("Full", _cb("scope", "full")),
+        ],
+        [
+            _btn("Diff Base", _cb("scope", "diff_base")),
+        ],
+        [_btn("Skip Scope Config", _cb("scope", "done"))],
+    ])
+
+
+def focus_presets() -> dict:
+    return build_inline_keyboard([
+        [_btn("Business Logic / IDOR", _cb("focus", "business_logic"))],
+        [_btn("Auth / Session / JWT", _cb("focus", "auth_jwt"))],
+        [_btn("SQL / NoSQL / SSTI", _cb("focus", "sql"))],
+        [_btn("XSS / CSRF / DOM", _cb("focus", "xss"))],
+        [_btn("SSRF / XXE / Deserialization", _cb("focus", "ssrf"))],
+        [_btn("Kubernetes / Infra", _cb("focus", "kubernetes"))],
+        [_btn("Secrets / Supply chain", _cb("focus", "secrets"))],
+        [_btn("Custom", _cb("focus", "custom"))],
+        [_btn("Skip (no instruction)", _cb("focus", "skip"))],
+    ])
+
+
+def evidence_list_menu(artifacts: list[dict]) -> dict:
+    rows = []
+    for a in artifacts[:10]:
+        label = f"{a.get('type', '?')} - {a.get('id', '?')[:40]}"
+        rows.append([_btn(label, _cb("evidence", a["id"]))])
+    rows.append([_btn("Back", _cb("menu", "main"))])
+    return build_inline_keyboard(rows)
+
+
+def evidence_detail_menu(artifact_id: str) -> dict:
+    return build_inline_keyboard([
+        [
+            _btn("Preview (redacted)", _cb("evidence", f"preview:{artifact_id}")),
+        ],
+        [
+            _btn("Send RAW", _cb("evidence", f"raw:{artifact_id}")),
+            _btn("Send Redacted", _cb("evidence", f"redacted:{artifact_id}")),
+        ],
+        [_btn("Back to Evidence", _cb("menu", "evidence_list"))],
+    ])
+
+
+def tools_panel(active_tools: list[dict]) -> dict:
+    rows = []
+    for tool in active_tools:
+        name = tool.get("name", "unknown")
+        rows.append([_btn(name, _cb("tools", name.lower()))])
+    if not active_tools:
+        rows.append([_btn("No tools active", _cb("tools", "none"))])
+    rows.append([_btn("Back to Menu", _cb("menu", "main"))])
+    return build_inline_keyboard(rows)
+
+
 def job_panel(running: bool = False) -> dict:
     row = [_btn("Chat", _cb("job", "chat"))]
     if running:
@@ -191,7 +266,11 @@ def menu_from_state(state: MenuState, **kwargs) -> dict:
         MenuState.MAIN: main_menu,
         MenuState.NEW_PENTEST_TARGET: target_type_selector,
         MenuState.NEW_PENTEST_DEPTH: depth_selector,
+        MenuState.NEW_PENTEST_PROFILE: profile_selector,
+        MenuState.NEW_PENTEST_SCOPE: scope_mode_selector,
+        MenuState.NEW_PENTEST_FOCUS: focus_presets,
         MenuState.CONFIG: config_menu,
+        MenuState.TOOLS: lambda: tools_panel(kwargs.get("active_tools", [])),
     }
     builder = mapping.get(state, main_menu)
     return builder()

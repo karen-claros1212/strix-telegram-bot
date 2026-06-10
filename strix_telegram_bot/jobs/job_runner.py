@@ -57,6 +57,8 @@ class JobRunner:
         instruction: str = "",
         instruction_file: Optional[Path] = None,
         scope_mode: str = "auto",
+        diff_base: Optional[str] = None,
+        non_interactive: bool = False,
     ) -> tuple[bool, str]:
         if self._state and self._state.is_active:
             return False, "A job is already running"
@@ -68,6 +70,8 @@ class JobRunner:
             instruction=instruction,
             instruction_file=instruction_file,
             scope_mode=scope_mode,
+            diff_base=diff_base,
+            non_interactive=non_interactive,
         )
         if not ok:
             return False, msg

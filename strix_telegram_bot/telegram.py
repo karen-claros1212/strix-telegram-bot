@@ -114,6 +114,20 @@ def answer_callback(bot: Any, callback_id: str, text: str = "") -> Optional[dict
     return _request("answerCallbackQuery", payload)
 
 
+def get_file(bot: Any, file_id: str) -> Optional[bytes]:
+    result = _request("getFile", {"file_id": file_id})
+    if not result or "file_path" not in result:
+        return None
+    file_path = result["file_path"]
+    file_url = f"{_API_BASE.replace('/bot', '/file/bot')}/{file_path}"
+    try:
+        req = urllib.request.Request(file_url)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        return None
+
+
 def send_chat_action(bot: Any, chat_id: int, action: str = "typing") -> Optional[dict]:
     return _request("sendChatAction", {
         "chat_id": chat_id,

@@ -30,11 +30,12 @@ def escape_md(text: str) -> str:
     return text
 
 
-def main_menu_text() -> str:
+def main_menu_text(strix_version: str = "") -> str:
+    ver = f" STRIX {strix_version}" if strix_version else ""
     return (
-        "STRIX Control Center\n"
+        f"STRIX Control Center{ver}\n"
         "\n"
-        "Remote UI for STRIX v1.0.2"
+        "Remote UI for STRIX v1"
         "\n"
         "Select an option below:"
     )
@@ -124,6 +125,25 @@ def caido_panel_text(url: Optional[str], active: bool) -> str:
     return "Caido Proxy\nStatus: Inactive\n\nStart a scan to see Caido here."
 
 
+def instruction_text() -> str:
+    return (
+        "Instruction / Focus\n\n"
+        "Choose a focus area to guide STRIX, "
+        "or skip for a general-purpose scan."
+    )
+
+
+def tools_panel_text(active_tools: list[dict]) -> str:
+    if not active_tools:
+        return "No tools detected in the current scan."
+    lines = ["Active Tools:"]
+    for t in active_tools:
+        name = t.get("name", "unknown")
+        status = t.get("status", "running")
+        lines.append(f"  {name} — {status}")
+    return "\n".join(lines)
+
+
 def help_text() -> str:
     return (
         "STRIX Control Center Help\n"
@@ -133,9 +153,19 @@ def help_text() -> str:
         "  Standard: Routine security review\n"
         "  Deep: Full pentest (default)\n"
         "\n"
+        "Profiles:\n"
+        "  Interactive / TUI — default, mirrors STRIX interactive UI\n"
+        "  Headless / CI — non-interactive, automated\n"
+        "\n"
+        "Focus Presets:\n"
+        "  Business Logic, Auth/JWT, SQLi, XSS,\n"
+        "  SSRF/XXE, K8s/Infra, Secrets, Custom\n"
+        "\n"
         "Chat - Interact with STRIX or respond to prompts\n"
         "Jobs - View active scans\n"
         "Reports - View completed scan results\n"
+        "Evidence - Browse scan artifacts\n"
+        "Tools - View active STRIX tools\n"
         "Caido - Open the proxy inspector\n"
         "Health - System status\n"
         "Config - Change settings"

@@ -34,6 +34,28 @@ class JobPhase(str, Enum):
     STOPPED = "stopped"
 
 
+class ProfileType(str, Enum):
+    INTERACTIVE = "interactive"
+    HEADLESS = "headless"
+
+
+class ScopeMode(str, Enum):
+    AUTO = "auto"
+    DIFF = "diff"
+    FULL = "full"
+
+
+class FocusPreset(str, Enum):
+    BUSINESS_LOGIC = "Business Logic / IDOR"
+    AUTH_JWT = "Auth / Session / JWT"
+    SQL = "SQL / NoSQL / SSTI"
+    XSS = "XSS / CSRF / DOM"
+    SSRF = "SSRF / XXE / Deserialization"
+    KUBERNETES = "Kubernetes / Infra"
+    SECRETS = "Secrets / Supply chain"
+    CUSTOM = "Custom"
+
+
 class ChatMode(str, Enum):
     FREE = "free"
     JOB_RESPONSE = "job_response"
@@ -43,13 +65,60 @@ class MenuState(str, Enum):
     MAIN = "main"
     NEW_PENTEST_TARGET = "new_pentest_target"
     NEW_PENTEST_DEPTH = "new_pentest_depth"
+    NEW_PENTEST_PROFILE = "new_pentest_profile"
     NEW_PENTEST_SCOPE = "new_pentest_scope"
+    NEW_PENTEST_DIFF_BASE = "new_pentest_diff_base"
+    NEW_PENTEST_INSTRUCTION = "new_pentest_instruction"
+    NEW_PENTEST_FOCUS = "new_pentest_focus"
+    NEW_PENTEST_ATTACHMENT = "new_pentest_attachment"
     JOB_DETAIL = "job_detail"
     REPORTS_LIST = "reports_list"
     REPORT_DETAIL = "report_detail"
+    EVIDENCE_LIST = "evidence_list"
+    EVIDENCE_DETAIL = "evidence_detail"
     CAIDO = "caido"
+    TOOLS = "tools"
     HEALTH = "health"
     CONFIG = "config"
+
+
+_FOCUS_INSTRUCTIONS: dict[FocusPreset, str] = {
+    FocusPreset.BUSINESS_LOGIC: (
+        "Focus on business logic flaws, IDOR, privilege escalation, "
+        "and workflow bypasses. Test multi-step processes and access controls."
+    ),
+    FocusPreset.AUTH_JWT: (
+        "Focus on authentication, session management, JWT attacks, "
+        "OAuth flows, password policies, and token handling."
+    ),
+    FocusPreset.SQL: (
+        "Focus on SQL injection, NoSQL injection, SSTI, LDAP injection, "
+        "and injection-based data extraction techniques."
+    ),
+    FocusPreset.XSS: (
+        "Focus on XSS (reflected, stored, DOM), CSRF, clickjacking, "
+        "open redirects, and client-side template injection."
+    ),
+    FocusPreset.SSRF: (
+        "Focus on SSRF, XXE, deserialization attacks, "
+        "and server-side request manipulation."
+    ),
+    FocusPreset.KUBERNETES: (
+        "Focus on Kubernetes misconfigurations, container escape, "
+        "RBAC issues, secrets exposure, and infrastructure weaknesses."
+    ),
+    FocusPreset.SECRETS: (
+        "Focus on hardcoded secrets, API key leaks, credential exposure, "
+        "supply chain vulnerabilities, and dependency analysis."
+    ),
+    FocusPreset.CUSTOM: "",
+}
+
+
+def get_focus_instruction(preset: FocusPreset, custom_text: str = "") -> str:
+    if preset == FocusPreset.CUSTOM:
+        return custom_text
+    return _FOCUS_INSTRUCTIONS.get(preset, "")
 
 
 @dataclass

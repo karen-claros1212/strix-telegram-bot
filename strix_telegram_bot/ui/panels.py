@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from strix_telegram_bot.models import MenuState, ScanMode, TargetType, JobState
+from strix_telegram_bot.models import (
+    FocusPreset,
+    MenuState,
+    ProfileType,
+    ScanMode,
+    ScopeMode,
+    TargetType,
+    JobState,
+)
 
 
 class PanelManager:
@@ -11,6 +19,10 @@ class PanelManager:
         self._selected_target_type: Optional[TargetType] = None
         self._selected_targets: list[str] = []
         self._selected_depth: ScanMode = ScanMode.DEEP
+        self._selected_profile: ProfileType = ProfileType.INTERACTIVE
+        self._selected_scope_mode: ScopeMode = ScopeMode.AUTO
+        self._selected_diff_base: str = ""
+        self._selected_focus: Optional[FocusPreset] = None
         self._selected_instruction: str = ""
 
     @property
@@ -32,6 +44,10 @@ class PanelManager:
         self._selected_target_type = None
         self._selected_targets = []
         self._selected_depth = ScanMode.DEEP
+        self._selected_profile = ProfileType.INTERACTIVE
+        self._selected_scope_mode = ScopeMode.AUTO
+        self._selected_diff_base = ""
+        self._selected_focus = None
         self._selected_instruction = ""
 
     @property
@@ -47,6 +63,10 @@ class PanelManager:
             parts.append(f"Target: {', '.join(self._selected_targets)}")
         if self._selected_depth:
             parts.append(f"Mode: {self._selected_depth.value}")
+        if self._selected_profile:
+            parts.append(f"Profile: {self._selected_profile.value}")
+        if self._selected_scope_mode:
+            parts.append(f"Scope: {self._selected_scope_mode.value}")
         if self._selected_instruction:
             inst = (
                 self._selected_instruction[:50] + "..."

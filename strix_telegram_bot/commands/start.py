@@ -74,6 +74,30 @@ def callback_menu(bot: Any, update: dict) -> None:
     elif action == "caido":
         _show_caido_panel(bot, chat_id, msg_id)
 
+    elif action == "evidence":
+        _show_evidence(bot, chat_id, msg_id)
+
+    elif action == "tools":
+        _show_tools(bot, chat_id, msg_id)
+
+    elif action == "evidence_list":
+        from strix_telegram_bot.ui.keyboards import evidence_list_menu
+        from strix_telegram_bot.strix.evidence_vault import EvidenceVault
+        from strix_telegram_bot.jobs.job_store import JobStore
+        from strix_telegram_bot.ui.messages import evidence_text
+        store = JobStore()
+        jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
+        if jobs:
+            vault = EvidenceVault(jobs[0].run_name)
+            artifacts = vault.list_evidence()
+            if artifacts:
+                text = evidence_text(vault.get_manifest())
+                edit_message(bot, chat_id, msg_id, text, reply_markup=evidence_list_menu(artifacts))
+            else:
+                edit_message(bot, chat_id, msg_id, "No evidence.", reply_markup=main_menu())
+        else:
+            edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=main_menu())
+
     elif action == "health":
         _show_health(bot, chat_id, msg_id)
 
@@ -175,3 +199,51 @@ def _show_health(bot, chat_id, msg_id) -> None:
         caido_status="N/A",
     )
     edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())
+
+
+def _show_evidence(bot, chat_id, msg_id) -> None:
+    from strix_telegram_bot.strix.evidence_vault import EvidenceVault
+    from strix_telegram_bot.ui.keyboards import evidence_list_menu
+    from strix_telegram_bot.ui.messages import evidence_text
+    from strix_telegram_bot.jobs.job_store import JobStore
+
+    store = JobStore()
+    jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
+    if not jobs:
+        edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=main_menu())
+        return
+
+    vault = EvidenceVault(jobs[0].run_name)
+    artifacts = vault.list_evidence()
+    if not artifacts:
+        edit_message(bot, chat_id, msg_id, "No evidence available.", reply_markup=main_menu())
+        return
+
+    text = evidence_text(vault.get_manifest())
+    edit_message(bot, chat_id, msg_id, text, reply_markup=evidence_list_menu(artifacts))
+
+
+def _show_tools(bot, chat_id, msg_id) -> None:
+    from strix_telegram_bot.strix.report_collector import ReportCollector
+    from strix_telegram_bot.ui.keyboards import tools_panel
+    from strix_telegram_bot.ui.messages import tools_panel_text
+    from strix_telegram_bot.jobs.job_store import JobStore
+
+    store = JobStore()
+    active = store.list_active()
+    active_tools: list[dict] = []
+
+    if active:
+        job = active[0]
+        rc = ReportCollector(job.run_name)
+        events = rc.get_json_events()
+        if events:
+            seen: set[str] = set()
+            for ev in events:
+                tool = ev.get("data", {}).get("tool", "")
+                if tool and tool not in seen:
+                    seen.add(tool)
+                    active_tools.append({"name": tool, "status": "active"})
+
+    text = tools_panel_text(active_tools)
+    edit_message(bot, chat_id, msg_id, text, reply_markup=tools_panel(active_tools))
