@@ -27,8 +27,7 @@ from .ui.messages import (
 )
 from .ui.panels import get_panel_manager
 from .jobs.job_store import JobStore
-from .jobs.job_runner import JobRunner
-from .jobs.process_control import ProcessController
+from .strix.runtime_bridge import StrixRuntimeBridge
 
 logger = logging.getLogger("strix_bot")
 
@@ -55,8 +54,7 @@ class StrixBot:
         self._updates_offset: Optional[int] = None
         self._running = False
         self._job_store = JobStore()
-        self._process_controller = ProcessController()
-        self._job_runner = JobRunner(self._job_store, self._process_controller)
+        self._bridge = StrixRuntimeBridge()
         self._chat_mode: dict[int, bool] = {}
         self._last_broadcast: dict[str, float] = {}
         self._active_job_chat_id: Optional[int] = None
@@ -152,7 +150,9 @@ class StrixBot:
         send_chat_action(self, chat_id)
 
         pm = get_panel_manager(chat_id)
-        job = self._job_runner.state
+        status = self._bridge.to_status_dict()
+        is_active = self._bridge.is_running
+        awaiting_input = status.get("awaiting_input", False)
 
         if pm.current == MenuState.NEW_PENTEST_TARGET:
             self._handle_wizard_target(chat_id, text, msg)
@@ -174,15 +174,15 @@ class StrixBot:
                 "Instrucción guardada.\n\nSeleccioná modo de escaneo:",
                 reply_markup=depth_selector(),
             )
-        elif job and job.awaiting_input:
-            self._job_runner.inject_input(text)
+        elif awaiting_input:
+            self._bridge.send_message_to_agent(text)
             send_message(self, chat_id, "Respuesta enviada a STRIX.")
-        elif job and job.is_active:
-            self._job_runner.inject_input(text)
+        elif is_active:
+            self._bridge.send_message_to_agent(text)
             send_message(self, chat_id, "Mensaje enviado a STRIX.")
         elif self._chat_mode.get(chat_id):
-            if job:
-                self._job_runner.inject_input(text)
+            if is_active:
+                self._bridge.send_message_to_agent(text)
             send_message(
                 self, chat_id,
                 "Mensaje enviado a STRIX.\n"
@@ -683,49 +683,31 @@ class StrixBot:
 
     def _drain_update_queue(self) -> None:
         if self._active_job_chat_id is None or self._active_job_message_id is None:
-            self._job_runner.update_queue.queue.clear()
+            self._bridge.poll_events()
             return
 
-        processed = False
-        completed = False
-        last_job = None
-        while not self._job_runner.update_queue.empty():
-            try:
-                job = self._job_runner.update_queue.get_nowait()
-                if job:
-                    last_job = job
-                    text = job_status_text(job)
-                    edit_message(
-                        self,
-                        self._active_job_chat_id,
-                        self._active_job_message_id,
-                        text,
-                        reply_markup=job_panel(running=job.is_active),
-                    )
-                    processed = True
-                    if job.phase == JobPhase.COMPLETED or job.phase == JobPhase.FAILED:
-                        completed = True
-            except Exception:
-                break
+        status = self._bridge.to_status_dict()
+        if not status.get("run_name") and not self._bridge.is_running:
+            return
 
-        if not processed:
-            job = self._job_runner.state
-            if job:
-                last_job = job
-                text = job_status_text(job)
-                edit_message(
-                    self,
-                    self._active_job_chat_id,
-                    self._active_job_message_id,
-                    text,
-                    reply_markup=job_panel(running=job.is_active),
-                )
-                if job.phase == JobPhase.COMPLETED or job.phase == JobPhase.FAILED:
-                    completed = True
+        text = job_status_text(status)
+        edit_message(
+            self,
+            self._active_job_chat_id,
+            self._active_job_message_id,
+            text,
+            reply_markup=job_panel(running=status.get("is_active", False)),
+        )
 
-        if completed and last_job:
+        if not status.get("is_active") and status.get("run_name"):
             from .ui.messages import job_completed_text
-            final = f"Escaneo finalizado:\n\n{job_completed_text(last_job)}"
+            phase = status.get("phase", "completed")
+            delta = status.get("elapsed", "0s")
+            final = (
+                f"Escaneo finalizado.\n"
+                f"Estado: {phase}\n"
+                f"Duración: {delta}"
+            )
             chat_id = self._active_job_chat_id
             self._active_job_chat_id = None
             self._active_job_message_id = None
@@ -753,9 +735,9 @@ class StrixBot:
             edit_message(bot, chat_id, msg_id, "No se especificó objetivo.", reply_markup=back_to_menu())
             return
 
-        ok, start_msg = self._job_runner.start(
+        ok, start_msg = self._bridge.start_scan(
             targets=targets,
-            mode=mode,
+            scan_mode=mode.value,
             instruction=pm._selected_instruction,
             scope_mode=pm._selected_scope_mode.value,
             non_interactive=(pm._selected_profile == ProfileType.HEADLESS),
@@ -766,8 +748,8 @@ class StrixBot:
             self._active_job_chat_id = chat_id
             self._active_job_message_id = msg_id
             pm.reset_wizard()
-            job = self._job_runner.state
-            text = job_status_text(job) if job else "Escaneo iniciado"
+            status = self._bridge.to_status_dict()
+            text = job_status_text(status) if status.get("run_name") else "Escaneo iniciado"
             edit_message(bot, chat_id, msg_id, text, reply_markup=job_panel(running=True))
         else:
             edit_message(bot, chat_id, msg_id, f"Error: {start_msg}", reply_markup=back_to_menu())
@@ -802,4 +784,4 @@ class StrixBot:
     def shutdown(self) -> None:
         logger.info("Shutting down...")
         self._running = False
-        self._job_runner.cleanup()
+        self._bridge.cleanup()

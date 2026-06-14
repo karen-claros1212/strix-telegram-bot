@@ -11,7 +11,6 @@ from strix_telegram_bot.ui.keyboards import (
 )
 from strix_telegram_bot.ui.messages import job_status_text, job_completed_text, escape_md
 from strix_telegram_bot.jobs.job_store import JobStore
-from strix_telegram_bot.jobs.process_control import ProcessController
 from strix_telegram_bot.models import JobPhase
 from strix_telegram_bot.security import authorized_only
 
@@ -41,26 +40,14 @@ def cmd_status(bot: Any, update: dict) -> None:
 @authorized_only
 def cmd_stop(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
-    store = JobStore()
-    ctrl = ProcessController()
-    active = store.list_active()
-    if not active:
-        send_message(bot, chat_id, "No hay trabajos activos para detener.", reply_markup=back_to_menu())
-        return
-    job = active[0]
-    stopped = ctrl.stop(job.run_name)
-    if stopped:
-        job.phase = JobPhase.STOPPED
-        store.save(job)
-        send_message(
-            bot, chat_id,
-            f"Trabajo {job.run_name} detenido.",
-            reply_markup=back_to_menu(),
-        )
+    bridge = getattr(bot, "_bridge", None)
+    if bridge and bridge.is_running:
+        bridge.stop_scan()
+        send_message(bot, chat_id, "Escaneo detenido.", reply_markup=back_to_menu())
     else:
         send_message(
             bot, chat_id,
-            f"Error al detener {job.run_name}. El proceso podría ya no existir.",
+            "No hay escaneo activo para detener.",
             reply_markup=back_to_menu(),
         )
 
@@ -96,28 +83,23 @@ def callback_jobs(bot: Any, update: dict) -> None:
     elif action == "chat":
         edit_message(
             bot, chat_id, msg_id,
-            "Enviá un mensaje para responder a STRIX.",
+            "Enviá un mensaje para interactuar con STRIX.",
             reply_markup=back_to_menu(),
         )
 
     elif action == "stop":
-        store = JobStore()
-        ctrl = ProcessController()
-        active = store.list_active()
-        if active:
-            job = active[0]
-            ctrl.stop(job.run_name)
-            job.phase = JobPhase.STOPPED
-            store.save(job)
+        bridge = getattr(bot, "_bridge", None)
+        if bridge and bridge.is_running:
+            bridge.stop_scan()
             edit_message(
                 bot, chat_id, msg_id,
-                f"Trabajo {job.run_name} detenido.",
+                "Escaneo detenido.",
                 reply_markup=back_to_menu(),
             )
         else:
             edit_message(
                 bot, chat_id, msg_id,
-                "No hay trabajos activos.", reply_markup=back_to_menu(),
+                "No hay escaneo activo.", reply_markup=back_to_menu(),
             )
 
     elif action == "status":
