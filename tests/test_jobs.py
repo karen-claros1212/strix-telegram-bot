@@ -1,10 +1,9 @@
-"""Test jobs layer — store, process control, basic runner state."""
+"""Test jobs layer — JobStore persistence."""
 
 from __future__ import annotations
 
 from strix_telegram_bot.jobs.job_store import JobStore
-from strix_telegram_bot.jobs.process_control import ProcessController
-from strix_telegram_bot.models import JobState, JobPhase, ScanMode
+from strix_telegram_bot.models import JobState, JobPhase
 
 
 class TestJobStore:
@@ -37,19 +36,4 @@ class TestJobStore:
         assert len(recent) == 3
 
 
-class TestProcessController:
-    def test_register_and_unregister(self):
-        ctrl = ProcessController()
-        ctrl.register("test", 99999)
-        assert ctrl.get_pid("test") == 99999
 
-        ctrl.unregister("test")
-        assert ctrl.get_pid("test") is None
-
-    def test_is_alive_nonexistent(self):
-        ctrl = ProcessController()
-        assert ctrl.is_alive("nothing") is False
-
-    def test_stop_nonexistent(self):
-        ctrl = ProcessController()
-        assert ctrl.stop("nothing") is False

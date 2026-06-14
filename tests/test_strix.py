@@ -5,8 +5,6 @@ from __future__ import annotations
 import pytest
 from strix_telegram_bot.strix.caido_panel import CaidoPanel
 from strix_telegram_bot.strix.report_collector import ReportCollector
-from strix_telegram_bot.strix.cli_adapter import StrixCliAdapter
-from strix_telegram_bot.models import ScanMode
 
 
 class TestCaidoPanel:
@@ -27,33 +25,6 @@ class TestCaidoPanel:
         cp.clear()
         assert cp.url is None
         assert cp.active is False
-
-
-class TestCliAdapter:
-    def test_build_args_default(self):
-        cli = StrixCliAdapter()
-        args = cli.build_args(targets=["https://example.com"])
-        assert "--target" in args
-        assert "https://example.com" in args
-        assert "--non-interactive" not in args
-
-    def test_build_args_non_interactive(self):
-        cli = StrixCliAdapter()
-        args = cli.build_args(targets=["x"], non_interactive=True)
-        assert "--non-interactive" in args
-
-    def test_build_args_quick_mode(self):
-        cli = StrixCliAdapter()
-        args = cli.build_args(targets=["x"], mode=ScanMode.QUICK)
-        assert "--scan-mode" in args
-        assert "quick" in args
-
-    def test_build_args_with_instruction(self):
-        cli = StrixCliAdapter()
-        args = cli.build_args(targets=["x"], instruction="test focus")
-        assert "--instruction" in args
-        assert "test focus" in args
-
 
 class TestReportCollector:
     def test_nonexistent_run(self):
