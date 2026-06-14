@@ -26,10 +26,7 @@ def build_inline_keyboard(buttons: list[list[dict]]) -> dict:
 
 def main_menu() -> dict:
     return build_inline_keyboard([
-        [
-            _btn("Escanear", _cb("menu", "new_pentest")),
-            _btn("Chat", _cb("menu", "chat")),
-        ],
+        [_btn("Escanear", _cb("menu", "new_pentest"))],
     ])
 
 

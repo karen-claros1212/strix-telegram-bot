@@ -55,7 +55,6 @@ class StrixBot:
         self._running = False
         self._job_store = JobStore()
         self._bridge = StrixRuntimeBridge()
-        self._chat_mode: dict[int, bool] = {}
         self._last_broadcast: dict[str, float] = {}
         self._active_job_chat_id: Optional[int] = None
         self._active_job_message_id: Optional[int] = None
@@ -180,14 +179,6 @@ class StrixBot:
         elif is_active:
             self._bridge.send_message_to_agent(text)
             send_message(self, chat_id, "Mensaje enviado a STRIX.")
-        elif self._chat_mode.get(chat_id):
-            if is_active:
-                self._bridge.send_message_to_agent(text)
-            send_message(
-                self, chat_id,
-                "Mensaje enviado a STRIX.\n"
-                "Usá /start para salir del modo chat.",
-            )
         else:
             send_message(
                 self, chat_id,

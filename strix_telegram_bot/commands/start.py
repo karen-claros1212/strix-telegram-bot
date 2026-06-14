@@ -13,8 +13,6 @@ from strix_telegram_bot.security import authorized_only
 @authorized_only
 def cmd_start(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
-    chat_mode = getattr(bot, "_chat_mode", {})
-    chat_mode.pop(chat_id, None)
     text = main_menu_text()
     send_message(bot, chat_id, text, reply_markup=main_menu())
 
@@ -72,17 +70,6 @@ def callback_menu(bot: Any, update: dict) -> None:
                 bot, chat_id, msg_id,
                 "No hay archivo pendiente.", reply_markup=main_menu(),
             )
-
-    elif action == "chat":
-        bot._chat_mode[chat_id] = True
-        edit_message(
-            bot, chat_id, msg_id,
-            "Modo chat activado. Enviá un mensaje para interactuar con STRIX.\n\n"
-            "Si hay un trabajo en ejecución esperando input, "
-            "tu mensaje se enviará como respuesta.\n\n"
-            "Escribí /start para salir del modo chat.",
-            reply_markup=main_menu(),
-        )
 
     elif action == "jobs":
         _show_jobs(bot, chat_id, msg_id)
