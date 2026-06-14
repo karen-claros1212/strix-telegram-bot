@@ -78,5 +78,10 @@ class PanelManager:
         return "\n".join(parts)
 
 
-_panel_manager = PanelManager()
-get_panel_manager = lambda: _panel_manager
+_panel_managers: dict[int, PanelManager] = {}
+
+
+def get_panel_manager(chat_id: int = 0) -> PanelManager:
+    if chat_id not in _panel_managers:
+        _panel_managers[chat_id] = PanelManager()
+    return _panel_managers[chat_id]

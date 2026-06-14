@@ -171,14 +171,9 @@ def evidence_detail_menu(artifact_id: str) -> dict:
 
 
 def tools_panel(active_tools: list[dict]) -> dict:
-    rows = []
-    for tool in active_tools:
-        name = tool.get("name", "desconocida")
-        rows.append([_btn(name, _cb("tools", name.lower()))])
-    if not active_tools:
-        rows.append([_btn("Sin herramientas activas", _cb("tools", "none"))])
-    rows.append([_btn("Volver", _cb("menu", "main"))])
-    return build_inline_keyboard(rows)
+    return build_inline_keyboard([
+        [_btn("Volver", _cb("menu", "main"))],
+    ])
 
 
 def job_panel(running: bool = False) -> dict:
@@ -213,7 +208,6 @@ def report_detail_menu() -> dict:
         ],
         [
             _btn("Evidencia", _cb("report", "evidence")),
-            _btn("Descargar", _cb("report", "download")),
         ],
         [_btn("Volver a reportes", _cb("report", "list"))],
     ])

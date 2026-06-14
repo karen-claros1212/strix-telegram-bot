@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +14,8 @@ from .config import settings
 _API_BASE = settings.api_base
 _RETRY_DELAY = 0.5
 _MAX_RETRIES = 3
+
+logger = logging.getLogger("strix_telegram")
 
 
 def _api_url(method: str) -> str:
@@ -36,8 +39,25 @@ def _request(
                 result = json.loads(body)
                 if result.get("ok"):
                     return result.get("result")
+                logger.warning(
+                    "Telegram API error [%s]: %s — %s",
+                    method, result.get("error_code", "?"), result.get("description", "?"),
+                )
             return None
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        except urllib.error.HTTPError as e:
+            logger.warning(
+                "HTTP %d on %s (attempt %d/%d): %s",
+                e.code, method, attempt + 1, retries, e.reason,
+            )
+            if attempt < retries - 1:
+                time.sleep(_RETRY_DELAY * (2 ** attempt))
+                continue
+            return None
+        except (urllib.error.URLError, OSError) as e:
+            logger.warning(
+                "Connection error on %s (attempt %d/%d): %s",
+                method, attempt + 1, retries, e.reason if hasattr(e, "reason") else str(e),
+            )
             if attempt < retries - 1:
                 time.sleep(_RETRY_DELAY * (2 ** attempt))
                 continue

@@ -24,7 +24,6 @@ def callback_reports(bot: Any, update: dict) -> None:
     chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
     msg_id = cb.get("message", {}).get("message_id", "")
     parts = parse_callback(data)
-    answer_callback(bot, cb.get("id", ""))
 
     if len(parts) < 2:
         return

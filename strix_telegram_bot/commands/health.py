@@ -93,7 +93,7 @@ def callback_health(bot: Any, update: dict) -> None:
     chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
     msg_id = cb.get("message", {}).get("message_id", "")
     _send_health(bot, chat_id, msg_id)
-    answer_callback(bot, cb.get("id", ""))
+
 
 
 def _send_health(bot, chat_id, msg_id=None) -> None:

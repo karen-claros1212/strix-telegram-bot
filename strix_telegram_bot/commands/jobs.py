@@ -73,8 +73,6 @@ def callback_jobs(bot: Any, update: dict) -> None:
     msg_id = cb.get("message", {}).get("message_id", "")
     parts = parse_callback(data)
 
-    answer_callback(bot, cb.get("id", ""))
-
     if len(parts) < 2:
         return
 

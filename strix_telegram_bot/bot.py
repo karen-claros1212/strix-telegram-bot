@@ -57,7 +57,7 @@ class StrixBot:
         self._job_store = JobStore()
         self._process_controller = ProcessController()
         self._job_runner = JobRunner(self._job_store, self._process_controller)
-        self._chat_wizard: dict[int, bool] = {}
+        self._chat_mode: dict[int, bool] = {}
         self._last_broadcast: dict[str, float] = {}
         self._active_job_chat_id: Optional[int] = None
         self._active_job_message_id: Optional[int] = None
@@ -105,6 +105,21 @@ class StrixBot:
             "health": callback_health,
         }
 
+    def _register_slash_commands(self) -> None:
+        from .telegram import _request
+        commands = [
+            {"command": "start", "description": "Menú principal"},
+            {"command": "help", "description": "Ayuda y comandos"},
+            {"command": "health", "description": "Estado del sistema"},
+            {"command": "version", "description": "Versión de STRIX"},
+            {"command": "status", "description": "Estado del escaneo activo"},
+            {"command": "stop", "description": "Detener escaneo activo"},
+            {"command": "jobs", "description": "Historial de trabajos"},
+            {"command": "reports", "description": "Centro de reportes"},
+            {"command": "config", "description": "Configuración del bot"},
+        ]
+        _request("setMyCommands", {"commands": commands})
+
     def _handle_command(self, update: dict) -> None:
         msg = update.get("message", {})
         chat_id = msg.get("chat", {}).get("id", 0)
@@ -133,7 +148,10 @@ class StrixBot:
         text = (msg.get("text") or "").strip()
         chat_id = msg.get("chat", {}).get("id", 0)
 
-        pm = get_panel_manager()
+        from .telegram import send_chat_action
+        send_chat_action(self, chat_id)
+
+        pm = get_panel_manager(chat_id)
         job = self._job_runner.state
 
         if pm.current == MenuState.NEW_PENTEST_TARGET:
@@ -162,6 +180,14 @@ class StrixBot:
         elif job and job.is_active:
             self._job_runner.inject_input(text)
             send_message(self, chat_id, "Mensaje enviado a STRIX.")
+        elif self._chat_mode.get(chat_id):
+            if job:
+                self._job_runner.inject_input(text)
+            send_message(
+                self, chat_id,
+                "Mensaje enviado a STRIX.\n"
+                "Usá /start para salir del modo chat.",
+            )
         else:
             send_message(
                 self, chat_id,
@@ -170,7 +196,7 @@ class StrixBot:
             )
 
     def _handle_wizard_target(self, chat_id: int, text: str, msg: dict) -> None:
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         targets = [t.strip() for t in text.replace("\n", ",").split(",") if t.strip()]
 
         if not targets:
@@ -199,17 +225,18 @@ class StrixBot:
         data = cb.get("data", "")
         chat_id = cb.get("message", {}).get("chat", {}).get("id", 0)
         user_id = str(cb.get("from", {}).get("id", ""))
+        cb_id = cb.get("id", "")
 
         if not data or not is_authorized(user_id, str(chat_id)):
-            answer_callback(self, cb.get("id", ""))
+            answer_callback(self, cb_id)
             return
+
+        answer_callback(self, cb_id)
 
         prefix = data.split(":")[0] if ":" in data else data
         handler = self._callback_handlers.get(prefix)
         if handler:
             handler(self, update)
-        else:
-            answer_callback(self, cb.get("id", ""))
 
     def _callback_target(self, bot: Any, update: dict) -> None:
         cb = update.get("callback_query", {})
@@ -217,12 +244,11 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
 
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         target_type = parts[1]
         pm.push(MenuState.NEW_PENTEST_TARGET)
 
@@ -251,12 +277,11 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
 
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         action = parts[1]
 
         if action in ("quick", "standard", "deep"):
@@ -282,6 +307,9 @@ class StrixBot:
         msg = update.get("message", {})
         chat_id = msg.get("chat", {}).get("id", 0)
 
+        from .telegram import send_chat_action
+        send_chat_action(self, chat_id)
+
         doc = msg.get("document")
         if not doc and msg.get("photo"):
             doc = msg.get("photo", [None])[-1]
@@ -302,7 +330,7 @@ class StrixBot:
             send_message(self, chat_id, "Error al descargar el archivo.")
             return
 
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         run_name = "upload"
         active = self._job_store.list_active()
         if active:
@@ -325,7 +353,7 @@ class StrixBot:
                 reply_markup=self._depth_selector(),
             )
         elif not active:
-            pm._pending_attachment = str(abs_path)
+            self._pending_attachment = str(abs_path)
             send_message(
                 self, chat_id,
                 f"Recibí el archivo: {file_name}\n"
@@ -345,12 +373,11 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
 
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         if parts[1] == "interactive":
             pm._selected_profile = ProfileType.INTERACTIVE
         elif parts[1] == "headless":
@@ -372,12 +399,11 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
 
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         action = parts[1]
 
         if action in ("auto", "diff", "full"):
@@ -413,12 +439,11 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
 
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
         action = parts[1]
 
         if action == "skip":
@@ -468,7 +493,6 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
@@ -550,7 +574,6 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         from .strix.caido_panel import CaidoPanel
         from .strix.report_collector import ReportCollector
@@ -586,7 +609,6 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
@@ -611,7 +633,6 @@ class StrixBot:
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
         parts = parse_callback(data)
-        answer_callback(bot, cb.get("id", ""))
 
         if len(parts) < 2:
             return
@@ -718,7 +739,10 @@ class StrixBot:
         targets: Optional[list[str]] = None,
         mode: Optional[ScanMode] = None,
     ) -> None:
-        pm = get_panel_manager()
+        pm = get_panel_manager(chat_id)
+
+        from .telegram import send_chat_action
+        send_chat_action(bot, chat_id)
 
         if targets is None:
             targets = pm._selected_targets
@@ -756,6 +780,7 @@ class StrixBot:
 
     def run(self, poll_interval: float = 1.0) -> None:
         logger.info("STRIX Bot starting...")
+        self._register_slash_commands()
         self._running = True
 
         while self._running:

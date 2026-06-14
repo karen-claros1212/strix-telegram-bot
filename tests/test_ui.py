@@ -76,12 +76,12 @@ class TestKeyboards:
     def test_tools_panel(self):
         kb = tools_panel([{"name": "Browser", "status": "active"}])
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Browser" in texts
+        assert "Volver" in texts
 
     def test_tools_panel_empty(self):
         kb = tools_panel([])
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Sin herramientas activas" in texts
+        assert "Volver" in texts
 
     def test_target_selector(self):
         kb = target_type_selector()
