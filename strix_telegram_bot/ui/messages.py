@@ -184,6 +184,8 @@ def help_text() -> str:
         "  Headless / CI — automático, sin interfaz\n"
         "\n"
         "Chat — Hablá con STRIX o respondé a sus preguntas\n"
+        "  /chat — entrar/salir del modo Chat\n"
+        "  Mientras estás en Chat, cualquier texto va al agente\n"
         "Detener — Detiene el escaneo activo\n"
         "Estado — Muestra el estado del escaneo actual"
     )

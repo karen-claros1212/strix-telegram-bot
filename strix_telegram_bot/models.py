@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from pathlib import Path
+from enum import Enum
 from typing import Optional
 
 
@@ -56,11 +55,6 @@ class FocusPreset(str, Enum):
     CUSTOM = "Custom"
 
 
-class ChatMode(str, Enum):
-    FREE = "free"
-    JOB_RESPONSE = "job_response"
-
-
 class MenuState(str, Enum):
     MAIN = "main"
     NEW_PENTEST_TARGET = "new_pentest_target"
@@ -80,6 +74,7 @@ class MenuState(str, Enum):
     TOOLS = "tools"
     HEALTH = "health"
     CONFIG = "config"
+    CHAT = "chat"
 
 
 _FOCUS_INSTRUCTIONS: dict[FocusPreset, str] = {

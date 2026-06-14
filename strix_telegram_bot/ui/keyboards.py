@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
-from strix_telegram_bot.models import FocusPreset, MenuState, ProfileType, ScanMode, ScopeMode, TargetType
+from strix_telegram_bot.models import MenuState
 
 
 _CALLBACK_SEP = ":"
@@ -26,7 +24,44 @@ def build_inline_keyboard(buttons: list[list[dict]]) -> dict:
 
 def main_menu() -> dict:
     return build_inline_keyboard([
-        [_btn("Escanear", _cb("menu", "new_pentest"))],
+        [
+            _btn("Escanear", _cb("menu", "new_pentest")),
+            _btn("Chat", _cb("chat", "enter")),
+        ],
+    ])
+
+
+def chat_connected(agent_name: str, status: str) -> dict:
+    return build_inline_keyboard([
+        [_btn("Cambiar agente", _cb("chat", "agents"))],
+        [_btn("Salir del Chat", _cb("chat", "exit"))],
+    ])
+
+
+def agent_selector(agents: list[dict]) -> dict:
+    rows = []
+    for a in agents:
+        label = a.get("name", a["id"])[:40]
+        status_icon = _status_icon(a.get("status", ""))
+        rows.append([_btn(f"{status_icon} {label}", _cb("agent", a["id"]))])
+    rows.append([_btn("Volver", _cb("menu", "main"))])
+    return build_inline_keyboard(rows)
+
+
+def _status_icon(status: str) -> str:
+    return {
+        "running": "▶️",
+        "waiting": "⏳",
+        "completed": "✅",
+        "stopped": "⏹",
+        "failed": "❌",
+    }.get(status, "❓")
+
+
+def back_from_chat() -> dict:
+    return build_inline_keyboard([
+        [_btn("Volver al chat", _cb("chat", "agents"))],
+        [_btn("Menú principal", _cb("menu", "main"))],
     ])
 
 

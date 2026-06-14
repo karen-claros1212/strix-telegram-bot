@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
+from strix_telegram_bot.telegram import send_message, edit_message
 from strix_telegram_bot.ui.keyboards import (
     job_panel,
     jobs_main_menu,
     back_to_menu,
     parse_callback,
 )
-from strix_telegram_bot.ui.messages import job_status_text, job_completed_text, escape_md
+from strix_telegram_bot.ui.messages import job_status_text, escape_md
 from strix_telegram_bot.jobs.job_store import JobStore
 from strix_telegram_bot.models import JobPhase
 from strix_telegram_bot.security import authorized_only
@@ -81,11 +81,9 @@ def callback_jobs(bot: Any, update: dict) -> None:
         _list_jobs_by_status(bot, chat_id, msg_id, JobPhase.STOPPED)
 
     elif action == "chat":
-        edit_message(
-            bot, chat_id, msg_id,
-            "Enviá un mensaje para interactuar con STRIX.",
-            reply_markup=back_to_menu(),
-        )
+        from .chat import callback_chat
+        update["callback_query"]["data"] = "chat:enter"
+        callback_chat(bot, update)
 
     elif action == "stop":
         bridge = getattr(bot, "_bridge", None)

@@ -294,6 +294,30 @@ class StrixRuntimeBridge:
         except Exception:
             return None
 
+    def list_agents(self) -> list[dict]:
+        """Return flat list of agents from coordinator tree."""
+        tree = self.get_agent_tree()
+        if not tree:
+            return []
+        agents: list[dict] = []
+        self._flatten_tree(tree, agents)
+        return agents
+
+    @staticmethod
+    def _flatten_tree(node: Any, agents: list[dict], parent_id: Optional[str] = None) -> None:
+        if isinstance(node, dict):
+            for agent_id, data in node.items():
+                entry = {
+                    "id": agent_id,
+                    "name": data.get("name", agent_id),
+                    "status": data.get("status", "unknown"),
+                    "parent_id": parent_id,
+                }
+                agents.append(entry)
+                children = data.get("children", {})
+                if children:
+                    StrixRuntimeBridge._flatten_tree(children, agents, agent_id)
+
     def get_run_status(self) -> dict:
         status: dict[str, Any] = {
             "run_name": self._run_name,

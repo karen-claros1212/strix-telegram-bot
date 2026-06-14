@@ -7,22 +7,18 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .config import settings
 from .telegram import get_updates, send_message, edit_message, answer_callback
 from .security import is_authorized
-from .models import FocusPreset, JobPhase, MenuState, ProfileType, ScanMode, ScopeMode
+from .models import FocusPreset, MenuState, ProfileType, ScanMode, ScopeMode
 from .ui.keyboards import (
     main_menu,
-    target_type_selector,
     depth_selector,
     job_panel,
     back_to_menu,
     parse_callback,
 )
 from .ui.messages import (
-    main_menu_text,
     job_status_text,
-    help_text,
     escape_md,
 )
 from .ui.panels import get_panel_manager
@@ -71,6 +67,7 @@ class StrixBot:
         from .commands.jobs import cmd_jobs, cmd_status, cmd_stop, callback_jobs
         from .commands.reports import cmd_reports, callback_reports
         from .commands.config import cmd_config, callback_config
+        from .commands.chat import cmd_chat, callback_chat, callback_agent_select
 
         self._command_handlers = {
             "/start": cmd_start,
@@ -83,6 +80,7 @@ class StrixBot:
             "/stop": cmd_stop,
             "/reports": cmd_reports,
             "/config": cmd_config,
+            "/chat": cmd_chat,
         }
 
         self._callback_handlers = {
@@ -100,6 +98,8 @@ class StrixBot:
             "caido": self._callback_caido,
             "config": callback_config,
             "health": callback_health,
+            "chat": callback_chat,
+            "agent": callback_agent_select,
         }
 
     def _register_slash_commands(self) -> None:
@@ -111,6 +111,7 @@ class StrixBot:
             {"command": "version", "description": "Versión de STRIX"},
             {"command": "status", "description": "Estado del escaneo activo"},
             {"command": "stop", "description": "Detener escaneo activo"},
+            {"command": "chat", "description": "Entrar / salir del modo Chat"},
             {"command": "jobs", "description": "Historial de trabajos"},
             {"command": "reports", "description": "Centro de reportes"},
             {"command": "config", "description": "Configuración del bot"},
@@ -144,14 +145,28 @@ class StrixBot:
         msg = update.get("message", {})
         text = (msg.get("text") or "").strip()
         chat_id = msg.get("chat", {}).get("id", 0)
+        user_id = str(msg.get("from", {}).get("id", ""))
 
         from .telegram import send_chat_action
         send_chat_action(self, chat_id)
+
+        from .state.chat_session import get_chat_session
+        session = get_chat_session(chat_id, user_id)
 
         pm = get_panel_manager(chat_id)
         status = self._bridge.to_status_dict()
         is_active = self._bridge.is_running
         awaiting_input = status.get("awaiting_input", False)
+
+        if session.is_chat_active():
+            aid = session.selected_agent_id
+            ok = self._bridge.send_message_to_agent(text, agent_id=aid)
+            if ok:
+                send_chat_action(self, chat_id)
+                self._process_chat_events(self._bridge.poll_events())
+            else:
+                send_message(self, chat_id, "Error al enviar el mensaje.")
+            return
 
         if pm.current == MenuState.NEW_PENTEST_TARGET:
             self._handle_wizard_target(chat_id, text, msg)
@@ -174,11 +189,17 @@ class StrixBot:
                 reply_markup=depth_selector(),
             )
         elif awaiting_input:
-            self._bridge.send_message_to_agent(text)
-            send_message(self, chat_id, "Respuesta enviada a STRIX.")
+            ok = self._bridge.send_message_to_agent(text)
+            if ok:
+                send_message(self, chat_id, "Respuesta enviada a STRIX.")
+            else:
+                send_message(self, chat_id, "Error al enviar la respuesta.")
         elif is_active:
-            self._bridge.send_message_to_agent(text)
-            send_message(self, chat_id, "Mensaje enviado a STRIX.")
+            ok = self._bridge.send_message_to_agent(text)
+            if ok:
+                send_message(self, chat_id, "Mensaje enviado a STRIX.")
+            else:
+                send_message(self, chat_id, "Error al enviar el mensaje.")
         else:
             send_message(
                 self, chat_id,
@@ -561,12 +582,9 @@ class StrixBot:
 
     def _callback_tools(self, bot: Any, update: dict) -> None:
         cb = update.get("callback_query", {})
-        data = cb.get("data", "")
         chat_id = cb.get("message", {}).get("chat", {}).get("id", "")
         msg_id = cb.get("message", {}).get("message_id", "")
-        parts = parse_callback(data)
 
-        from .strix.caido_panel import CaidoPanel
         from .strix.report_collector import ReportCollector
         from .ui.keyboards import tools_panel
         from .ui.messages import tools_panel_text
@@ -673,11 +691,29 @@ class StrixBot:
             edit_message(bot, chat_id, msg_id, text, reply_markup=caido_main_menu())
 
     def _drain_update_queue(self) -> None:
+        events = self._bridge.poll_events()
+
+        self._process_chat_events(events)
+
         if self._active_job_chat_id is None or self._active_job_message_id is None:
-            self._bridge.poll_events()
             return
 
-        status = self._bridge.to_status_dict()
+        status = self._bridge.get_run_status()
+        for ev in events:
+            if ev.type == "scan_complete":
+                status["phase"] = "completed"
+                status["is_active"] = False
+            elif ev.type == "scan_cancelled":
+                status["phase"] = "stopped"
+                status["is_active"] = False
+            elif ev.type == "scan_error":
+                status["phase"] = "failed"
+                status["is_active"] = False
+                status["error"] = ev.content
+            if ev.awaiting_input:
+                status["awaiting_input"] = True
+                status["input_prompt"] = ev.prompt
+
         if not status.get("run_name") and not self._bridge.is_running:
             return
 
@@ -691,7 +727,6 @@ class StrixBot:
         )
 
         if not status.get("is_active") and status.get("run_name"):
-            from .ui.messages import job_completed_text
             phase = status.get("phase", "completed")
             delta = status.get("elapsed", "0s")
             final = (
@@ -703,6 +738,82 @@ class StrixBot:
             self._active_job_chat_id = None
             self._active_job_message_id = None
             send_message(self, chat_id, final, reply_markup=back_to_menu())
+
+    def _process_chat_events(self, events: list) -> None:
+        from .state.chat_session import get_all_chat_sessions
+        sessions = [s for s in get_all_chat_sessions() if s.is_chat_active() and s.run_name]
+        if not sessions:
+            return
+
+        run_name = self._bridge.run_name
+        if not run_name:
+            return
+
+        active_sessions = [s for s in sessions if s.run_name == run_name]
+        if not active_sessions:
+            return
+
+        for ev in events:
+            seen_key = f"{ev.agent_id}:{ev.type}:{ev.timestamp}"
+            already_seen = all(
+                seen_key in s._seen_event_ids for s in active_sessions
+            )
+
+            from .telegram import send_chat_action, send_message
+
+            if ev.type == "input_request":
+                msg = f"⏳ STRIX necesita información:\n{escape_md(ev.prompt or ev.content)}"
+                for s in active_sessions:
+                    s._seen_event_ids.add(seen_key)
+                    send_message(self, s.chat_id, msg, reply_markup=back_to_menu())
+
+            elif ev.type in ("agent.message", "agent.response", "chat"):
+                if already_seen:
+                    continue
+                for s in active_sessions:
+                    if s.selected_agent_id and s.selected_agent_id in (ev.agent_id, ""):
+                        s._seen_event_ids.add(seen_key)
+                        send_chat_action(self, s.chat_id)
+                        content = ev.content[:4000] if ev.content else "..."
+                        send_message(self, s.chat_id, f"🤖 *{escape_md(ev.agent_id)}*:\n{escape_md(content)}")
+
+            elif ev.type in ("vulnerability", "finding"):
+                if already_seen:
+                    continue
+                for s in active_sessions:
+                    s._seen_event_ids.add(seen_key)
+                    content = ev.content[:4000] if ev.content else "..."
+                    send_message(self, s.chat_id, f"🔍 *Hallazgo*:\n{escape_md(content)}")
+
+            elif ev.type == "tool_call":
+                if already_seen:
+                    continue
+                for s in active_sessions:
+                    s._seen_event_ids.add(seen_key)
+                    content = ev.content[:200] if ev.content else "..."
+                    send_message(self, s.chat_id, f"🛠 *{escape_md(ev.agent_id)}* ejecuta: {escape_md(content)}")
+
+            elif ev.type == "tool_result":
+                if already_seen:
+                    continue
+                for s in active_sessions:
+                    s._seen_event_ids.add(seen_key)
+                    content = ev.content[:1000] if ev.content else ""
+
+            elif ev.type == "scan_complete":
+                for s in active_sessions:
+                    send_message(self, s.chat_id, "✅ Escaneo completado.", reply_markup=main_menu())
+                    s.exit_chat()
+
+            elif ev.type == "scan_error":
+                for s in active_sessions:
+                    send_message(self, s.chat_id, f"❌ Error: {escape_md(ev.content)}", reply_markup=main_menu())
+                    s.exit_chat()
+
+            elif ev.type == "scan_cancelled":
+                for s in active_sessions:
+                    send_message(self, s.chat_id, "⏹ Escaneo detenido.", reply_markup=main_menu())
+                    s.exit_chat()
 
     def _launch_scan(
         self,
