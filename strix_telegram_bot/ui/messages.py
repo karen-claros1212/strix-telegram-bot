@@ -41,26 +41,52 @@ def main_menu_text(strix_version: str = "") -> str:
     )
 
 
-def job_status_text(job: JobState) -> str:
-    phase_icon = _PHASE_ICONS.get(job.phase, "?")
-    mode_icon = _MODE_ICONS.get(job.mode, job.mode.value)
+def job_status_text(job: JobState | dict) -> str:
+    if isinstance(job, dict):
+        phase_str = job.get("phase", "unknown")
+        try:
+            phase = JobPhase(phase_str)
+        except ValueError:
+            phase = None
+        mode_str = job.get("mode", "deep")
+        try:
+            mode = ScanMode(mode_str)
+        except ValueError:
+            mode = None
+
+        phase_icon = _PHASE_ICONS.get(phase, phase_str) if phase else phase_str
+        mode_icon = _MODE_ICONS.get(mode, mode_str) if mode else mode_str.upper()
+        target = job.get("target", [])
+        elapsed = job.get("elapsed", "0s")
+        error = job.get("error")
+        awaiting = job.get("awaiting_input", False)
+        prompt = job.get("input_prompt")
+    else:
+        phase_icon = _PHASE_ICONS.get(job.phase, "?")
+        mode_icon = _MODE_ICONS.get(job.mode, job.mode.value)
+        target = job.target
+        elapsed = job.elapsed
+        error = job.error
+        awaiting = job.awaiting_input
+        prompt = job.input_prompt
+        phase = job.phase
 
     lines = [
         f"Escaneo {mode_icon}",
-        f"Objetivo: {escape_md(', '.join(job.target))}",
+        f"Objetivo: {escape_md(', '.join(target) if isinstance(target, list) else str(target))}",
         f"Estado: {phase_icon}",
-        f"Fase: {job.phase.value}",
-        f"Tiempo: {job.elapsed}",
+        f"Fase: {phase.value if isinstance(phase, JobPhase) else phase}",
+        f"Tiempo: {elapsed}",
     ]
 
-    if job.caido_url:
+    if isinstance(job, JobState) and job.caido_url:
         lines.append(f"Caido: {escape_md(job.caido_url)}")
 
-    if job.error:
-        lines.append(f"Error: {escape_md(job.error)}")
+    if error:
+        lines.append(f"Error: {escape_md(error)}")
 
-    if job.awaiting_input and job.input_prompt:
-        lines.append(f"\nSTRIX necesita información: {escape_md(job.input_prompt)}")
+    if awaiting and prompt:
+        lines.append(f"\nSTRIX necesita información: {escape_md(prompt)}")
 
     return "\n".join(lines)
 
