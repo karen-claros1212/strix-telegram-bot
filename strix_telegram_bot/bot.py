@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional
 from .config import settings
 from .telegram import get_updates, send_message, edit_message, answer_callback
 from .security import is_authorized
-from .models import FocusPreset, MenuState, ProfileType, ScanMode, ScopeMode
+from .models import FocusPreset, JobPhase, MenuState, ProfileType, ScanMode, ScopeMode
 from .ui.keyboards import (
     main_menu,
     target_type_selector,
@@ -62,6 +62,8 @@ class StrixBot:
         self._active_job_chat_id: Optional[int] = None
         self._active_job_message_id: Optional[int] = None
 
+        self._pending_attachment: Optional[str] = None
+
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
         self._register_handlers()
@@ -109,7 +111,7 @@ class StrixBot:
         user_id = str(msg.get("from", {}).get("id", ""))
 
         if not is_authorized(user_id, str(chat_id)):
-            send_message(self, chat_id, "Unauthorized.")
+            send_message(self, chat_id, "No autorizado.")
             return
 
         if "document" in msg or "photo" in msg:
@@ -142,7 +144,7 @@ class StrixBot:
             from .ui.keyboards import focus_presets
             send_message(
                 self, chat_id,
-                f"Diff base: {text}\n\nFocus / Instruction:",
+                f"Diff base: {text}\n\nInstrucción / Enfoque:",
                 reply_markup=focus_presets(),
             )
         elif pm.current == MenuState.NEW_PENTEST_INSTRUCTION:
@@ -151,19 +153,19 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             send_message(
                 self, chat_id,
-                "Custom instruction saved.\n\nSelect scan mode:",
+                "Instrucción guardada.\n\nSeleccioná modo de escaneo:",
                 reply_markup=depth_selector(),
             )
         elif job and job.awaiting_input:
             self._job_runner.inject_input(text)
-            send_message(self, chat_id, "Response sent to STRIX.")
+            send_message(self, chat_id, "Respuesta enviada a STRIX.")
         elif job and job.is_active:
             self._job_runner.inject_input(text)
-            send_message(self, chat_id, "Message sent to STRIX.")
+            send_message(self, chat_id, "Mensaje enviado a STRIX.")
         else:
             send_message(
                 self, chat_id,
-                "No active job. Use /start to begin.",
+                "No hay un trabajo activo. Usá /start para comenzar.",
                 reply_markup=main_menu(),
             )
 
@@ -172,14 +174,14 @@ class StrixBot:
         targets = [t.strip() for t in text.replace("\n", ",").split(",") if t.strip()]
 
         if not targets:
-            send_message(self, chat_id, "Please send a valid target.")
+            send_message(self, chat_id, "Enviá un objetivo válido.")
             return
 
         from .safety.attachment_policy import sanitize_target
         for t in targets:
             ok, err = sanitize_target(t)
             if not ok:
-                send_message(self, chat_id, f"Invalid target {t}: {err}")
+                send_message(self, chat_id, f"Objetivo inválido {t}: {err}")
                 return
 
         pm._selected_targets = targets
@@ -188,7 +190,7 @@ class StrixBot:
 
         send_message(
             self, chat_id,
-            f"Target: {', '.join(targets)}\nSelect profile:",
+            f"Objetivo: {', '.join(targets)}\nSeleccioná perfil:",
             reply_markup=profile_selector(),
         )
 
@@ -228,18 +230,18 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_ATTACHMENT)
             edit_message(
                 bot, chat_id, msg_id,
-                "Upload the file as a document in this chat.\n"
-                "The bot will save it and pass it to STRIX.",
+                "Subí el archivo como documento en este chat.\n"
+                "El bot lo guardará y lo pasará a STRIX.",
                 reply_markup=back_to_menu(),
             )
             return
 
         prompt = {
-            "url": "Send the URL or domain:",
-            "github": "Send the GitHub repo URL:",
-            "local": "Send the local path:",
-            "multi": "Send targets (comma or line separated):",
-        }.get(target_type, "Send the target:")
+            "url": "Enviá la URL o dominio:",
+            "github": "Enviá la URL del repo GitHub:",
+            "local": "Enviá la ruta local:",
+            "multi": "Enviá los objetivos (separados por coma o línea):",
+        }.get(target_type, "Enviá el objetivo:")
 
         edit_message(bot, chat_id, msg_id, prompt, reply_markup=back_to_menu())
 
@@ -259,9 +261,10 @@ class StrixBot:
 
         if action in ("quick", "standard", "deep"):
             pm._selected_depth = ScanMode(action)
+            names = {"quick": "RÁPIDO", "standard": "ESTÁNDAR", "deep": "PROFUNDO"}
             edit_message(
                 bot, chat_id, msg_id,
-                f"Mode: {action.upper()}\n{pm.wizard_summary()}",
+                f"Modo: {names.get(action, action.upper())}\n{pm.wizard_summary()}",
                 reply_markup=depth_selector(),
             )
 
@@ -271,7 +274,7 @@ class StrixBot:
             else:
                 edit_message(
                     bot, chat_id, msg_id,
-                    "Please select a target first.",
+                    "Seleccioná un objetivo primero.",
                     reply_markup=back_to_menu(),
                 )
 
@@ -283,19 +286,20 @@ class StrixBot:
         if not doc and msg.get("photo"):
             doc = msg.get("photo", [None])[-1]
         if not doc:
-            send_message(self, chat_id, "Could not read file.")
+            send_message(self, chat_id, "No se pudo leer el archivo.")
             return
 
         from .telegram import get_file
         from pathlib import Path
         from .strix.evidence_vault import EvidenceVault
+        from .ui.keyboards import attachment_offer
 
         file_id = doc.get("file_id", "")
         file_name = doc.get("file_name", "upload.bin") if "file_name" in doc else "photo.jpg"
 
         file_bytes = get_file(self, file_id)
         if file_bytes is None:
-            send_message(self, chat_id, "Failed to download file.")
+            send_message(self, chat_id, "Error al descargar el archivo.")
             return
 
         pm = get_panel_manager()
@@ -307,24 +311,32 @@ class StrixBot:
         vault = EvidenceVault(run_name)
         artifact = vault.store_bytes(file_bytes, file_name, subdir="files", sensitive=False)
         if artifact is None:
-            send_message(self, chat_id, "Failed to store file in evidence vault.")
+            send_message(self, chat_id, "Error al guardar el archivo.")
             return
 
         abs_path = Path(artifact["absolute_path"])
-
-        send_message(
-            self, chat_id,
-            f"File saved: {file_name}\nSHA256: {artifact['sha256'][:16]}...\n"
-            f"Path: {abs_path}"
-        )
 
         if pm.current == MenuState.NEW_PENTEST_ATTACHMENT:
             pm._selected_targets = [str(abs_path)]
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             send_message(
                 self, chat_id,
-                f"Attachment ready: {abs_path.name}\nSelect scan mode:",
+                f"Archivo listo: {abs_path.name}\nSeleccioná modo de escaneo:",
                 reply_markup=self._depth_selector(),
+            )
+        elif not active:
+            pm._pending_attachment = str(abs_path)
+            send_message(
+                self, chat_id,
+                f"Recibí el archivo: {file_name}\n"
+                "¿Querés iniciar un escaneo con él?",
+                reply_markup=attachment_offer(),
+            )
+        else:
+            send_message(
+                self, chat_id,
+                f"Archivo guardado: {file_name}\n"
+                f"SHA256: {artifact['sha256'][:16]}...",
             )
 
     def _callback_profile(self, bot: Any, update: dict) -> None:
@@ -350,7 +362,7 @@ class StrixBot:
         from .ui.keyboards import scope_mode_selector
         edit_message(
             bot, chat_id, msg_id,
-            f"Profile: {pm._selected_profile.value}\n\nConfigure scope mode:",
+            f"Perfil: {pm._selected_profile.value}\n\nConfigurá el alcance:",
             reply_markup=scope_mode_selector(),
         )
 
@@ -370,18 +382,19 @@ class StrixBot:
 
         if action in ("auto", "diff", "full"):
             pm._selected_scope_mode = ScopeMode(action)
+            names = {"auto": "AUTO", "diff": "DIFF", "full": "FULL"}
             from .ui.keyboards import scope_mode_selector
             edit_message(
                 bot, chat_id, msg_id,
-                f"Scope: {action.upper()}\n"
-                "Optionally set a diff base or continue.",
+                f"Alcance: {names.get(action, action.upper())}\n"
+                "Opcional: configurá una diff base o continuá.",
                 reply_markup=scope_mode_selector(),
             )
         elif action == "diff_base":
             pm.push(MenuState.NEW_PENTEST_DIFF_BASE)
             edit_message(
                 bot, chat_id, msg_id,
-                "Send a diff base (e.g. 'origin/main' or a commit hash):",
+                "Enviá una diff base (ej: 'origin/main' o un commit hash):",
                 reply_markup=back_to_menu(),
             )
         elif action == "done":
@@ -412,7 +425,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             edit_message(
                 bot, chat_id, msg_id,
-                f"Target: {', '.join(pm._selected_targets)}\nSelect scan mode:",
+                f"Objetivo: {', '.join(pm._selected_targets)}\nSeleccioná modo de escaneo:",
                 reply_markup=depth_selector(),
             )
             return
@@ -437,7 +450,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_INSTRUCTION)
             edit_message(
                 bot, chat_id, msg_id,
-                "Send your custom instruction:",
+                "Enviá tu instrucción personalizada:",
                 reply_markup=back_to_menu(),
             )
         else:
@@ -445,7 +458,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             edit_message(
                 bot, chat_id, msg_id,
-                f"Focus: {preset.value}\nInstruction ready.\n\nSelect scan mode:",
+                f"Enfoque: {preset.value}\nInstrucción lista.\n\nSeleccioná modo de escaneo:",
                 reply_markup=depth_selector(),
             )
 
@@ -467,7 +480,7 @@ class StrixBot:
         store = self._job_store
         jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
         if not jobs:
-            edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=back_to_menu())
+            edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
             return
 
         vault = EvidenceVault(jobs[0].run_name)
@@ -476,7 +489,7 @@ class StrixBot:
         if action == "list":
             artifacts = vault.list_evidence()
             if not artifacts:
-                edit_message(bot, chat_id, msg_id, "No evidence.", reply_markup=back_to_menu())
+                edit_message(bot, chat_id, msg_id, "No hay evidencia.", reply_markup=back_to_menu())
                 return
             text = evidence_text(vault.get_manifest())
             edit_message(bot, chat_id, msg_id, text, reply_markup=evidence_list_menu(artifacts))
@@ -485,10 +498,10 @@ class StrixBot:
             artifact_id = action.split(":", 1)[1]
             preview = vault.redacted_preview(artifact_id)
             if preview:
-                send_message(bot, chat_id, f"Redacted preview:\n\n{preview[:3500]}")
-                edit_message(bot, chat_id, msg_id, "Preview sent.", reply_markup=evidence_detail_menu(artifact_id))
+                send_message(bot, chat_id, f"Vista previa (censurada):\n\n{preview[:3500]}")
+                edit_message(bot, chat_id, msg_id, "Vista previa enviada.", reply_markup=evidence_detail_menu(artifact_id))
             else:
-                edit_message(bot, chat_id, msg_id, "Cannot preview.", reply_markup=back_to_menu())
+                edit_message(bot, chat_id, msg_id, "No se puede previsualizar.", reply_markup=back_to_menu())
 
         elif action.startswith("raw:"):
             artifact_id = action.split(":", 1)[1]
@@ -506,30 +519,30 @@ class StrixBot:
                         if _is_likely_binary(full_path):
                             send_message(
                                 bot, chat_id,
-                                f"RAW artifact is binary ({full_path.suffix}). "
-                                f"File path: {full_path}\n"
-                                f"Size: {full_path.stat().st_size / 1024:.1f} KB\n"
+                                f"El artefacto es binario ({full_path.suffix}).\n"
+                                f"Ruta: {full_path}\n"
+                                f"Tamaño: {full_path.stat().st_size / 1024:.1f} KB\n"
                                 f"SHA256: {match.get('sha256', '?')[:16]}..."
                             )
                         else:
                             content = full_path.read_text(encoding="utf-8", errors="replace")
-                            send_message(bot, chat_id, f"RAW artifact:\n\n{content[:3500]}")
-                        edit_message(bot, chat_id, msg_id, "RAW sent.", reply_markup=evidence_detail_menu(artifact_id))
+                            send_message(bot, chat_id, f"Artefacto CRUDO:\n\n{content[:3500]}")
+                        edit_message(bot, chat_id, msg_id, "CRUDO enviado.", reply_markup=evidence_detail_menu(artifact_id))
                         return
-            edit_message(bot, chat_id, msg_id, "Artifact not found.", reply_markup=back_to_menu())
+            edit_message(bot, chat_id, msg_id, "Artefacto no encontrado.", reply_markup=back_to_menu())
 
         elif action.startswith("redacted:"):
             artifact_id = action.split(":", 1)[1]
             preview = vault.redacted_preview(artifact_id)
             if preview:
-                send_message(bot, chat_id, f"Redacted artifact:\n\n{preview[:3500]}")
-                edit_message(bot, chat_id, msg_id, "Redacted sent.", reply_markup=evidence_detail_menu(artifact_id))
+                send_message(bot, chat_id, f"Artefacto censurado:\n\n{preview[:3500]}")
+                edit_message(bot, chat_id, msg_id, "Censurado enviado.", reply_markup=evidence_detail_menu(artifact_id))
             else:
-                edit_message(bot, chat_id, msg_id, "Cannot redact.", reply_markup=back_to_menu())
+                edit_message(bot, chat_id, msg_id, "No se puede censurar.", reply_markup=back_to_menu())
 
         elif len(parts) >= 2:
             artifact_id = parts[1]
-            edit_message(bot, chat_id, msg_id, "Evidence detail:", reply_markup=evidence_detail_menu(artifact_id))
+            edit_message(bot, chat_id, msg_id, "Detalle de evidencia:", reply_markup=evidence_detail_menu(artifact_id))
 
     def _callback_tools(self, bot: Any, update: dict) -> None:
         cb = update.get("callback_query", {})
@@ -589,7 +602,7 @@ class StrixBot:
         else:
             edit_message(
                 bot, chat_id, msg_id,
-                "Job not found.", reply_markup=back_to_menu(),
+                "Trabajo no encontrado.", reply_markup=back_to_menu(),
             )
 
     def _callback_caido(self, bot: Any, update: dict) -> None:
@@ -617,33 +630,33 @@ class StrixBot:
             if run_name:
                 status = cp.build_caido_panel(run_name)
             else:
-                status = "No active job to detect Caido on."
+                status = "No hay trabajo activo para detectar Caido."
             edit_message(bot, chat_id, msg_id, status, reply_markup=caido_main_menu())
 
         elif action == "artifacts":
             if run_name:
                 artifacts = cp.collect_caido_artifacts(run_name)
                 if artifacts:
-                    lines = ["Caido Artifacts:"]
+                    lines = ["Artefactos Caido:"]
                     for a in artifacts:
                         lines.append(f"  {a['name']} ({a['size']/1024:.1f} KB)")
                     text = "\n".join(lines)
                 else:
-                    text = "No Caido artifacts found."
+                    text = "No se encontraron artefactos Caido."
             else:
-                text = "No active job."
+                text = "No hay trabajo activo."
             edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())
 
         elif action == "instructions":
             text = (
-                "Caido is a web proxy for manual traffic inspection.\n\n"
-                "STRIX exposes Caido when running scans.\n"
-                "Use the URL above to:\n"
-                "  - Inspect HTTP requests/responses\n"
-                "  - Replay and modify requests\n"
-                "  - Explore the sitemap\n"
-                "  - Test manually alongside the agent\n\n"
-                "Caido runs on localhost only."
+                "Caido es un proxy web para inspección manual de tráfico.\n\n"
+                "STRIX expone Caido al ejecutar escaneos.\n"
+                "Usá la URL de arriba para:\n"
+                "  - Inspeccionar requests/responses HTTP\n"
+                "  - Replay y modificar requests\n"
+                "  - Explorar el sitemap\n"
+                "  - Testear manualmente junto al agente\n\n"
+                "Caido corre solo en localhost."
             )
             edit_message(bot, chat_id, msg_id, text, reply_markup=caido_main_menu())
 
@@ -653,10 +666,13 @@ class StrixBot:
             return
 
         processed = False
+        completed = False
+        last_job = None
         while not self._job_runner.update_queue.empty():
             try:
                 job = self._job_runner.update_queue.get_nowait()
                 if job:
+                    last_job = job
                     text = job_status_text(job)
                     edit_message(
                         self,
@@ -666,12 +682,15 @@ class StrixBot:
                         reply_markup=job_panel(running=job.is_active),
                     )
                     processed = True
+                    if job.phase == JobPhase.COMPLETED or job.phase == JobPhase.FAILED:
+                        completed = True
             except Exception:
                 break
 
         if not processed:
             job = self._job_runner.state
             if job:
+                last_job = job
                 text = job_status_text(job)
                 edit_message(
                     self,
@@ -680,6 +699,16 @@ class StrixBot:
                     text,
                     reply_markup=job_panel(running=job.is_active),
                 )
+                if job.phase == JobPhase.COMPLETED or job.phase == JobPhase.FAILED:
+                    completed = True
+
+        if completed and last_job:
+            from .ui.messages import job_completed_text
+            final = f"Escaneo finalizado:\n\n{job_completed_text(last_job)}"
+            chat_id = self._active_job_chat_id
+            self._active_job_chat_id = None
+            self._active_job_message_id = None
+            send_message(self, chat_id, final, reply_markup=back_to_menu())
 
     def _launch_scan(
         self,
@@ -697,7 +726,7 @@ class StrixBot:
             mode = pm._selected_depth
 
         if not targets:
-            edit_message(bot, chat_id, msg_id, "No target specified.", reply_markup=back_to_menu())
+            edit_message(bot, chat_id, msg_id, "No se especificó objetivo.", reply_markup=back_to_menu())
             return
 
         ok, start_msg = self._job_runner.start(
@@ -714,10 +743,10 @@ class StrixBot:
             self._active_job_message_id = msg_id
             pm.reset_wizard()
             job = self._job_runner.state
-            text = job_status_text(job) if job else "Scan started"
+            text = job_status_text(job) if job else "Escaneo iniciado"
             edit_message(bot, chat_id, msg_id, text, reply_markup=job_panel(running=True))
         else:
-            edit_message(bot, chat_id, msg_id, f"Failed: {start_msg}", reply_markup=back_to_menu())
+            edit_message(bot, chat_id, msg_id, f"Error: {start_msg}", reply_markup=back_to_menu())
 
     def process_update(self, update: dict) -> None:
         if "message" in update:

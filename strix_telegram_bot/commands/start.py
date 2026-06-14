@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
-from strix_telegram_bot.ui.keyboards import main_menu, parse_callback
+from strix_telegram_bot.ui.keyboards import main_menu, parse_callback, target_type_selector
 from strix_telegram_bot.ui.messages import main_menu_text, help_text
 from strix_telegram_bot.ui.panels import get_panel_manager
 from strix_telegram_bot.models import MenuState
@@ -48,19 +48,35 @@ def callback_menu(bot: Any, update: dict) -> None:
 
     elif action == "new_pentest":
         pm.push(MenuState.NEW_PENTEST_TARGET)
-        from strix_telegram_bot.ui.keyboards import target_type_selector
         edit_message(
             bot, chat_id, msg_id,
-            "Select target type:",
+            "Seleccioná tipo de objetivo:",
             reply_markup=target_type_selector(),
         )
+
+    elif action == "scan_attachment":
+        pending = getattr(bot, "_pending_attachment", None)
+        if pending:
+            pm._selected_targets = [pending]
+            pm.push(MenuState.NEW_PENTEST_PROFILE)
+            from strix_telegram_bot.ui.keyboards import profile_selector
+            edit_message(
+                bot, chat_id, msg_id,
+                f"Objetivo: {pending}\nSeleccioná perfil:",
+                reply_markup=profile_selector(),
+            )
+        else:
+            edit_message(
+                bot, chat_id, msg_id,
+                "No hay archivo pendiente.", reply_markup=main_menu(),
+            )
 
     elif action == "chat":
         edit_message(
             bot, chat_id, msg_id,
-            "Send a message to interact with STRIX.\n\n"
-            "If a job is running and waiting for input, "
-            "your message will be sent as a response.",
+            "Enviá un mensaje para interactuar con STRIX.\n\n"
+            "Si hay un trabajo en ejecución esperando input, "
+            "tu mensaje se enviará como respuesta.",
             reply_markup=main_menu(),
         )
 
@@ -94,9 +110,9 @@ def callback_menu(bot: Any, update: dict) -> None:
                 text = evidence_text(vault.get_manifest())
                 edit_message(bot, chat_id, msg_id, text, reply_markup=evidence_list_menu(artifacts))
             else:
-                edit_message(bot, chat_id, msg_id, "No evidence.", reply_markup=main_menu())
+                edit_message(bot, chat_id, msg_id, "No hay evidencia.", reply_markup=main_menu())
         else:
-            edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=main_menu())
+            edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=main_menu())
 
     elif action == "health":
         _show_health(bot, chat_id, msg_id)
@@ -106,7 +122,7 @@ def callback_menu(bot: Any, update: dict) -> None:
         from strix_telegram_bot.ui.keyboards import config_menu
         edit_message(
             bot, chat_id, msg_id,
-            "Configuration:", reply_markup=config_menu(),
+            "Configuración:", reply_markup=config_menu(),
         )
 
     elif action == "help":
@@ -137,10 +153,10 @@ def _show_jobs(bot, chat_id, msg_id) -> None:
     active = store.list_active()
     all_jobs = store.list_recent(limit=5)
 
-    lines = ["Jobs Overview:"]
+    lines = ["Resumen de trabajos:"]
     if active:
-        lines.append(f"Active: {len(active)}")
-    lines.append(f"Recent: {len(all_jobs)}")
+        lines.append(f"Activos: {len(active)}")
+    lines.append(f"Recientes: {len(all_jobs)}")
 
     if active:
         for j in active[:3]:
@@ -210,13 +226,13 @@ def _show_evidence(bot, chat_id, msg_id) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=main_menu())
+        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=main_menu())
         return
 
     vault = EvidenceVault(jobs[0].run_name)
     artifacts = vault.list_evidence()
     if not artifacts:
-        edit_message(bot, chat_id, msg_id, "No evidence available.", reply_markup=main_menu())
+        edit_message(bot, chat_id, msg_id, "No hay evidencia disponible.", reply_markup=main_menu())
         return
 
     text = evidence_text(vault.get_manifest())

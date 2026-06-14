@@ -28,7 +28,7 @@ def cmd_status(bot: Any, update: dict) -> None:
     store = JobStore()
     active = store.list_active()
     if not active:
-        send_message(bot, chat_id, "No active jobs.", reply_markup=back_to_menu())
+        send_message(bot, chat_id, "No hay trabajos activos.", reply_markup=back_to_menu())
         return
     job = active[0]
     text = job_status_text(job)
@@ -45,7 +45,7 @@ def cmd_stop(bot: Any, update: dict) -> None:
     ctrl = ProcessController()
     active = store.list_active()
     if not active:
-        send_message(bot, chat_id, "No active jobs to stop.", reply_markup=back_to_menu())
+        send_message(bot, chat_id, "No hay trabajos activos para detener.", reply_markup=back_to_menu())
         return
     job = active[0]
     stopped = ctrl.stop(job.run_name)
@@ -54,13 +54,13 @@ def cmd_stop(bot: Any, update: dict) -> None:
         store.save(job)
         send_message(
             bot, chat_id,
-            f"Job {job.run_name} stopped.",
+            f"Trabajo {job.run_name} detenido.",
             reply_markup=back_to_menu(),
         )
     else:
         send_message(
             bot, chat_id,
-            f"Failed to stop {job.run_name}. Process may already be dead.",
+            f"Error al detener {job.run_name}. El proceso podría ya no existir.",
             reply_markup=back_to_menu(),
         )
 
@@ -98,7 +98,7 @@ def callback_jobs(bot: Any, update: dict) -> None:
     elif action == "chat":
         edit_message(
             bot, chat_id, msg_id,
-            "Send a message to respond to STRIX.",
+            "Enviá un mensaje para responder a STRIX.",
             reply_markup=back_to_menu(),
         )
 
@@ -113,13 +113,13 @@ def callback_jobs(bot: Any, update: dict) -> None:
             store.save(job)
             edit_message(
                 bot, chat_id, msg_id,
-                f"Job {job.run_name} stopped.",
+                f"Trabajo {job.run_name} detenido.",
                 reply_markup=back_to_menu(),
             )
         else:
             edit_message(
                 bot, chat_id, msg_id,
-                "No active jobs.", reply_markup=back_to_menu(),
+                "No hay trabajos activos.", reply_markup=back_to_menu(),
             )
 
     elif action == "status":
@@ -135,7 +135,7 @@ def callback_jobs(bot: Any, update: dict) -> None:
         else:
             edit_message(
                 bot, chat_id, msg_id,
-                "No active jobs.", reply_markup=back_to_menu(),
+                "No hay trabajos activos.", reply_markup=back_to_menu(),
             )
 
     elif action == "reports":
@@ -170,10 +170,10 @@ def _list_jobs(bot, chat_id, msg_id=None) -> None:
     jobs = store.list_recent(limit=10)
 
     if not jobs:
-        text = "No jobs yet."
+        text = "No hay trabajos aún."
         kb = back_to_menu()
     else:
-        lines = ["Recent jobs:"]
+        lines = ["Trabajos recientes:"]
         for j in jobs:
             lines.append(
                 f"{j.phase.value} {escape_md(j.run_name[:30])} "
@@ -194,10 +194,10 @@ def _list_active_jobs(bot, chat_id, msg_id) -> None:
     if not active:
         edit_message(
             bot, chat_id, msg_id,
-            "No active jobs.", reply_markup=back_to_menu(),
+            "No hay trabajos activos.", reply_markup=back_to_menu(),
         )
         return
-    lines = ["Active jobs:"]
+    lines = ["Trabajos activos:"]
     for j in active:
         lines.append(f"  {j.run_name[:30]} [{j.phase.value}] {j.elapsed}")
     edit_message(bot, chat_id, msg_id, "\n".join(lines), reply_markup=back_to_menu())
@@ -209,10 +209,10 @@ def _list_jobs_by_status(bot, chat_id, msg_id, status: JobPhase) -> None:
     if not jobs:
         edit_message(
             bot, chat_id, msg_id,
-            f"No {status.value} jobs.", reply_markup=back_to_menu(),
+            f"No hay trabajos {status.value}.", reply_markup=back_to_menu(),
         )
         return
-    lines = [f"{status.value.title()} jobs:"]
+    lines = [f"Trabajos {status.value}:"]
     for j in jobs:
         lines.append(f"  {j.run_name[:30]} [{j.mode.value}] {j.elapsed}")
     edit_message(bot, chat_id, msg_id, "\n".join(lines), reply_markup=back_to_menu())

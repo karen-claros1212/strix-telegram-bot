@@ -60,7 +60,7 @@ def callback_reports(bot: Any, update: dict) -> None:
         count = store.cleanup_old(days=30)
         edit_message(
             bot, chat_id, msg_id,
-            f"Cleaned up {count} old jobs.",
+            f"Se limpiaron {count} trabajos viejos.",
             reply_markup=back_to_menu(),
         )
 
@@ -70,9 +70,9 @@ def callback_reports(bot: Any, update: dict) -> None:
         rc = ReportCollector(job_name)
         content = rc.get_report_content(report_name)
         if content:
-            send_message(bot, chat_id, f"Report: {report_name}\n\n{content[:4000]}")
+            send_message(bot, chat_id, f"Reporte: {report_name}\n\n{content[:4000]}")
         else:
-            send_message(bot, chat_id, f"Report {report_name} not found.")
+            send_message(bot, chat_id, f"Reporte {report_name} no encontrado.")
 
 
 def _show_reports(bot, chat_id, msg_id=None) -> None:
@@ -87,7 +87,7 @@ def _show_reports(bot, chat_id, msg_id=None) -> None:
             all_reports.append(r["name"])
 
     if not all_reports:
-        text = "No reports available. Complete a scan first."
+        text = "No hay reportes disponibles. Completá un escaneo primero."
         kb = back_to_menu()
     else:
         text = reports_menu_text()
@@ -104,7 +104,7 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
     job = jobs[0]
@@ -112,17 +112,17 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
     report = rc.get_latest_report()
     if report:
         content = rc.get_report_content(report["name"])
-        text = f"Latest report for {job.run_name}:\n\n{content[:3500]}" if content else "Cannot read report."
+        text = f"Último reporte de {job.run_name}:\n\n{content[:3500]}" if content else "No se puede leer el reporte."
         edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())
     else:
-        edit_message(bot, chat_id, msg_id, "No reports for latest job.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay reportes para el último trabajo.", reply_markup=back_to_menu())
 
 
 def _send_executive_summary(bot, chat_id, msg_id) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
     job = jobs[0]
@@ -131,17 +131,17 @@ def _send_executive_summary(bot, chat_id, msg_id) -> None:
     if summary:
         edit_message(bot, chat_id, msg_id, summary, reply_markup=back_to_menu())
     else:
-        edit_message(bot, chat_id, msg_id, "No summary available.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay resumen disponible.", reply_markup=back_to_menu())
 
 
 def _show_report_history(bot, chat_id, msg_id) -> None:
     jobs = ReportCollector.list_jobs_with_reports(limit=8)
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No report history.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay historial de reportes.", reply_markup=back_to_menu())
         return
-    lines = ["Report History:"]
+    lines = ["Historial de reportes:"]
     for j in jobs:
-        lines.append(f"  {j['run_name']} ({j['report_count']} reports)")
+        lines.append(f"  {j['run_name']} ({j['report_count']} reportes)")
     edit_message(bot, chat_id, msg_id, "\n".join(lines), reply_markup=back_to_menu())
 
 
@@ -149,7 +149,7 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
     job = jobs[0]
@@ -162,22 +162,23 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     elif rtype == "csv":
         content = rc.get_csv_report()
     elif rtype == "json":
+        import json
         events = rc.get_json_events()
         if events:
             content = json.dumps(events[:50], indent=2)
 
     if content:
-        send_message(bot, chat_id, f"{label} report:\n\n{content[:4000]}")
-        edit_message(bot, chat_id, msg_id, "Report sent.", reply_markup=back_to_menu())
+        send_message(bot, chat_id, f"Reporte {label}:\n\n{content[:4000]}")
+        edit_message(bot, chat_id, msg_id, "Reporte enviado.", reply_markup=back_to_menu())
     else:
-        edit_message(bot, chat_id, msg_id, f"No {label} report available.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
 
 
 def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No completed jobs.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
     job = jobs[0]

@@ -26,13 +26,13 @@ def _version_warning(ver: str, py_ver: str) -> str:
     strix_ver = _parse_version(ver)
     if strix_ver < _STRIX_MIN_VERSION:
         warnings.append(
-            f"STRIX {ver} is outdated. Minimum recommended: "
+            f"STRIX {ver} está desactualizada. Mínimo recomendado: "
             f"{'.'.join(str(v) for v in _STRIX_MIN_VERSION)}"
         )
     py_parsed = _parse_version(py_ver)
     if py_parsed < _PYTHON_MIN_VERSION:
         warnings.append(
-            f"Python {py_ver} is below STRIX minimum: "
+            f"Python {py_ver} está por debajo del mínimo de STRIX: "
             f"{'.'.join(str(v) for v in _PYTHON_MIN_VERSION)}"
         )
     return "\n".join(warnings)
@@ -56,9 +56,9 @@ def cmd_version(bot: Any, update: dict) -> None:
         ver = "unknown"
     py_ver = platform.python_version()
     warning = _version_warning(ver, py_ver)
-    text = f"STRIX version: {ver}\nPython: {py_ver}"
+    text = f"Versión STRIX: {ver}\nPython: {py_ver}"
     if warning:
-        text += "\n\n⚠️ WARNING:\n" + warning
+        text += "\n\n⚠️ ADVERTENCIA:\n" + warning
     send_message(
         bot, chat_id, text,
         reply_markup=back_to_menu(),
@@ -82,7 +82,7 @@ def cmd_uptime(bot: Any, update: dict) -> None:
 
     send_message(
         bot, chat_id,
-        f"System uptime: {uptime_str}",
+        f"Tiempo activo del sistema: {uptime_str}",
         reply_markup=back_to_menu(),
     )
 
@@ -120,7 +120,7 @@ def _send_health(bot, chat_id, msg_id=None) -> None:
         caido_status="N/A",
     )
     if warning:
-        text += "\n\n⚠️ WARNING:\n" + warning
+        text += "\n\n⚠️ ADVERTENCIA:\n" + warning
 
     if msg_id:
         edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())

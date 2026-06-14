@@ -36,43 +36,43 @@ def callback_config(bot: Any, update: dict) -> None:
     elif action == "mode":
         edit_message(
             bot, chat_id, msg_id,
-            "Default scan mode.\n"
-            "Use New Pentest to select mode per scan.",
+            "Modo de escaneo predeterminado.\n"
+            "Usá Nuevo Escaneo para seleccionar modo por escaneo.",
             reply_markup=back_to_menu(),
         )
 
     elif action == "scope":
         edit_message(
             bot, chat_id, msg_id,
-            "Scope mode controls how targets are analyzed.\n"
-            "auto: diff-scope in CI, full otherwise\n"
-            "diff: changed-files only\n"
-            "full: no diff-scope",
+            "El modo scope controla cómo se analizan los objetivos.\n"
+            "auto: diff-scope en CI, full en otros casos\n"
+            "diff: solo archivos modificados\n"
+            "full: sin diff-scope",
             reply_markup=back_to_menu(),
         )
 
     elif action == "llm":
         edit_message(
             bot, chat_id, msg_id,
-            f"Current LLM: {escape_md(settings.llm_model)}",
+            f"LLM actual: {escape_md(settings.llm_model)}",
             reply_markup=back_to_menu(),
         )
 
     elif action == "users":
-        users = ", ".join(settings.allowed_users) if settings.allowed_users else "all"
+        users = ", ".join(settings.allowed_users) if settings.allowed_users else "todos"
         edit_message(
             bot, chat_id, msg_id,
-            f"Allowed users: {escape_md(users)}",
+            f"Usuarios permitidos: {escape_md(users)}",
             reply_markup=back_to_menu(),
         )
 
 
 def _show_config(bot, chat_id, msg_id=None) -> None:
     d = {
-        "LLM Model": settings.llm_model,
-        "Allowed Users": ", ".join(settings.allowed_users) if settings.allowed_users else "all",
-        "Allowed Chats": ", ".join(settings.allowed_chats) if settings.allowed_chats else "all",
-        "API Token": "***" + settings.tg_token[-4:] if settings.tg_token else "not set",
+        "Modelo LLM": settings.llm_model,
+        "Usuarios permitidos": ", ".join(settings.allowed_users) if settings.allowed_users else "todos",
+        "Chats permitidos": ", ".join(settings.allowed_chats) if settings.allowed_chats else "todos",
+        "Token API": "***" + settings.tg_token[-4:] if settings.tg_token else "no configurado",
     }
     text = config_text(d)
     if msg_id:

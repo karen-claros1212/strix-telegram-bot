@@ -60,20 +60,21 @@ class PanelManager:
     def wizard_summary(self) -> str:
         parts = []
         if self._selected_targets:
-            parts.append(f"Target: {', '.join(self._selected_targets)}")
+            parts.append(f"Objetivo: {', '.join(self._selected_targets)}")
         if self._selected_depth:
-            parts.append(f"Mode: {self._selected_depth.value}")
+            names = {"quick": "Rápido", "standard": "Estándar", "deep": "Profundo"}
+            parts.append(f"Modo: {names.get(self._selected_depth.value, self._selected_depth.value)}")
         if self._selected_profile:
-            parts.append(f"Profile: {self._selected_profile.value}")
+            parts.append(f"Perfil: {self._selected_profile.value}")
         if self._selected_scope_mode:
-            parts.append(f"Scope: {self._selected_scope_mode.value}")
+            parts.append(f"Alcance: {self._selected_scope_mode.value}")
         if self._selected_instruction:
             inst = (
                 self._selected_instruction[:50] + "..."
                 if len(self._selected_instruction) > 50
                 else self._selected_instruction
             )
-            parts.append(f"Instruction: {inst}")
+            parts.append(f"Instrucción: {inst}")
         return "\n".join(parts)
 
 

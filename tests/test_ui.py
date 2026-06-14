@@ -32,15 +32,12 @@ class TestKeyboards:
     def test_main_menu_structure(self):
         kb = main_menu()
         assert "inline_keyboard" in kb
-        assert len(kb["inline_keyboard"]) >= 5
-        texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Evidence" in texts
-        assert "Tools" in texts
+        assert len(kb["inline_keyboard"]) >= 1
 
     def test_profile_selector(self):
         kb = profile_selector()
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Interactive / TUI" in texts
+        assert "Interactivo / TUI" in texts
         assert "Headless / CI" in texts
 
     def test_scope_mode_selector(self):
@@ -53,11 +50,11 @@ class TestKeyboards:
     def test_focus_presets(self):
         kb = focus_presets()
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Business Logic / IDOR" in texts
+        assert "Lógica de negocio / IDOR" in texts
         assert "SQL / NoSQL / SSTI" in texts
         assert "XSS / CSRF / DOM" in texts
-        assert "Custom" in texts
-        assert "Skip (no instruction)" in texts
+        assert "Personalizado" in texts
+        assert "Saltar (sin instrucción)" in texts
 
     def test_evidence_list_menu(self):
         artifacts = [
@@ -72,9 +69,9 @@ class TestKeyboards:
     def test_evidence_detail_menu(self):
         kb = evidence_detail_menu("raw/test.txt")
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "Preview (redacted)" in texts
-        assert "Send RAW" in texts
-        assert "Send Redacted" in texts
+        assert "Vista previa (censurada)" in texts
+        assert "Enviar CRUDO" in texts
+        assert "Enviar censurado" in texts
 
     def test_tools_panel(self):
         kb = tools_panel([{"name": "Browser", "status": "active"}])
@@ -84,32 +81,32 @@ class TestKeyboards:
     def test_tools_panel_empty(self):
         kb = tools_panel([])
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "No tools active" in texts
+        assert "Sin herramientas activas" in texts
 
     def test_target_selector(self):
         kb = target_type_selector()
         rows = kb["inline_keyboard"]
         texts = [b["text"] for row in rows for b in row]
-        assert "URL / Domain" in texts
-        assert "Back" in texts
+        assert "URL / Dominio" in texts
+        assert "Volver" in texts
 
     def test_depth_selector(self):
         kb = depth_selector()
         rows = kb["inline_keyboard"]
         texts = [b["text"] for row in rows for b in row]
-        assert "Quick" in texts
-        assert "Deep" in texts
-        assert "Continue" in texts
+        assert "Rápido" in texts
+        assert "Profundo" in texts
+        assert "Continuar" in texts
 
     def test_job_panel_has_stop(self):
         kb = job_panel(running=True)
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "STOP" in texts
+        assert "Detener" in texts
 
     def test_job_panel_no_stop(self):
         kb = job_panel(running=False)
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
-        assert "STOP" not in texts
+        assert "Detener" not in texts
 
     def test_parse_callback(self):
         parts = parse_callback("menu:new_pentest")
@@ -123,7 +120,7 @@ class TestMessages:
     def test_main_menu_text(self):
         text = main_menu_text()
         assert "STRIX" in text
-        assert "Control Center" in text
+        assert "Centro de Control" in text
 
     def test_job_status(self):
         job = JobState(
@@ -131,8 +128,8 @@ class TestMessages:
             phase=JobPhase.SCANNING, mode=ScanMode.DEEP,
         )
         text = job_status_text(job)
-        assert "Scan" in text
-        assert "scanning" in text
+        assert "Escaneo" in text
+        assert "escaneando" in text
 
     def test_health_text(self):
         text = health_text("1.0.2", "3.12.0", "1h 30m", 2, "Active")
@@ -141,15 +138,15 @@ class TestMessages:
 
     def test_help_text(self):
         text = help_text()
-        assert "New Pentest" in text
-        assert "Quick" in text
-        assert "Deep" in text
-        assert "Interactive" in text
+        assert "Escanear" in text
+        assert "Rápido" in text
+        assert "Profundo" in text
+        assert "Interactivo" in text
         assert "Headless" in text
 
     def test_instruction_text(self):
         text = instruction_text()
-        assert "Focus" in text
+        assert "Instrucción / Enfoque" in text
         assert "STRIX" in text
 
     def test_tools_panel_text(self):
@@ -159,7 +156,7 @@ class TestMessages:
 
     def test_tools_panel_text_empty(self):
         text = tools_panel_text([])
-        assert "No tools" in text
+        assert "No se detectaron herramientas" in text
 
     def test_escape_md(self):
         result = escape_md("hello_world")

@@ -32,16 +32,16 @@ class TestVersionWarning:
 
     def test_warning_strix_outdated(self):
         warning = _version_warning("1.0.2", "3.12.0")
-        assert "outdated" in warning
+        assert "desactualizada" in warning
         assert "1.0.2" in warning
         assert "1.0.4" in warning
 
     def test_warning_python_outdated(self):
         warning = _version_warning("1.0.5", "3.10.0")
-        assert "below STRIX minimum" in warning
+        assert "por debajo del mínimo" in warning
         assert "3.10" in warning
 
     def test_warning_both_outdated(self):
         warning = _version_warning("1.0.1", "3.11.0")
-        assert "outdated" in warning
-        assert "below STRIX minimum" in warning
+        assert "desactualizada" in warning
+        assert "por debajo del mínimo" in warning
