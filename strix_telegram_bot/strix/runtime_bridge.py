@@ -105,6 +105,8 @@ class StrixRuntimeBridge:
         self._input_prompt: str = ""
         self._phase: str = "running"
         self._last_error: Optional[str] = None
+        self._scan_task: Optional[Any] = None
+        self._scan_status: str = "unknown"
 
     @property
     def is_available(self) -> bool:
@@ -112,11 +114,11 @@ class StrixRuntimeBridge:
 
     @property
     def is_running(self) -> bool:
-        return (
-            self._thread is not None
-            and self._thread.is_alive()
-            and not self._scan_completed
-        )
+        return self._scan_status in ("running", "waiting")
+
+    @property
+    def scan_status(self) -> str:
+        return self._scan_status
 
     @property
     def run_name(self) -> Optional[str]:
@@ -176,6 +178,8 @@ class StrixRuntimeBridge:
         self._input_prompt = ""
         self._phase = "running"
         self._last_error = None
+        self._scan_task = None
+        self._scan_status = "running"
 
         self._thread = threading.Thread(
             target=self._scan_thread,
@@ -231,55 +235,91 @@ class StrixRuntimeBridge:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
-        async def _scan_with_discovery() -> Any:
+        async def _poll_root() -> None:
+            for _ in range(200):
+                parent_of = getattr(self._coordinator, "parent_of", None)
+                if parent_of:
+                    for aid, p in parent_of.items():
+                        if p is None:
+                            self._root_agent_id = aid
+                            return
+                await asyncio.sleep(0.1)
+
+        async def _poll_status() -> None:
+            while not self._scan_completed:
+                await asyncio.sleep(1.0)
+                try:
+                    statuses = getattr(self._coordinator, "statuses", None)
+                    if not statuses:
+                        continue
+                    root = self._root_agent_id
+                    any_running = any(str(s) == "running" for s in statuses.values())
+                    root_waiting = root is not None and str(statuses.get(root, "")) == "waiting"
+
+                    if any_running:
+                        self._scan_status = "running"
+                        self._awaiting_input = False
+                    elif root_waiting:
+                        self._scan_status = "waiting"
+                        self._awaiting_input = True
+                        self._input_prompt = "STRIX espera un mensaje"
+                except Exception:
+                    pass
+
+        non_interactive = bool(scan_config.get("non_interactive", False))
+
+        async def _run_scan() -> Any:
             rs = ReportState(run_name=self._run_name)
             set_global_report_state(rs)
             rs.set_scan_config(scan_config)
 
-            async def _poll_root() -> None:
-                for _ in range(200):
-                    parent_of = getattr(self._coordinator, "parent_of", None)
-                    if parent_of:
-                        for aid, p in parent_of.items():
-                            if p is None:
-                                self._root_agent_id = aid
-                                return
-                    await asyncio.sleep(0.1)
+            return await run_strix_scan(
+                scan_config=scan_config,
+                scan_id=self._run_name,
+                image=self._scan_image,
+                coordinator=self._coordinator,
+                interactive=not non_interactive,
+                event_sink=self._capture_event,
+            )
 
-            non_interactive = bool(scan_config.get("non_interactive", False))
-
+        async def _main() -> None:
+            self._scan_task = asyncio.create_task(_run_scan())
             discovery = asyncio.create_task(_poll_root())
-            scan = asyncio.create_task(
-                run_strix_scan(
-                    scan_config=scan_config,
-                    scan_id=self._run_name,
-                    image=self._scan_image,
-                    coordinator=self._coordinator,
-                    interactive=not non_interactive,
-                    event_sink=self._capture_event,
-                )
-            )
-            await asyncio.wait(
-                [discovery, scan],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return await scan
+            status_poller = asyncio.create_task(_poll_status())
 
-        try:
-            result = self._loop.run_until_complete(_scan_with_discovery())
+            await asyncio.wait([discovery], timeout=20)
+            if not discovery.done():
+                discovery.cancel()
+            result = await self._scan_task
+
+            status_poller.cancel()
+            self._scan_status = "completed"
             self._phase = "completed"
             self._scan_completed = True
             self._emit_event("scan_complete", "", "Escaneo finalizado")
+
+        try:
+            self._loop.run_until_complete(_main())
         except asyncio.CancelledError:
+            self._scan_status = "stopped"
             self._phase = "stopped"
             self._scan_completed = True
             self._emit_event("scan_cancelled", "", "Escaneo cancelado")
         except Exception as e:
+            self._scan_status = "failed"
             self._phase = "failed"
             self._scan_completed = True
             self._last_error = str(e)
             self._emit_event("scan_error", "", f"Error en escaneo: {e}")
         finally:
+            for t in asyncio.all_tasks(self._loop):
+                t.cancel()
+            if self._loop.is_running():
+                self._loop.stop()
+            try:
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            except Exception:
+                pass
             self._loop.close()
             self._loop = None
 
@@ -322,9 +362,10 @@ class StrixRuntimeBridge:
             self._queue_event(se)
         elif item_type == "tool_call_output_item":
             tool_data = self._sdk_tool_output_data(item)
+            output_text = self._normalize_output(tool_data["output"])[:500]
             content = json.dumps({
                 "tool_name": tool_data["tool_name"],
-                "output": tool_data["output"][:500] if tool_data["output"] else "",
+                "output": output_text,
             }, ensure_ascii=False)
             se = ScanEvent(
                 type="tool_output",
@@ -382,6 +423,15 @@ class StrixRuntimeBridge:
             if isinstance(text, str):
                 parts.append(text)
         return "".join(parts)
+
+    @staticmethod
+    def _normalize_output(raw: Any) -> str:
+        if isinstance(raw, str):
+            return raw
+        try:
+            return json.dumps(raw, ensure_ascii=False, default=str)
+        except Exception:
+            return str(raw)
 
     @staticmethod
     def _parse_json_object(value: Any) -> dict[str, Any]:
@@ -459,8 +509,6 @@ class StrixRuntimeBridge:
 
     def stop_scan(self) -> bool:
         self._stop_event.set()
-        self._scan_completed = True
-        self._phase = "stopped"
         aid = self._root_agent_id or ""
         if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
@@ -469,10 +517,26 @@ class StrixRuntimeBridge:
                     self._loop,
                 )
                 future.result(timeout=30)
-                return True
+                logger.info("stop_scan: agents cancelled gracefully")
             except Exception as exc:
-                logger.warning("stop_scan failed: %s", exc)
-        return False
+                logger.warning("stop_scan: graceful cancel failed: %s", exc)
+        if self._loop and not self._loop.is_closed() and self._scan_task is not None:
+            try:
+                async def _cancel_task() -> None:
+                    if self._scan_task and not self._scan_task.done():
+                        self._scan_task.cancel()
+                cancel_future = asyncio.run_coroutine_threadsafe(
+                    _cancel_task(),
+                    self._loop,
+                )
+                cancel_future.result(timeout=10)
+                logger.info("stop_scan: scan task cancelled")
+            except Exception as exc:
+                logger.warning("stop_scan: task cancel failed: %s", exc)
+        self._scan_completed = True
+        self._phase = "stopped"
+        self._scan_status = "stopped"
+        return True
 
     def poll_events(self) -> list[ScanEvent]:
         events: list[ScanEvent] = []
@@ -568,18 +632,31 @@ class StrixRuntimeBridge:
         return status
 
     def cleanup(self) -> None:
-        aid = self._root_agent_id or ""
         self._stop_event.set()
-        self._scan_completed = True
+        aid = self._root_agent_id or ""
         if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._coordinator.cancel_descendants_graceful(aid),
                     self._loop,
                 )
-                future.result(timeout=10)
+                future.result(timeout=30)
             except Exception:
                 pass
+        if self._loop and not self._loop.is_closed() and self._scan_task is not None:
+            try:
+                async def _cancel_task() -> None:
+                    if self._scan_task and not self._scan_task.done():
+                        self._scan_task.cancel()
+                cancel_future = asyncio.run_coroutine_threadsafe(
+                    _cancel_task(),
+                    self._loop,
+                )
+                cancel_future.result(timeout=10)
+            except Exception:
+                pass
+        self._scan_completed = True
+        self._scan_status = "stopped"
         if self._thread:
             self._thread.join(timeout=5)
         if self._loop and not self._loop.is_closed():
