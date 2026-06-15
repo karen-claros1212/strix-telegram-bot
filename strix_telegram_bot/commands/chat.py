@@ -28,6 +28,8 @@ def cmd_chat(bot: Any, update: dict) -> None:
 
     if session.is_chat_active():
         session.exit_chat()
+        pm = get_panel_manager(chat_id)
+        pm.back_to_main()
         text = "Saliste del modo Chat."
         send_message(bot, chat_id, text, reply_markup=main_menu())
         return

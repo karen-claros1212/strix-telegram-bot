@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +36,14 @@ class EvidenceVault:
             self._vault_dir = settings.strix_runs_dir / self.run_name / "evidence"
         self._vault_dir.mkdir(parents=True, exist_ok=True)
         return self._vault_dir
+
+    @staticmethod
+    def _safe_name(file_name: str, max_len: int = 200) -> str:
+        """Sanitize file name: strip path components, remove null bytes, limit length."""
+        name = Path(file_name).name
+        name = re.sub(r"[^\w.\-]", "_", name)
+        name = name[:max_len]
+        return name if name else "unnamed"
 
     @staticmethod
     def hash_file(file_path: Path) -> str:
@@ -94,6 +103,7 @@ class EvidenceVault:
         vault = self._ensure_vault()
         target_dir = vault / subdir
         target_dir.mkdir(parents=True, exist_ok=True)
+        file_name = self._safe_name(file_name)
         target_path = target_dir / file_name
 
         if target_path.exists():

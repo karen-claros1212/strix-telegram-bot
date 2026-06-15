@@ -96,7 +96,14 @@ def send_message(
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return _request("sendMessage", payload)
+    result = _request("sendMessage", payload)
+    if result:
+        return result
+    # Markdown fallback: retry as plain text if parse_mode was set
+    if parse_mode == "Markdown":
+        payload["parse_mode"] = None
+        result = _request("sendMessage", payload)
+    return result
 
 
 def edit_message(
@@ -115,7 +122,14 @@ def edit_message(
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return _request("editMessageText", payload)
+    result = _request("editMessageText", payload)
+    if result:
+        return result
+    # Markdown fallback: retry as plain text if parse_mode was set
+    if parse_mode == "Markdown":
+        payload["parse_mode"] = None
+        result = _request("editMessageText", payload)
+    return result
 
 
 def delete_message(bot: Any, chat_id: int, message_id: int) -> Optional[dict]:

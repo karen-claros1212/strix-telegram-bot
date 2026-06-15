@@ -66,7 +66,7 @@ class StrixBot:
         self._register_handlers()
 
     def _register_handlers(self) -> None:
-        from .commands.start import cmd_start, callback_menu
+        from .commands.start import cmd_start, cmd_help, callback_menu
         from .commands.health import cmd_health, cmd_version, cmd_uptime, callback_health
         from .commands.jobs import cmd_jobs, cmd_status, cmd_stop, callback_jobs
         from .commands.reports import cmd_reports, callback_reports
@@ -75,7 +75,7 @@ class StrixBot:
 
         self._command_handlers = {
             "/start": cmd_start,
-            "/help": cmd_start,
+            "/help": cmd_help,
             "/health": cmd_health,
             "/version": cmd_version,
             "/uptime": cmd_uptime,
@@ -534,7 +534,7 @@ class StrixBot:
             text = evidence_text(vault.get_manifest())
             edit_message(bot, chat_id, msg_id, text, reply_markup=evidence_list_menu(artifacts))
 
-        elif action.startswith("preview:"):
+        elif action.startswith("preview"):
             artifact_id = action.split(":", 1)[1]
             preview = vault.redacted_preview(artifact_id)
             if preview:
@@ -543,7 +543,7 @@ class StrixBot:
             else:
                 edit_message(bot, chat_id, msg_id, "No se puede previsualizar.", reply_markup=back_to_menu())
 
-        elif action.startswith("raw:"):
+        elif action.startswith("raw"):
             artifact_id = action.split(":", 1)[1]
             manifest = vault.get_manifest()
             match = None
@@ -571,7 +571,7 @@ class StrixBot:
                         return
             edit_message(bot, chat_id, msg_id, "Artefacto no encontrado.", reply_markup=back_to_menu())
 
-        elif action.startswith("redacted:"):
+        elif action.startswith("redacted"):
             artifact_id = action.split(":", 1)[1]
             preview = vault.redacted_preview(artifact_id)
             if preview:

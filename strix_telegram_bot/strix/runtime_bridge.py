@@ -32,6 +32,7 @@ try:
     from strix.interface.utils import (
         assign_workspace_subdirs as _aws,
         infer_target_type as _itt,
+        collect_local_sources as _cls,
     )
     from strix.report.state import ReportState as _RS, set_global_report_state as _sgrs
 
@@ -41,6 +42,7 @@ try:
     set_global_report_state = _sgrs
     infer_target_type = _itt
     assign_workspace_subdirs = _aws
+    collect_local_sources = _cls
     _load_settings = _ls
     _STRIX_AVAILABLE = True
 except ImportError:
@@ -154,6 +156,14 @@ class StrixRuntimeBridge:
         targets_info = self._build_targets_info(targets)
         diff_scope = {"active": bool(diff_base), "diff_base": diff_base} if diff_base else {"active": False}
 
+        # Collect local sources using STRIX official function
+        local_sources: list[dict] = []
+        if collect_local_sources:
+            try:
+                local_sources = collect_local_sources(targets)
+            except Exception as exc:
+                logger.warning("collect_local_sources failed: %s", exc)
+
         scan_config: dict[str, Any] = {
             "scan_id": run_name,
             "targets": targets_info,
@@ -164,7 +174,7 @@ class StrixRuntimeBridge:
             "scope_mode": scope_mode,
             "diff_base": diff_base,
             "non_interactive": non_interactive,
-            "local_sources": local_sources or [],
+            "local_sources": local_sources,
             "resume_instruction": "",
         }
 
@@ -196,7 +206,10 @@ class StrixRuntimeBridge:
 
         if self._root_agent_id:
             return True, f"Escaneo iniciado: {run_name}"
-        return True, f"Escaneo iniciado: {run_name}"
+        # If root agent wasn't discovered, check if the thread is still alive
+        if self._thread and self._thread.is_alive():
+            return True, f"Escaneo iniciado: {run_name} (agente en proceso)"
+        return False, f"Error al iniciar escaneo: {run_name}"
 
     @staticmethod
     def _resolve_image() -> str:

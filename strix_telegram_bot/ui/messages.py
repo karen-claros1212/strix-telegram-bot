@@ -6,6 +6,16 @@ from typing import Optional
 
 from strix_telegram_bot.models import JobState, JobPhase, ScanMode
 
+# Bridge phase strings (from StrixRuntimeBridge) → display strings
+_BRIDGE_PHASE_MAP = {
+    "running": "ejecutando",
+    "waiting": "esperando",
+    "completed": "completado",
+    "stopped": "detenido",
+    "failed": "falló",
+}
+
+# JobPhase enum → display strings (for legacy JobStore jobs)
 _PHASE_ICONS = {
     JobPhase.CREATED: "creado",
     JobPhase.CONFIGURING: "configurando",
@@ -44,38 +54,44 @@ def main_menu_text(strix_version: str = "") -> str:
 def job_status_text(job: JobState | dict) -> str:
     if isinstance(job, dict):
         phase_str = job.get("phase", "unknown")
-        try:
-            phase = JobPhase(phase_str)
-        except ValueError:
-            phase = None
         mode_str = job.get("mode", "deep")
+
+        # Try bridge phase map first (runtime_bridge returns strings like "running", "waiting")
+        phase_display = _BRIDGE_PHASE_MAP.get(phase_str, None)
+        if phase_display is None:
+            # Fall back to JobPhase enum (legacy JobStore)
+            try:
+                phase = JobPhase(phase_str)
+                phase_display = _PHASE_ICONS.get(phase, phase_str)
+            except ValueError:
+                phase_display = phase_str
+
+        # Try ScanMode enum for mode
         try:
             mode = ScanMode(mode_str)
+            mode_display = _MODE_ICONS.get(mode, mode_str)
         except ValueError:
-            mode = None
+            mode_display = mode_str.upper()
 
-        phase_icon = _PHASE_ICONS.get(phase, phase_str) if phase else phase_str
-        mode_icon = _MODE_ICONS.get(mode, mode_str) if mode else mode_str.upper()
         target = job.get("target", [])
         elapsed = job.get("elapsed", "0s")
         error = job.get("error")
         awaiting = job.get("awaiting_input", False)
         prompt = job.get("input_prompt")
     else:
-        phase_icon = _PHASE_ICONS.get(job.phase, "?")
-        mode_icon = _MODE_ICONS.get(job.mode, job.mode.value)
+        phase_display = _PHASE_ICONS.get(job.phase, "?")
+        mode_display = _MODE_ICONS.get(job.mode, job.mode.value)
         target = job.target
         elapsed = job.elapsed
         error = job.error
         awaiting = job.awaiting_input
         prompt = job.input_prompt
-        phase = job.phase
 
     lines = [
-        f"Escaneo {mode_icon}",
+        f"Escaneo {mode_display}",
         f"Objetivo: {escape_md(', '.join(target) if isinstance(target, list) else str(target))}",
-        f"Estado: {phase_icon}",
-        f"Fase: {phase.value if isinstance(phase, JobPhase) else phase}",
+        f"Estado: {phase_display}",
+        f"Fase: {phase_display}",
         f"Tiempo: {elapsed}",
     ]
 
