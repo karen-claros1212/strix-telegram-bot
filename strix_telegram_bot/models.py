@@ -12,12 +12,15 @@ class ScanMode(str, Enum):
     DEEP = "deep"
 
 
-class TargetType(str, Enum):
-    URL = "url"
-    GITHUB = "github"
-    LOCAL = "local"
-    ATTACHMENT = "attachment"
-    MULTI = "multi"
+class ProfileType(str, Enum):
+    INTERACTIVE = "interactive"
+    HEADLESS = "headless"
+
+
+class ScopeMode(str, Enum):
+    AUTO = "auto"
+    DIFF = "diff"
+    FULL = "full"
 
 
 class JobPhase(str, Enum):
@@ -33,87 +36,19 @@ class JobPhase(str, Enum):
     STOPPED = "stopped"
 
 
-class ProfileType(str, Enum):
-    INTERACTIVE = "interactive"
-    HEADLESS = "headless"
-
-
-class ScopeMode(str, Enum):
-    AUTO = "auto"
-    DIFF = "diff"
-    FULL = "full"
-
-
-class FocusPreset(str, Enum):
-    BUSINESS_LOGIC = "Business Logic / IDOR"
-    AUTH_JWT = "Auth / Session / JWT"
-    SQL = "SQL / NoSQL / SSTI"
-    XSS = "XSS / CSRF / DOM"
-    SSRF = "SSRF / XXE / Deserialization"
-    KUBERNETES = "Kubernetes / Infra"
-    SECRETS = "Secrets / Supply chain"
-    CUSTOM = "Custom"
+class BridgePhase(str, Enum):
+    INITIALIZING = "initializing"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    STOPPED = "stopped"
 
 
 class MenuState(str, Enum):
     MAIN = "main"
-    NEW_PENTEST_TARGET = "new_pentest_target"
-    NEW_PENTEST_DEPTH = "new_pentest_depth"
-    NEW_PENTEST_PROFILE = "new_pentest_profile"
-    NEW_PENTEST_SCOPE = "new_pentest_scope"
-    NEW_PENTEST_DIFF_BASE = "new_pentest_diff_base"
-    NEW_PENTEST_INSTRUCTION = "new_pentest_instruction"
-    NEW_PENTEST_FOCUS = "new_pentest_focus"
-    NEW_PENTEST_ATTACHMENT = "new_pentest_attachment"
-    JOB_DETAIL = "job_detail"
-    REPORTS_LIST = "reports_list"
-    REPORT_DETAIL = "report_detail"
-    EVIDENCE_LIST = "evidence_list"
-    EVIDENCE_DETAIL = "evidence_detail"
-    CAIDO = "caido"
-    TOOLS = "tools"
-    HEALTH = "health"
-    CONFIG = "config"
-    CHAT = "chat"
-
-
-_FOCUS_INSTRUCTIONS: dict[FocusPreset, str] = {
-    FocusPreset.BUSINESS_LOGIC: (
-        "Focus on business logic flaws, IDOR, privilege escalation, "
-        "and workflow bypasses. Test multi-step processes and access controls."
-    ),
-    FocusPreset.AUTH_JWT: (
-        "Focus on authentication, session management, JWT attacks, "
-        "OAuth flows, password policies, and token handling."
-    ),
-    FocusPreset.SQL: (
-        "Focus on SQL injection, NoSQL injection, SSTI, LDAP injection, "
-        "and injection-based data extraction techniques."
-    ),
-    FocusPreset.XSS: (
-        "Focus on XSS (reflected, stored, DOM), CSRF, clickjacking, "
-        "open redirects, and client-side template injection."
-    ),
-    FocusPreset.SSRF: (
-        "Focus on SSRF, XXE, deserialization attacks, "
-        "and server-side request manipulation."
-    ),
-    FocusPreset.KUBERNETES: (
-        "Focus on Kubernetes misconfigurations, container escape, "
-        "RBAC issues, secrets exposure, and infrastructure weaknesses."
-    ),
-    FocusPreset.SECRETS: (
-        "Focus on hardcoded secrets, API key leaks, credential exposure, "
-        "supply chain vulnerabilities, and dependency analysis."
-    ),
-    FocusPreset.CUSTOM: "",
-}
-
-
-def get_focus_instruction(preset: FocusPreset, custom_text: str = "") -> str:
-    if preset == FocusPreset.CUSTOM:
-        return custom_text
-    return _FOCUS_INSTRUCTIONS.get(preset, "")
+    WAITING_FOR_TARGETS = "waiting_for_targets"
+    AGENT_SELECT = "agent_select"
 
 
 @dataclass
@@ -126,11 +61,9 @@ class JobState:
     start_time: float = field(default_factory=time.time)
     duration_sec: float = 0.0
     pid: Optional[int] = None
-    caido_url: Optional[str] = None
     error: Optional[str] = None
     awaiting_input: bool = False
     input_prompt: Optional[str] = None
-    chat_history: list[dict] = field(default_factory=list)
 
     @property
     def elapsed(self) -> str:
@@ -165,7 +98,6 @@ class JobState:
             "start_time": self.start_time,
             "duration_sec": self.duration_sec,
             "pid": self.pid,
-            "caido_url": self.caido_url,
             "error": self.error,
             "awaiting_input": self.awaiting_input,
             "input_prompt": self.input_prompt,
@@ -182,21 +114,10 @@ class JobState:
             start_time=d.get("start_time", time.time()),
             duration_sec=d.get("duration_sec", 0.0),
             pid=d.get("pid"),
-            caido_url=d.get("caido_url"),
             error=d.get("error"),
             awaiting_input=d.get("awaiting_input", False),
             input_prompt=d.get("input_prompt"),
         )
-
-
-@dataclass
-class StrixEvent:
-    event_type: str
-    run_name: str
-    timestamp: str
-    data: dict = field(default_factory=dict)
-    phase: Optional[JobPhase] = None
-    message: str = ""
 
 
 def _fmt_duration(seconds: float) -> str:

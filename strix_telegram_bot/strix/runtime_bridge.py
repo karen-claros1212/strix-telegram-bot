@@ -126,7 +126,7 @@ class StrixRuntimeBridge:
 
     @property
     def is_running(self) -> bool:
-        return self._scan_status in ("running", "waiting")
+        return self._scan_status in ("initializing", "running", "waiting")
 
     @property
     def scan_status(self) -> str:
@@ -237,7 +237,7 @@ class StrixRuntimeBridge:
         self._phase = "running"
         self._last_error = None
         self._scan_task = None
-        self._scan_status = "running"
+        self._scan_status = "initializing"
 
         self._thread = threading.Thread(
             target=self._scan_thread,
@@ -246,21 +246,14 @@ class StrixRuntimeBridge:
         )
         self._thread.start()
 
-        for _ in range(200):
-            if self._root_agent_id:
-                break
-            time.sleep(0.1)
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            return True, f"Escaneo iniciado: {run_name}"
 
         if self._last_error:
             return False, self._last_error
 
-        if not self._thread or not self._thread.is_alive():
-            return False, "El runtime de STRIX no pudo iniciar."
-
-        if not self._root_agent_id:
-            return False, "STRIX no registró el agente raíz."
-
-        return True, f"Escaneo iniciado: {run_name}"
+        return False, "El runtime de STRIX no pudo iniciar."
 
     @staticmethod
     def _resolve_image() -> str:
@@ -301,14 +294,17 @@ class StrixRuntimeBridge:
         asyncio.set_event_loop(self._loop)
 
         async def _poll_root() -> None:
-            for _ in range(200):
+            for _ in range(600):
                 parent_of = getattr(self._coordinator, "parent_of", None)
                 if parent_of:
                     for aid, p in parent_of.items():
                         if p is None:
                             self._root_agent_id = aid
+                            self._scan_status = "running"
+                            self._emit_event("root_discovered", aid, f"Agente raíz: {aid}")
                             return
                 await asyncio.sleep(0.1)
+            logger.warning("Root agent not discovered within 60s")
 
         async def _poll_status() -> None:
             while not self._scan_completed:
@@ -353,12 +349,10 @@ class StrixRuntimeBridge:
             discovery = asyncio.create_task(_poll_root())
             status_poller = asyncio.create_task(_poll_status())
 
-            await asyncio.wait([discovery], timeout=20)
-            if not discovery.done():
-                discovery.cancel()
             result = await self._scan_task
 
             status_poller.cancel()
+            discovery.cancel()
             self._scan_status = "completed"
             self._phase = "completed"
             self._scan_completed = True
@@ -743,11 +737,18 @@ class StrixRuntimeBridge:
         """
         status = self.get_run_status()
 
+        phase = self._phase
+        if self._scan_status == "initializing":
+            phase = "initializing"
+        elif not status.get("is_running") and not status.get("is_active"):
+            if not self._last_error and self._phase == "running":
+                phase = "completed"
+
         state: dict[str, Any] = {
             "run_name": status.get("run_name", "pending"),
             "target": [],
             "mode": status.get("mode", "deep"),
-            "phase": self._phase,
+            "phase": phase,
             "elapsed": _fmt_duration(status["elapsed"]),
             "error": self._last_error,
             "is_active": self.is_running,
@@ -755,10 +756,8 @@ class StrixRuntimeBridge:
             "input_prompt": self._input_prompt,
         }
 
-        if not status["is_running"] and not status.get("is_active"):
+        if not status.get("is_running") and not status.get("is_active"):
             state["is_active"] = False
-            if not self._last_error and self._phase == "running":
-                state["phase"] = "completed"
 
         return state
 

@@ -1,35 +1,19 @@
-"""Textos en español para la UI del bot."""
-
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
-from strix_telegram_bot.models import JobState, JobPhase, ScanMode
+from strix_telegram_bot.models import JobPhase, ScanMode, BridgePhase
 
-# Bridge phase strings (from StrixRuntimeBridge) → display strings
-_BRIDGE_PHASE_MAP = {
+_PHASE_LABELS = {
+    "initializing": "inicializando",
     "running": "ejecutando",
     "waiting": "esperando",
     "completed": "completado",
-    "stopped": "detenido",
     "failed": "falló",
+    "stopped": "detenido",
 }
 
-# JobPhase enum → display strings (for legacy JobStore jobs)
-_PHASE_ICONS = {
-    JobPhase.CREATED: "creado",
-    JobPhase.CONFIGURING: "configurando",
-    JobPhase.SCANNING: "escaneando",
-    JobPhase.BROWSER: "navegador",
-    JobPhase.PROXY: "proxy",
-    JobPhase.ANALYZING: "analizando",
-    JobPhase.REPORTING: "reportando",
-    JobPhase.COMPLETED: "completado",
-    JobPhase.FAILED: "falló",
-    JobPhase.STOPPED: "detenido",
-}
-
-_MODE_ICONS = {
+_MODE_LABELS = {
     ScanMode.QUICK: "Rápido",
     ScanMode.STANDARD: "Estándar",
     ScanMode.DEEP: "Profundo",
@@ -42,81 +26,120 @@ def escape_md(text: str) -> str:
     return text
 
 
-def main_menu_text(strix_version: str = "") -> str:
-    ver = f" STRIX {strix_version}" if strix_version else ""
+def main_menu_text() -> str:
     return (
-        f"Centro de Control STRIX{ver}\n"
+        "Centro de Control STRIX\n"
         "\n"
-        "Elegí una opción:"
+        "Presioná Escanear y enviá los targets.\n"
+        "Podés mandar URLs, rutas locales, o repos GitHub.\n"
+        "Separalos con coma o en líneas nuevas."
     )
 
 
-def job_status_text(job: JobState | dict) -> str:
-    if isinstance(job, dict):
-        phase_str = job.get("phase", "unknown")
-        mode_str = job.get("mode", "deep")
+def waiting_for_targets_text() -> str:
+    return "¿Qué querés escanear? Enviá URLs, repos, o rutas locales."
 
-        # Try bridge phase map first (runtime_bridge returns strings like "running", "waiting")
-        phase_display = _BRIDGE_PHASE_MAP.get(phase_str, None)
-        if phase_display is None:
-            # Fall back to JobPhase enum (legacy JobStore)
-            try:
-                phase = JobPhase(phase_str)
-                phase_display = _PHASE_ICONS.get(phase, phase_str)
-            except ValueError:
-                phase_display = phase_str
 
-        # Try ScanMode enum for mode
-        try:
-            mode = ScanMode(mode_str)
-            mode_display = _MODE_ICONS.get(mode, mode_str)
-        except ValueError:
-            mode_display = mode_str.upper()
+def job_status_text(status: dict) -> str:
+    phase_str = status.get("phase", "unknown")
+    phase_label = _PHASE_LABELS.get(phase_str, phase_str)
+    mode_str = status.get("mode", "deep")
 
-        target = job.get("target", [])
-        elapsed = job.get("elapsed", "0s")
-        error = job.get("error")
-        awaiting = job.get("awaiting_input", False)
-        prompt = job.get("input_prompt")
-    else:
-        phase_display = _PHASE_ICONS.get(job.phase, "?")
-        mode_display = _MODE_ICONS.get(job.mode, job.mode.value)
-        target = job.target
-        elapsed = job.elapsed
-        error = job.error
-        awaiting = job.awaiting_input
-        prompt = job.input_prompt
+    try:
+        mode = ScanMode(mode_str)
+        mode_label = _MODE_LABELS.get(mode, mode_str)
+    except ValueError:
+        mode_label = mode_str.upper()
+
+    target = status.get("target", [])
+    elapsed = status.get("elapsed", "0s")
+    error = status.get("error")
+    agents = status.get("agents", [])
+    tools = status.get("tools", [])
+    vulns = status.get("vulnerabilities", [])
+    awaiting = status.get("awaiting_input", False)
+    prompt = status.get("input_prompt")
 
     lines = [
-        f"Escaneo {mode_display}",
-        f"Objetivo: {escape_md(', '.join(target) if isinstance(target, list) else str(target))}",
-        f"Estado: {phase_display}",
-        f"Fase: {phase_display}",
+        f"STRIX {mode_label}",
+        f"Fase: {phase_label}",
         f"Tiempo: {elapsed}",
     ]
 
-    if isinstance(job, JobState) and job.caido_url:
-        lines.append(f"Caido: {escape_md(job.caido_url)}")
+    if target:
+        target_str = ", ".join(target) if isinstance(target, list) else str(target)
+        lines.append(f"Target: {escape_md(target_str)}")
+
+    if agents:
+        lines.append("")
+        lines.append("━ Agentes ━")
+        for a in agents[:5]:
+            aid = a.get("id", "?")[:20]
+            st = a.get("status", "?")
+            icon = _status_icon(st)
+            lines.append(f"{icon} {escape_md(aid)}")
+        if len(agents) > 5:
+            lines.append(f"... y {len(agents) - 5} más")
+
+    if tools:
+        lines.append("")
+        lines.append("━ Herramientas ━")
+        for t in tools[:8]:
+            tname = t.get("name", "?")[:30]
+            tstatus = t.get("status", "running")
+            lines.append(f"  ᴛ {escape_md(tname)} ({tstatus})")
+        if len(tools) > 8:
+            lines.append(f"... y {len(tools) - 8} más")
+
+    if vulns:
+        lines.append("")
+        lines.append("━ Vulnerabilidades ━")
+        for v in vulns[:5]:
+            severity = v.get("severity", "?")
+            title = v.get("title", "?")[:40]
+            sev_icon = {"critical": "⬛", "high": "🔴", "medium": "🟡", "low": "🔵"}.get(severity.lower(), "⚪")
+            lines.append(f"{sev_icon} [{severity.upper()}] {escape_md(title)}")
+        if len(vulns) > 5:
+            lines.append(f"... y {len(vulns) - 5} más")
 
     if error:
-        lines.append(f"Error: {escape_md(error)}")
+        lines.append("")
+        lines.append(f"⚠ Error: {escape_md(error)}")
 
     if awaiting and prompt:
-        lines.append(f"\nSTRIX necesita información: {escape_md(prompt)}")
+        lines.append("")
+        lines.append(f"⏳ STRIX necesita información: {escape_md(prompt)}")
 
     return "\n".join(lines)
 
 
-def job_completed_text(job: JobState) -> str:
-    phase_icon = _PHASE_ICONS.get(job.phase, "?")
+def _status_icon(st: str) -> str:
+    return {
+        "running": "▶",
+        "waiting": "⏳",
+        "completed": "✅",
+        "failed": "❌",
+        "stopped": "⏹",
+    }.get(st, "?")
+
+
+def help_text() -> str:
     return (
-        f"Escaneo {_MODE_ICONS.get(job.mode, job.mode.value)}\n"
-        f"Objetivo: {escape_md(', '.join(job.target))}\n"
-        f"Estado: {phase_icon}\n"
-        f"Duración: {job.elapsed}\n"
-        f"{'Error: '+escape_md(job.error) if job.error else ''}"
+        "Centro de Control STRIX — Ayuda\n"
+        "\n"
+        "/start — Menú principal\n"
+        "/status — Estado actual\n"
+        "/stop — Detener escaneo\n"
+        "/jobs — Historial de trabajos\n"
+        "/reports — Centro de reportes\n"
+        "/health — Estado del sistema\n"
+        "\n"
+        "Durante un escaneo, cualquier mensaje de texto\n"
+        "se envía automáticamente al agente STRIX."
     )
 
+
+# Legacy helpers (still used by other modules)
 
 def health_text(
     strix_version: str,
@@ -147,63 +170,13 @@ def evidence_text(manifest: dict) -> str:
     artifacts = manifest.get("artifacts", [])
     if not artifacts:
         return "No hay evidencia guardada."
-
     total_size = sum(a.get("size_bytes", 0) for a in artifacts)
     sensitive = sum(1 for a in artifacts if a.get("sensitive"))
-
     return (
         "Bóveda de Evidencia\n"
         f"Archivos: {len(artifacts)}\n"
         f"Tamaño: {total_size / 1024:.1f} KB\n"
         f"Items sensibles: {sensitive}"
-    )
-
-
-def caido_panel_text(url: Optional[str], active: bool) -> str:
-    if url:
-        return f"Proxy Caido\nURL: {escape_md(url)}\nEstado: Activo"
-    if active:
-        return "Proxy Caido\nEstado: Activo (URL desconocida)"
-    return "Proxy Caido\nEstado: Inactivo\n\nIniciá un escaneo para ver Caido."
-
-
-def instruction_text() -> str:
-    return (
-        "Instrucción / Enfoque\n\n"
-        "Elegí un área de enfoque para guiar a STRIX, "
-        "o saltá para un escaneo de propósito general."
-    )
-
-
-def tools_panel_text(active_tools: list[dict]) -> str:
-    if not active_tools:
-        return "No se detectaron herramientas en el escaneo actual."
-    lines = ["Herramientas activas:"]
-    for t in active_tools:
-        name = t.get("name", "desconocida")
-        status = t.get("status", "ejecutando")
-        lines.append(f"  {name} — {status}")
-    return "\n".join(lines)
-
-
-def help_text() -> str:
-    return (
-        "Centro de Control STRIX — Ayuda\n"
-        "\n"
-        "Escanear — Iniciar una prueba de penetración\n"
-        "  Rápido: Test rápido CI/CD\n"
-        "  Estándar: Revisión de seguridad\n"
-        "  Profundo: Auditoría completa (default)\n"
-        "\n"
-        "Perfiles:\n"
-        "  Interactivo — espejo de la TUI de STRIX\n"
-        "  Headless / CI — automático, sin interfaz\n"
-        "\n"
-        "Chat — Hablá con STRIX o respondé a sus preguntas\n"
-        "  /chat — entrar/salir del modo Chat\n"
-        "  Mientras estás en Chat, cualquier texto va al agente\n"
-        "Detener — Detiene el escaneo activo\n"
-        "Estado — Muestra el estado del escaneo actual"
     )
 
 
