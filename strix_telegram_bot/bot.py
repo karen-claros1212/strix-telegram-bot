@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -738,8 +737,10 @@ class StrixBot:
         if not status.get("is_active") and run_name:
             job = self._job_store.get(run_name)
             if job and job.is_active:
-                phase_str = status.get("phase", "completed")
-                job.phase = _PHASE_MAP.get(phase_str, JobPhase.COMPLETED)
+                if status.get("error"):
+                    job.phase = JobPhase.FAILED
+                else:
+                    job.phase = JobPhase.COMPLETED
                 job.error = status.get("error")
                 self._job_store.save(job)
 
