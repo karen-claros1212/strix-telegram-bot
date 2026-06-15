@@ -203,14 +203,13 @@ class StrixRuntimeBridge:
             except Exception as exc:
                 logger.warning("collect_local_sources failed: %s", exc)
 
-        # Merge caller-provided local_sources with STRIX-collected ones
-        extra_sources: list[dict] = []
-        for src in (local_sources or []):
-            if isinstance(src, dict):
-                extra_sources.append(src)
-            else:
-                extra_sources.append({"source_path": str(src), "workspace_subdir": None})
-        merged_sources = strix_sources + extra_sources
+        seen_paths: set[str] = set()
+        merged_sources: list[dict[str, str]] = []
+        for s in strix_sources + (local_sources or []):
+            sp = s.get("source_path", "")
+            if sp not in seen_paths:
+                seen_paths.add(sp)
+                merged_sources.append(s)
 
         scan_config: dict[str, Any] = {
             "scan_id": run_name,
@@ -252,14 +251,13 @@ class StrixRuntimeBridge:
                 break
             time.sleep(0.1)
 
-        # Fail-loud checks
         if self._last_error:
             return False, self._last_error
 
         if not self._thread or not self._thread.is_alive():
             return False, "El runtime de STRIX no pudo iniciar."
 
-        if not non_interactive and not self._root_agent_id:
+        if not self._root_agent_id:
             return False, "STRIX no registró el agente raíz."
 
         return True, f"Escaneo iniciado: {run_name}"
@@ -344,10 +342,10 @@ class StrixRuntimeBridge:
                 scan_config=scan_config,
                 scan_id=self._run_name,
                 image=self._scan_image,
+                local_sources=scan_config.get("local_sources"),
                 coordinator=self._coordinator,
                 interactive=not non_interactive,
                 event_sink=self._capture_event,
-                local_sources=local_sources or [],
             )
 
         async def _main() -> None:

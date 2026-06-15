@@ -700,10 +700,6 @@ class StrixBot:
 
         # Always update JobStore first (independent of active job chat/message)
         status = self._bridge.to_status_dict()
-
-        if not status.get("run_name") and not self._bridge.is_running:
-            return
-
         run_name = status.get("run_name")
 
         _PHASE_MAP: dict[str, JobPhase] = {
@@ -723,10 +719,21 @@ class StrixBot:
                 job.error = status.get("error")
                 self._job_store.save(job)
 
+            if not status.get("is_active"):
+                if job and job.is_active:
+                    if status.get("error"):
+                        job.phase = JobPhase.FAILED
+                    else:
+                        job.phase = JobPhase.COMPLETED
+                    job.error = status.get("error")
+                    self._job_store.save(job)
+
         # Then update Telegram UI only if we have an active job message
         if self._active_job_chat_id is None or self._active_job_message_id is None:
             return
 
+        if not run_name and not self._bridge.is_running:
+            return
         text = job_status_text(status)
         edit_message(
             self,
@@ -737,15 +744,6 @@ class StrixBot:
         )
 
         if not status.get("is_active") and run_name:
-            job = self._job_store.get(run_name)
-            if job and job.is_active:
-                if status.get("error"):
-                    job.phase = JobPhase.FAILED
-                else:
-                    job.phase = JobPhase.COMPLETED
-                job.error = status.get("error")
-                self._job_store.save(job)
-
             phase = status.get("phase", "completed")
             delta = status.get("elapsed", "0s")
             final = (
@@ -844,14 +842,36 @@ class StrixBot:
         local_sources: list[dict[str, str]] = []
         repos_dir = settings.strix_runs_dir / "repos"
 
+        def _add_local(path: Path, subdir: str) -> None:
+            sr = str(path.resolve())
+            local_sources.append({"source_path": sr, "workspace_subdir": subdir})
+
         for t in targets:
             t = t.strip()
             p = Path(t)
 
             if p.exists():
-                resolved = str(p.resolve())
-                final_targets.append(resolved)
-                local_sources.append({"source_path": resolved, "workspace_subdir": None})
+                if p.is_dir():
+                    sr = str(p.resolve())
+                    final_targets.append(sr)
+                    _add_local(p, p.name)
+                else:
+                    wrap_dir = repos_dir / "_attachments" / p.stem
+                    wrap_dir.mkdir(parents=True, exist_ok=True)
+                    target_path = wrap_dir / p.name
+                    if not target_path.exists():
+                        try:
+                            target_path.symlink_to(p.resolve())
+                        except OSError:
+                            try:
+                                import shutil
+                                shutil.copy2(str(p.resolve()), str(target_path))
+                            except OSError as e:
+                                logger.warning("Failed to copy attachment %s: %s", p, e)
+                                final_targets.append(t)
+                                continue
+                    final_targets.append(str(wrap_dir))
+                    _add_local(wrap_dir, p.stem)
                 continue
 
             m = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$', t)
@@ -886,7 +906,7 @@ class StrixBot:
                     continue
 
                 final_targets.append(str(clone_dir))
-                local_sources.append({"source_path": str(clone_dir), "workspace_subdir": repo_full})
+                _add_local(clone_dir, repo_full.split("/")[-1].removesuffix(".git"))
                 continue
 
             final_targets.append(t)
