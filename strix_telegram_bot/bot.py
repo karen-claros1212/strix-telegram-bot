@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -698,21 +699,7 @@ class StrixBot:
         if self._active_job_chat_id is None or self._active_job_message_id is None:
             return
 
-        status = self._bridge.get_run_status()
-        for ev in events:
-            if ev.type == "scan_complete":
-                status["phase"] = "completed"
-                status["is_active"] = False
-            elif ev.type == "scan_cancelled":
-                status["phase"] = "stopped"
-                status["is_active"] = False
-            elif ev.type == "scan_error":
-                status["phase"] = "failed"
-                status["is_active"] = False
-                status["error"] = ev.content
-            if ev.awaiting_input:
-                status["awaiting_input"] = True
-                status["input_prompt"] = ev.prompt
+        status = self._bridge.to_status_dict()
 
         if not status.get("run_name") and not self._bridge.is_running:
             return
@@ -761,13 +748,7 @@ class StrixBot:
 
             from .telegram import send_chat_action, send_message
 
-            if ev.type == "input_request":
-                msg = f"⏳ STRIX necesita información:\n{escape_md(ev.prompt or ev.content)}"
-                for s in active_sessions:
-                    s._seen_event_ids.add(seen_key)
-                    send_message(self, s.chat_id, msg, reply_markup=back_to_menu())
-
-            elif ev.type in ("agent.message", "agent.response", "chat"):
+            if ev.type == "agent_message":
                 if already_seen:
                     continue
                 for s in active_sessions:
@@ -777,14 +758,6 @@ class StrixBot:
                         content = ev.content[:4000] if ev.content else "..."
                         send_message(self, s.chat_id, f"🤖 *{escape_md(ev.agent_id)}*:\n{escape_md(content)}")
 
-            elif ev.type in ("vulnerability", "finding"):
-                if already_seen:
-                    continue
-                for s in active_sessions:
-                    s._seen_event_ids.add(seen_key)
-                    content = ev.content[:4000] if ev.content else "..."
-                    send_message(self, s.chat_id, f"🔍 *Hallazgo*:\n{escape_md(content)}")
-
             elif ev.type == "tool_call":
                 if already_seen:
                     continue
@@ -793,12 +766,27 @@ class StrixBot:
                     content = ev.content[:200] if ev.content else "..."
                     send_message(self, s.chat_id, f"🛠 *{escape_md(ev.agent_id)}* ejecuta: {escape_md(content)}")
 
-            elif ev.type == "tool_result":
+            elif ev.type == "tool_output":
                 if already_seen:
                     continue
                 for s in active_sessions:
                     s._seen_event_ids.add(seen_key)
-                    content = ev.content[:1000] if ev.content else ""
+                    try:
+                        data = json.loads(ev.content)
+                        tool_name = data.get("tool_name", "?")
+                        output = data.get("output", "")[:500]
+                    except Exception:
+                        tool_name = "?"
+                        output = ev.content[:200]
+                    msg = f"✅ *{escape_md(tool_name)}* completado:\n`{escape_md(output)}`"
+                    send_message(self, s.chat_id, msg)
+
+            elif ev.type == "tool_cancelled":
+                if already_seen:
+                    continue
+                for s in active_sessions:
+                    s._seen_event_ids.add(seen_key)
+                    send_message(self, s.chat_id, f"⏹ *{escape_md(ev.content)}* cancelada")
 
             elif ev.type == "scan_complete":
                 for s in active_sessions:
