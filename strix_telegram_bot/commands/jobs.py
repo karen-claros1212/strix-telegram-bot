@@ -66,6 +66,18 @@ def callback_jobs(bot: Any, update: dict) -> None:
     if action == "list":
         _list_jobs(bot, chat_id, msg_id)
 
+    elif action == "agents":
+        bridge = getattr(bot, "_bridge", None)
+        if bridge and bridge.is_running:
+            agents = bridge.list_agents()
+            if agents:
+                from strix_telegram_bot.ui.keyboards import agent_selector
+                edit_message(bot, chat_id, msg_id, "Selecciona un agente:", reply_markup=agent_selector(agents))
+            else:
+                edit_message(bot, chat_id, msg_id, "No hay agentes disponibles.", reply_markup=back_to_menu())
+        else:
+            edit_message(bot, chat_id, msg_id, "Bridge no disponible.", reply_markup=back_to_menu())
+
     elif action == "stop":
         bridge = getattr(bot, "_bridge", None)
         if bridge and bridge.is_running:

@@ -26,12 +26,15 @@ def main_menu() -> dict:
     ])
 
 
-def job_panel(running: bool = False) -> dict:
+def job_panel(running: bool = False, agent_count: int = 0) -> dict:
     buttons = []
     if running:
         buttons.append(_btn("Detener", _cb("job", "stop")))
     buttons.append(_btn("Estado", _cb("job", "status")))
-    return build_inline_keyboard([buttons])
+    rows = [buttons]
+    if agent_count > 1:
+        rows.append([_btn("Agentes", _cb("job", "agents"))])
+    return build_inline_keyboard(rows)
 
 
 def agent_selector(agents: list[dict]) -> dict:

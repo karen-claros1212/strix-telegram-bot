@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -29,6 +30,9 @@ from .strix.runtime_bridge import StrixRuntimeBridge
 
 logger = logging.getLogger("strix_bot")
 
+_URL_RE = re.compile(r"https?://[^\s,]+")
+_GITHUB_RE = re.compile(r"github\.com[:/][^\s,]+")
+
 
 class StrixBot:
     def __init__(self) -> None:
@@ -44,6 +48,7 @@ class StrixBot:
 
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
+        self._drain_thread: Optional[threading.Thread] = None
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -78,15 +83,11 @@ class StrixBot:
     def _register_slash_commands(self) -> None:
         from .telegram import _request
         commands = [
-            {"command": "start", "description": "Menú principal"},
-            {"command": "help", "description": "Ayuda y comandos"},
-            {"command": "health", "description": "Estado del sistema"},
-            {"command": "version", "description": "Versión de STRIX"},
             {"command": "status", "description": "Estado del escaneo activo"},
             {"command": "stop", "description": "Detener escaneo activo"},
             {"command": "jobs", "description": "Historial de trabajos"},
             {"command": "reports", "description": "Centro de reportes"},
-            {"command": "config", "description": "Configuración del bot"},
+            {"command": "help", "description": "Ayuda y comandos"},
         ]
         _request("setMyCommands", {"commands": commands})
 
@@ -121,10 +122,9 @@ class StrixBot:
         from .telegram import send_chat_action
         send_chat_action(self, chat_id)
 
-        # If bridge is running, forward text to agent
         if self._bridge.is_running:
-            root_id = self._bridge.root_agent_id
-            ok = self._bridge.send_message_to_agent(text, agent_id=root_id)
+            agent_id = getattr(self._bridge, "_preferred_agent_id", None) or self._bridge.root_agent_id
+            ok = self._bridge.send_message_to_agent(text, agent_id=agent_id)
             if ok:
                 send_message(self, chat_id, "Mensaje enviado a STRIX.")
             else:
@@ -133,7 +133,7 @@ class StrixBot:
 
         pm = get_panel_manager(chat_id)
         if pm.current == MenuState.WAITING_FOR_TARGETS:
-            self._parse_and_launch(chat_id, text, msg)
+            self._parse_and_launch(chat_id, text)
         else:
             send_message(
                 self, chat_id,
@@ -141,10 +141,24 @@ class StrixBot:
                 reply_markup=main_menu(),
             )
 
-    def _parse_and_launch(self, chat_id: int, text: str, msg: dict) -> None:
-        targets = [t.strip() for t in text.replace("\n", ",").split(",") if t.strip()]
+    def _extract_targets(self, text: str) -> tuple[list[str], str]:
+        urls = _URL_RE.findall(text)
+        remaining = _URL_RE.sub("", text).strip()
+        repos = _GITHUB_RE.findall(remaining)
+        remaining = _GITHUB_RE.sub("", remaining).strip()
+        lines = [t.strip() for t in remaining.replace("\n", ",").split(",") if t.strip()]
+        targets = list(dict.fromkeys(urls + repos + lines))
+        instruction = _URL_RE.sub("", remaining)
+        instruction = _GITHUB_RE.sub("", instruction)
+        pieces = [p.strip() for p in instruction.replace("\n", ",").split(",") if p.strip()]
+        pieces = [p for p in pieces if p not in targets]
+        instruction = ", ".join(pieces)
+        return targets, instruction
+
+    def _parse_and_launch(self, chat_id: int, text: str) -> None:
+        targets, instruction = self._extract_targets(text)
         if not targets:
-            send_message(self, chat_id, "Enviá al menos un objetivo.")
+            send_message(self, chat_id, "No encontré ningún objetivo (URL, ruta, repo).")
             return
 
         from .safety.attachment_policy import sanitize_target
@@ -154,7 +168,7 @@ class StrixBot:
                 send_message(self, chat_id, f"Objetivo inválido {t}: {err}")
                 return
 
-        self._launch_scan(chat_id, targets, msg.get("message_id"))
+        self._launch_scan(chat_id, targets, instruction)
 
     def _handle_callback(self, update: dict) -> None:
         cb = update.get("callback_query", {})
@@ -191,13 +205,13 @@ class StrixBot:
             edit_message(bot, chat_id, msg_id, "Agente no encontrado.", reply_markup=back_to_menu())
             return
 
-        # Store selected agent ID in bridge as preferred target
         self._bridge._preferred_agent_id = agent_id
         name = agent.get("name", agent_id)
+        agent_count = len(self._bridge.list_agents() or [])
         edit_message(
             bot, chat_id, msg_id,
             f"Ahora enviando mensajes a: {escape_md(name)}",
-            reply_markup=job_panel(running=True),
+            reply_markup=job_panel(running=True, agent_count=agent_count),
         )
 
     def _handle_document(self, update: dict) -> None:
@@ -248,7 +262,7 @@ class StrixBot:
             send_message(
                 self, chat_id,
                 f"Archivo guardado: {file_name}\n"
-                "Usá /start para escanearlo.",
+                "Usá el botón Escanear para iniciar un escaneo.",
             )
 
     def _prepare_scan_targets(self, targets: list[str]) -> tuple[list[str], list[dict[str, str]]]:
@@ -333,17 +347,13 @@ class StrixBot:
         self,
         chat_id: int,
         targets: list[str],
-        msg_id: Optional[int] = None,
+        instruction: str = "",
     ) -> None:
         from .telegram import send_chat_action
         send_chat_action(self, chat_id)
 
         if not targets:
-            text = "No se especificó objetivo."
-            if msg_id:
-                edit_message(self, chat_id, msg_id, text, reply_markup=back_to_menu())
-            else:
-                send_message(self, chat_id, text, reply_markup=back_to_menu())
+            send_message(self, chat_id, "No se especificó objetivo.", reply_markup=back_to_menu())
             return
 
         prepared_targets, local_sources = self._prepare_scan_targets(targets)
@@ -351,30 +361,24 @@ class StrixBot:
         ok, start_msg = self._bridge.start_scan(
             targets=prepared_targets,
             scan_mode="deep",
-            instruction="",
+            instruction=instruction,
             scope_mode="auto",
             non_interactive=False,
             local_sources=local_sources,
         )
 
         if not ok:
-            text = f"Error: {start_msg}"
-            if msg_id:
-                edit_message(self, chat_id, msg_id, text, reply_markup=back_to_menu())
-            else:
-                send_message(self, chat_id, text, reply_markup=back_to_menu())
+            send_message(self, chat_id, f"Error: {start_msg}", reply_markup=back_to_menu())
             return
 
         run_name = self._bridge.run_name or f"scan-{time.time():.0f}"
-        self._active_job_chat_id = chat_id
-        self._active_job_message_id = msg_id
-        self._active_job_run_name = run_name
 
         job = JobState(
             run_name=run_name,
             target=targets,
             mode=ScanMode.DEEP,
             phase=JobPhase.SCANNING,
+            instruction=instruction,
         )
         self._job_store.save(job)
 
@@ -382,12 +386,14 @@ class StrixBot:
         pm.back_to_main()
 
         status = self._bridge.to_status_dict()
-        text = job_status_text(status) if self._bridge.run_name else "Escaneo iniciado"
+        text = job_status_text(status) if self._bridge.run_name else "STRIX — Inicializando…"
+        agent_count = len(self._bridge.list_agents() or [])
+        resp = send_message(self, chat_id, text, reply_markup=job_panel(running=True, agent_count=agent_count))
+        panel_msg_id = resp.get("message_id") if isinstance(resp, dict) else None
 
-        if msg_id:
-            edit_message(self, chat_id, msg_id, text, reply_markup=job_panel(running=True))
-        else:
-            send_message(self, chat_id, text, reply_markup=job_panel(running=True))
+        self._active_job_chat_id = chat_id
+        self._active_job_message_id = panel_msg_id
+        self._active_job_run_name = run_name
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
@@ -422,14 +428,15 @@ class StrixBot:
                     job.error = status.get("error")
                     self._job_store.save(job)
 
-        if self._active_job_chat_id is not None:
+        if self._active_job_chat_id is not None and self._active_job_message_id is not None:
             text = job_status_text(status)
+            agent_count = len(self._bridge.list_agents() or [])
             edit_message(
                 self,
                 self._active_job_chat_id,
                 self._active_job_message_id,
                 text,
-                reply_markup=job_panel(running=status.get("is_active", False)),
+                reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
             )
 
             if not status.get("is_active") and run_name:
@@ -489,6 +496,14 @@ class StrixBot:
         if events:
             self._last_broadcast["event"] = events[-1].timestamp
 
+    def _drain_loop(self) -> None:
+        while self._running:
+            try:
+                self._drain_update_queue()
+            except Exception as e:
+                logger.error(f"Drain error: {e}")
+            time.sleep(0.5)
+
     def process_update(self, update: dict) -> None:
         if "message" in update:
             self._handle_command(update)
@@ -500,13 +515,15 @@ class StrixBot:
         self._register_slash_commands()
         self._running = True
 
+        self._drain_thread = threading.Thread(target=self._drain_loop, daemon=True)
+        self._drain_thread.start()
+
         while self._running:
             try:
                 updates = get_updates(offset=self._updates_offset, timeout=30)
                 for upd in updates:
                     self._updates_offset = upd["update_id"] + 1
                     self.process_update(upd)
-                self._drain_update_queue()
             except KeyboardInterrupt:
                 logger.info("Shutdown requested.")
                 break

@@ -12,15 +12,7 @@ class ScanMode(str, Enum):
     DEEP = "deep"
 
 
-class ProfileType(str, Enum):
-    INTERACTIVE = "interactive"
-    HEADLESS = "headless"
 
-
-class ScopeMode(str, Enum):
-    AUTO = "auto"
-    DIFF = "diff"
-    FULL = "full"
 
 
 class JobPhase(str, Enum):
