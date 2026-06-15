@@ -143,6 +143,7 @@ class StrixRuntimeBridge:
         diff_base: Optional[str] = None,
         non_interactive: bool = False,
         image: Optional[str] = None,
+        local_sources: Optional[list[str]] = None,
     ) -> tuple[bool, str]:
         if not _STRIX_AVAILABLE:
             return False, "STRIX 1.0.4 no está instalado (strix package not found)"
@@ -163,7 +164,7 @@ class StrixRuntimeBridge:
             "scope_mode": scope_mode,
             "diff_base": diff_base,
             "non_interactive": non_interactive,
-            "local_sources": [],
+            "local_sources": local_sources or [],
             "resume_instruction": "",
         }
 

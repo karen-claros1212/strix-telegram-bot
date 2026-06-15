@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .telegram import get_updates, send_message, edit_message, answer_callback
 from .security import is_authorized
-from .models import FocusPreset, MenuState, ProfileType, ScanMode, ScopeMode
+from .models import FocusPreset, JobPhase, JobState, MenuState, ProfileType, ScanMode, ScopeMode
 from .ui.keyboards import (
     main_menu,
     depth_selector,
@@ -704,6 +707,25 @@ class StrixBot:
         if not status.get("run_name") and not self._bridge.is_running:
             return
 
+        run_name = status.get("run_name")
+
+        _PHASE_MAP: dict[str, JobPhase] = {
+            "running": JobPhase.SCANNING,
+            "completed": JobPhase.COMPLETED,
+            "failed": JobPhase.FAILED,
+            "stopped": JobPhase.STOPPED,
+        }
+
+        if run_name:
+            job = self._job_store.get(run_name)
+            if job:
+                phase_str = status.get("phase", "running")
+                job.phase = _PHASE_MAP.get(phase_str, JobPhase.SCANNING)
+                job.awaiting_input = status.get("awaiting_input", False)
+                job.input_prompt = status.get("input_prompt")
+                job.error = status.get("error")
+                self._job_store.save(job)
+
         text = job_status_text(status)
         edit_message(
             self,
@@ -713,7 +735,14 @@ class StrixBot:
             reply_markup=job_panel(running=status.get("is_active", False)),
         )
 
-        if not status.get("is_active") and status.get("run_name"):
+        if not status.get("is_active") and run_name:
+            job = self._job_store.get(run_name)
+            if job and job.is_active:
+                phase_str = status.get("phase", "completed")
+                job.phase = _PHASE_MAP.get(phase_str, JobPhase.COMPLETED)
+                job.error = status.get("error")
+                self._job_store.save(job)
+
             phase = status.get("phase", "completed")
             delta = status.get("elapsed", "0s")
             final = (
@@ -803,6 +832,47 @@ class StrixBot:
                     send_message(self, s.chat_id, "⏹ Escaneo detenido.", reply_markup=main_menu())
                     s.exit_chat()
 
+    @staticmethod
+    def _prepare_scan_targets(targets: list[str]) -> tuple[list[str], list[str]]:
+        from strix_telegram_bot.config import settings
+
+        final_targets: list[str] = []
+        local_sources: list[str] = []
+        repos_dir = settings.strix_runs_dir / "repos"
+
+        for t in targets:
+            t = t.strip()
+            p = Path(t)
+
+            if p.exists():
+                resolved = str(p.resolve())
+                final_targets.append(resolved)
+                local_sources.append(resolved)
+                continue
+
+            m = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$', t)
+            if m:
+                repo_full = m.group(1).rstrip("/")
+                clone_dir = repos_dir / repo_full
+                if not clone_dir.exists():
+                    try:
+                        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+                        subprocess.run(
+                            ["git", "clone", "--depth=1", f"https://github.com/{repo_full}.git", str(clone_dir)],
+                            capture_output=True, text=True, timeout=120, check=True,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to clone %s: %s", t, e)
+                        final_targets.append(t)
+                        continue
+                final_targets.append(str(clone_dir))
+                local_sources.append(str(clone_dir))
+                continue
+
+            final_targets.append(t)
+
+        return final_targets, local_sources
+
     def _launch_scan(
         self,
         bot: Any,
@@ -825,21 +895,38 @@ class StrixBot:
             edit_message(bot, chat_id, msg_id, "No se especificó objetivo.", reply_markup=back_to_menu())
             return
 
+        instruction = pm._selected_instruction
+
+        prepared_targets, local_sources = self._prepare_scan_targets(targets)
+
         ok, start_msg = self._bridge.start_scan(
-            targets=targets,
+            targets=prepared_targets,
             scan_mode=mode.value,
-            instruction=pm._selected_instruction,
+            instruction=instruction,
             scope_mode=pm._selected_scope_mode.value,
             non_interactive=(pm._selected_profile == ProfileType.HEADLESS),
             diff_base=pm._selected_diff_base or None,
+            local_sources=local_sources,
         )
 
         if ok:
             self._active_job_chat_id = chat_id
             self._active_job_message_id = msg_id
             pm.reset_wizard()
+
             status = self._bridge.to_status_dict()
-            text = job_status_text(status) if status.get("run_name") else "Escaneo iniciado"
+            run_name = status.get("run_name")
+            if run_name:
+                job = JobState(
+                    run_name=run_name,
+                    target=targets,
+                    mode=mode,
+                    phase=JobPhase.SCANNING,
+                    instruction=instruction,
+                )
+                self._job_store.save(job)
+
+            text = job_status_text(status) if run_name else "Escaneo iniciado"
             edit_message(bot, chat_id, msg_id, text, reply_markup=job_panel(running=True))
         else:
             edit_message(bot, chat_id, msg_id, f"Error: {start_msg}", reply_markup=back_to_menu())

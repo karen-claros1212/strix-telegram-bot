@@ -105,12 +105,13 @@ def _send_health(bot, chat_id, msg_id=None) -> None:
     py_ver = platform.python_version()
     warning = _version_warning(ver, py_ver)
 
-    from strix_telegram_bot.jobs.job_store import JobStore
-    store = JobStore()
-    active_count = len(store.list_active())
     bridge = getattr(bot, "_bridge", None)
     if bridge and bridge.is_running:
-        active_count += 1
+        active_count = 1
+    else:
+        from strix_telegram_bot.jobs.job_store import JobStore
+        store = JobStore()
+        active_count = len(store.list_active())
 
     text = health_text(
         strix_version=ver,
