@@ -156,13 +156,15 @@ class StrixRuntimeBridge:
         targets_info = self._build_targets_info(targets)
         diff_scope = {"active": bool(diff_base), "diff_base": diff_base} if diff_base else {"active": False}
 
-        # Collect local sources using STRIX official function
-        local_sources: list[dict] = []
+        strix_sources: list[dict] = []
         if collect_local_sources:
             try:
-                local_sources = collect_local_sources(targets)
+                strix_sources = collect_local_sources(targets_info)
             except Exception as exc:
                 logger.warning("collect_local_sources failed: %s", exc)
+
+        extra_sources = [{"source_path": p, "workspace_subdir": None} for p in (local_sources or [])]
+        merged_sources = strix_sources + extra_sources
 
         scan_config: dict[str, Any] = {
             "scan_id": run_name,
@@ -174,7 +176,7 @@ class StrixRuntimeBridge:
             "scope_mode": scope_mode,
             "diff_base": diff_base,
             "non_interactive": non_interactive,
-            "local_sources": local_sources,
+            "local_sources": merged_sources,
             "resume_instruction": "",
         }
 
