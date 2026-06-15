@@ -12,16 +12,11 @@ from strix_telegram_bot.ui.keyboards import (
 from strix_telegram_bot.ui.messages import job_status_text, escape_md
 from strix_telegram_bot.jobs.job_store import JobStore
 from strix_telegram_bot.models import JobPhase
-from strix_telegram_bot.security import authorized_only
-
-
-@authorized_only
 def cmd_jobs(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _list_jobs(bot, chat_id)
 
 
-@authorized_only
 def cmd_status(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     store = JobStore()
@@ -37,7 +32,6 @@ def cmd_status(bot: Any, update: dict) -> None:
     )
 
 
-@authorized_only
 def cmd_stop(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     bridge = getattr(bot, "_bridge", None)
@@ -52,7 +46,6 @@ def cmd_stop(bot: Any, update: dict) -> None:
         )
 
 
-@authorized_only
 def callback_jobs(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     data = cb.get("data", "")

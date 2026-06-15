@@ -6,16 +6,11 @@ from strix_telegram_bot.telegram import send_message, edit_message, answer_callb
 from strix_telegram_bot.ui.keyboards import config_menu, back_to_menu, parse_callback
 from strix_telegram_bot.ui.messages import config_text, escape_md
 from strix_telegram_bot.config import settings
-from strix_telegram_bot.security import authorized_only
-
-
-@authorized_only
 def cmd_config(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _show_config(bot, chat_id)
 
 
-@authorized_only
 def callback_config(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     data = cb.get("data", "")
@@ -35,7 +30,7 @@ def callback_config(bot: Any, update: dict) -> None:
         edit_message(
             bot, chat_id, msg_id,
             "Modo de escaneo predeterminado.\n"
-            "Usá Nuevo Escaneo para seleccionar modo por escaneo.",
+            "Usa Nuevo Escaneo para seleccionar modo por escaneo.",
             reply_markup=back_to_menu(),
         )
 

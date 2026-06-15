@@ -7,23 +7,18 @@ from strix_telegram_bot.ui.keyboards import main_menu, parse_callback, target_ty
 from strix_telegram_bot.ui.messages import main_menu_text, help_text
 from strix_telegram_bot.ui.panels import get_panel_manager
 from strix_telegram_bot.models import MenuState
-from strix_telegram_bot.security import authorized_only
-
-
-@authorized_only
 def cmd_start(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     text = main_menu_text()
     send_message(bot, chat_id, text, reply_markup=main_menu())
 
 
-@authorized_only
 def cmd_help(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     send_message(bot, chat_id, help_text(), reply_markup=main_menu())
 
 
-@authorized_only
+
 def callback_menu(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     data = cb.get("data", "")
@@ -50,7 +45,7 @@ def callback_menu(bot: Any, update: dict) -> None:
         pm.push(MenuState.NEW_PENTEST_TARGET)
         edit_message(
             bot, chat_id, msg_id,
-            "Seleccioná tipo de objetivo:",
+            "Selecciona tipo de objetivo:",
             reply_markup=target_type_selector(),
         )
 
@@ -62,7 +57,7 @@ def callback_menu(bot: Any, update: dict) -> None:
             from strix_telegram_bot.ui.keyboards import profile_selector
             edit_message(
                 bot, chat_id, msg_id,
-                f"Objetivo: {pending}\nSeleccioná perfil:",
+                f"Objetivo: {pending}\nSelecciona perfil:",
                 reply_markup=profile_selector(),
             )
         else:

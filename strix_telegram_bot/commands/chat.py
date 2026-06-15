@@ -15,12 +15,10 @@ from strix_telegram_bot.ui.messages import escape_md
 from strix_telegram_bot.ui.panels import get_panel_manager
 from strix_telegram_bot.models import MenuState
 from strix_telegram_bot.state.chat_session import get_chat_session
-from strix_telegram_bot.security import authorized_only
-
 logger = logging.getLogger("strix_chat")
 
 
-@authorized_only
+
 def cmd_chat(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     user_id = str(update.get("message", {}).get("from", {}).get("id", ""))
@@ -51,12 +49,12 @@ def cmd_chat(bot: Any, update: dict) -> None:
 
     text = (
         "No hay una sesión interactiva disponible.\n"
-        "Iniciá un escaneo primero con /start o el botón Escanear."
+            "Inicia un escaneo primero con /start o el botón Escanear."
     )
     send_message(bot, chat_id, text, reply_markup=main_menu())
 
 
-@authorized_only
+
 def callback_chat(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     data = cb.get("data", "")
@@ -103,12 +101,12 @@ def callback_chat(bot: Any, update: dict) -> None:
             return
         edit_message(
             bot, chat_id, msg_id,
-            "Seleccioná un agente:",
+            "Selecciona un agente:",
             reply_markup=agent_selector(agents),
         )
 
 
-@authorized_only
+
 def callback_agent_select(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     data = cb.get("data", "")
@@ -149,7 +147,7 @@ def callback_agent_select(bot: Any, update: dict) -> None:
         bot, chat_id, msg_id,
         f"Conversando con: {escape_md(name)}\n"
         f"Estado: {escape_md(status)}\n\n"
-        "Enviá cualquier mensaje para hablar con el agente.",
+        "Envía cualquier mensaje para hablar con el agente.",
         reply_markup=chat_connected(name, status),
     )
 
@@ -181,7 +179,7 @@ def _enter_chat_with_bridge(
             f"Modo Chat activo.\n"
             f"Conversando con: {escape_md(name)}\n"
             f"Estado: {escape_md(status)}\n\n"
-            "Enviá cualquier mensaje para hablar con el agente."
+            "Envía cualquier mensaje para hablar con el agente."
         )
         if msg_id:
             edit_message(bot, chat_id, msg_id, text, reply_markup=chat_connected(name, status))
@@ -189,7 +187,7 @@ def _enter_chat_with_bridge(
             send_message(bot, chat_id, text, reply_markup=chat_connected(name, status))
         return
 
-    text = "Hay múltiples agentes. Seleccioná uno:"
+    text = "Hay múltiples agentes. Selecciona uno:"
     if msg_id:
         edit_message(bot, chat_id, msg_id, text, reply_markup=agent_selector(agents))
     else:

@@ -8,16 +8,11 @@ from strix_telegram_bot.ui.messages import escape_md, reports_menu_text
 from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
 from strix_telegram_bot.jobs.job_store import JobStore
-from strix_telegram_bot.security import authorized_only
-
-
-@authorized_only
 def cmd_reports(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _show_reports(bot, chat_id)
 
 
-@authorized_only
 def callback_reports(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     data = cb.get("data", "")

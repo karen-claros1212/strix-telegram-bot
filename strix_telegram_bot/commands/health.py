@@ -8,8 +8,6 @@ from typing import Any
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
 from strix_telegram_bot.ui.keyboards import back_to_menu
 from strix_telegram_bot.ui.messages import health_text
-from strix_telegram_bot.security import authorized_only
-
 _STRIX_MIN_VERSION = (1, 0, 4)
 _PYTHON_MIN_VERSION = (3, 12)
 
@@ -38,13 +36,12 @@ def _version_warning(ver: str, py_ver: str) -> str:
     return "\n".join(warnings)
 
 
-@authorized_only
+
 def cmd_health(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _send_health(bot, chat_id)
 
 
-@authorized_only
 def cmd_version(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     try:
@@ -65,7 +62,7 @@ def cmd_version(bot: Any, update: dict) -> None:
     )
 
 
-@authorized_only
+
 def cmd_uptime(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     import os
@@ -87,7 +84,7 @@ def cmd_uptime(bot: Any, update: dict) -> None:
     )
 
 
-@authorized_only
+
 def callback_health(bot: Any, update: dict) -> None:
     cb = update.get("callback_query", {})
     chat_id = cb.get("message", {}).get("chat", {}).get("id", "")

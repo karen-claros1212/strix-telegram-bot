@@ -186,7 +186,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             send_message(
                 self, chat_id,
-                "Instrucción guardada.\n\nSeleccioná modo de escaneo:",
+                "Instrucción guardada.\n\nSelecciona modo de escaneo:",
                 reply_markup=depth_selector(),
             )
         elif awaiting_input:
@@ -204,7 +204,7 @@ class StrixBot:
         else:
             send_message(
                 self, chat_id,
-                "No hay un trabajo activo. Usá /start para comenzar.",
+                "No hay un trabajo activo. Usa /start para comenzar.",
                 reply_markup=main_menu(),
             )
 
@@ -213,7 +213,7 @@ class StrixBot:
         targets = [t.strip() for t in text.replace("\n", ",").split(",") if t.strip()]
 
         if not targets:
-            send_message(self, chat_id, "Enviá un objetivo válido.")
+            send_message(self, chat_id, "Envía un objetivo válido.")
             return
 
         from .safety.attachment_policy import sanitize_target
@@ -229,7 +229,7 @@ class StrixBot:
 
         send_message(
             self, chat_id,
-            f"Objetivo: {', '.join(targets)}\nSeleccioná perfil:",
+            f"Objetivo: {', '.join(targets)}\nSelecciona perfil:",
             reply_markup=profile_selector(),
         )
 
@@ -276,11 +276,11 @@ class StrixBot:
             return
 
         prompt = {
-            "url": "Enviá la URL o dominio:",
-            "github": "Enviá la URL del repo GitHub:",
-            "local": "Enviá la ruta local:",
-            "multi": "Enviá los objetivos (separados por coma o línea):",
-        }.get(target_type, "Enviá el objetivo:")
+            "url": "Envía la URL o dominio:",
+            "github": "Envía la URL del repo GitHub:",
+            "local": "Envía la ruta local:",
+            "multi": "Envía los objetivos (separados por coma o línea):",
+        }.get(target_type, "Envía el objetivo:")
 
         edit_message(bot, chat_id, msg_id, prompt, reply_markup=back_to_menu())
 
@@ -312,7 +312,7 @@ class StrixBot:
             else:
                 edit_message(
                     bot, chat_id, msg_id,
-                    "Seleccioná un objetivo primero.",
+                    "Selecciona un objetivo primero.",
                     reply_markup=back_to_menu(),
                 )
 
@@ -362,7 +362,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             send_message(
                 self, chat_id,
-                f"Archivo listo: {abs_path.name}\nSeleccioná modo de escaneo:",
+                f"Archivo listo: {abs_path.name}\nSelecciona modo de escaneo:",
                 reply_markup=self._depth_selector(),
             )
         elif not active:
@@ -426,14 +426,14 @@ class StrixBot:
             edit_message(
                 bot, chat_id, msg_id,
                 f"Alcance: {names.get(action, action.upper())}\n"
-                "Opcional: configurá una diff base o continuá.",
+                "Opcional: configura una diff base o continúa.",
                 reply_markup=scope_mode_selector(),
             )
         elif action == "diff_base":
             pm.push(MenuState.NEW_PENTEST_DIFF_BASE)
             edit_message(
                 bot, chat_id, msg_id,
-                "Enviá una diff base (ej: 'origin/main' o un commit hash):",
+                "Envía una diff base (ej: 'origin/main' o un commit hash):",
                 reply_markup=back_to_menu(),
             )
         elif action == "done":
@@ -463,7 +463,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             edit_message(
                 bot, chat_id, msg_id,
-                f"Objetivo: {', '.join(pm._selected_targets)}\nSeleccioná modo de escaneo:",
+                f"Objetivo: {', '.join(pm._selected_targets)}\nSelecciona modo de escaneo:",
                 reply_markup=depth_selector(),
             )
             return
@@ -488,7 +488,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_INSTRUCTION)
             edit_message(
                 bot, chat_id, msg_id,
-                "Enviá tu instrucción personalizada:",
+                "Envía tu instrucción personalizada:",
                 reply_markup=back_to_menu(),
             )
         else:
@@ -496,7 +496,7 @@ class StrixBot:
             pm.push(MenuState.NEW_PENTEST_DEPTH)
             edit_message(
                 bot, chat_id, msg_id,
-                f"Enfoque: {preset.value}\nInstrucción lista.\n\nSeleccioná modo de escaneo:",
+                f"Enfoque: {preset.value}\nInstrucción lista.\n\nSelecciona modo de escaneo:",
                 reply_markup=depth_selector(),
             )
 
@@ -682,7 +682,7 @@ class StrixBot:
             text = (
                 "Caido es un proxy web para inspección manual de tráfico.\n\n"
                 "STRIX expone Caido al ejecutar escaneos.\n"
-                "Usá la URL de arriba para:\n"
+                "Usa la URL de arriba para:\n"
                 "  - Inspeccionar requests/responses HTTP\n"
                 "  - Replay y modificar requests\n"
                 "  - Explorar el sitemap\n"
