@@ -30,7 +30,6 @@ def job_panel(running: bool = False, agent_count: int = 0) -> dict:
     buttons = []
     if running:
         buttons.append(_btn("Detener", _cb("job", "stop")))
-    buttons.append(_btn("Estado", _cb("job", "status")))
     rows = [buttons]
     if agent_count > 1:
         rows.append([_btn("Agentes", _cb("job", "agents"))])

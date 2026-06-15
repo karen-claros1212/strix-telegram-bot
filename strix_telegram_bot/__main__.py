@@ -6,6 +6,36 @@ import logging
 import os
 import sys
 
+_VALID_REASONING_EFFORTS = {
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+}
+
+
+def _normalize_strix_environment() -> None:
+    raw = os.getenv("STRIX_REASONING_EFFORT")
+
+    if raw is None or not raw.strip():
+        os.environ.pop("STRIX_REASONING_EFFORT", None)
+        return
+
+    value = raw.strip().lower()
+
+    if value not in _VALID_REASONING_EFFORTS:
+        raise RuntimeError(
+            "STRIX_REASONING_EFFORT inválido. "
+            "Valores permitidos: none, minimal, low, medium, high, xhigh."
+        )
+
+    os.environ["STRIX_REASONING_EFFORT"] = value
+
+
+_normalize_strix_environment()
+
 from .config import settings
 from .bot import StrixBot
 

@@ -3,6 +3,9 @@ name = "strix-telegram-bot"
 version = "2.0.0"
 description = "Remote Control Center UI for STRIX v1 via Telegram"
 requires-python = ">=3.12"
+dependencies = [
+    "strix-agent==1.0.4",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

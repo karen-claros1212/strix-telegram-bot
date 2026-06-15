@@ -32,13 +32,13 @@ class TestKeyboards:
         kb = job_panel(running=True)
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
         assert "Detener" in texts
-        assert "Estado" in texts
+        assert "Estado" not in texts
 
     def test_job_panel_no_stop(self):
         kb = job_panel(running=False)
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
         assert "Detener" not in texts
-        assert "Estado" in texts
+        assert "Estado" not in texts
 
     def test_parse_callback(self):
         parts = parse_callback("menu:scan")

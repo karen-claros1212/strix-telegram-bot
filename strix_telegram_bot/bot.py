@@ -123,37 +123,69 @@ class StrixBot:
         send_chat_action(self, chat_id)
 
         if self._bridge.is_running:
-            agent_id = getattr(self._bridge, "_preferred_agent_id", None) or self._bridge.root_agent_id
+            agent_id = (
+                getattr(self._bridge, "_preferred_agent_id", None)
+                or self._bridge.root_agent_id
+            )
             ok = self._bridge.send_message_to_agent(text, agent_id=agent_id)
-            if ok:
-                send_message(self, chat_id, "Mensaje enviado a STRIX.")
-            else:
-                send_message(self, chat_id, "Error al enviar el mensaje.")
+            if not ok:
+                send_message(self, chat_id, "STRIX no pudo recibir el mensaje.")
             return
 
         pm = get_panel_manager(chat_id)
+
         if pm.current == MenuState.WAITING_FOR_TARGETS:
             self._parse_and_launch(chat_id, text)
+            return
+
+        targets, instruction = self._extract_targets(text)
+
+        if targets:
+            self._launch_scan(chat_id, targets, instruction)
         else:
             send_message(
-                self, chat_id,
-                "No hay un escaneo activo.",
+                self,
+                chat_id,
+                "Envía una URL, dominio, IP, repositorio o carpeta para iniciar.",
                 reply_markup=main_menu(),
             )
 
+    @staticmethod
+    def _clean_url(url: str) -> str:
+        return url.rstrip(".,;:!?)]}")
+
     def _extract_targets(self, text: str) -> tuple[list[str], str]:
-        urls = _URL_RE.findall(text)
+        raw_urls = _URL_RE.findall(text)
+        urls = [self._clean_url(u) for u in raw_urls]
         remaining = _URL_RE.sub("", text).strip()
-        repos = _GITHUB_RE.findall(remaining)
+        raw_repos = _GITHUB_RE.findall(remaining)
+        repos = [self._clean_url(r) for r in raw_repos]
         remaining = _GITHUB_RE.sub("", remaining).strip()
-        lines = [t.strip() for t in remaining.replace("\n", ",").split(",") if t.strip()]
-        targets = list(dict.fromkeys(urls + repos + lines))
-        instruction = _URL_RE.sub("", remaining)
-        instruction = _GITHUB_RE.sub("", instruction)
-        pieces = [p.strip() for p in instruction.replace("\n", ",").split(",") if p.strip()]
-        pieces = [p for p in pieces if p not in targets]
-        instruction = ", ".join(pieces)
-        return targets, instruction
+
+        candidates = [
+            t.strip().rstrip(".,;:!?)]}")
+            for t in remaining.replace("\n", ",").split(",")
+            if t.strip()
+        ]
+
+        _DOMAIN_RE = re.compile(
+            r'^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?'
+            r'(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$'
+        )
+        _IP_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(/\d{1,2})?$')
+
+        extra_targets: list[str] = []
+        instruction_parts: list[str] = []
+
+        for c in candidates:
+            p = Path(c)
+            if _DOMAIN_RE.match(c) or _IP_RE.match(c) or p.exists():
+                extra_targets.append(c)
+            else:
+                instruction_parts.append(c)
+
+        targets = list(dict.fromkeys(urls + repos + extra_targets))
+        return targets, ", ".join(instruction_parts)
 
     def _parse_and_launch(self, chat_id: int, text: str) -> None:
         targets, instruction = self._extract_targets(text)

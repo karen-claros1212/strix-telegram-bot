@@ -10,7 +10,7 @@ Send a URL, domain, or file to the bot, and Strix runs a full penetration test. 
 - Real-time scan progress updates
 - STOP button always visible on status message throughout the scan
 - Auto-generated Markdown report + CSV on completion
-- Interactive mode — Strix asks questions, you answer in the chat
+- Interactive mode — Strix agent asks questions, you answer in the chat
 - User/chat whitelist for access control
 - Rate limiting (max concurrent jobs configurable)
 - Auto-cleanup of Docker containers, orphaned runs, and old data
@@ -21,8 +21,8 @@ Send a URL, domain, or file to the bot, and Strix runs a full penetration test. 
 
 ### Prerequisites
 
-- Python 3.11+
-- Strix CLI installed
+- Python 3.12+
+- Strix CLI installed (strix-agent >= 1.0.4)
 - Docker (via Colima or Docker Desktop)
 - Telegram Bot Token (from @BotFather)
 
@@ -63,7 +63,7 @@ If using Colima, ensure `~/.colima/default/docker.sock` exists, or set `DOCKER_H
 | `STRIX_TG_TOKEN` | Yes | — | Bot token from @BotFather |
 | `STRIX_TG_ALLOWED_USERS` | Yes | — | Comma-separated Telegram user IDs |
 | `STRIX_TG_ALLOWED_CHATS` | No | — | Comma-separated chat IDs |
-| `STRIX_LLM` | Yes | — | LLM model (e.g. `deepseek/deepseek-v4-pro`) |
+| `STRIX_LLM` | Yes | — | LLM model (e.g. `openai/gpt-5`, `anthropic/claude-sonnet-4-6`, `strix/gpt-5`) |
 | `LLM_API_KEY` | Yes | — | API key for LLM provider |
 | `STRIX_JOB_TIMEOUT_SECONDS` | No | 7200 | Max job duration in seconds |
 | `STRIX_MAX_CONCURRENT_JOBS` | No | 3 | Max simultaneous scans |
@@ -73,7 +73,7 @@ If using Colima, ensure `~/.colima/default/docker.sock` exists, or set `DOCKER_H
 ## Architecture
 
 ```
-Telegram ──→ python-telegram-bot ──→ JobRunner ──→ StrixAgent ──→ Docker Sandbox
+Telegram ──→ HTTP Polling ──→ StrixRuntimeBridge ──→ AgentCoordinator ──→ Docker Sandbox
 ```
 
 See [docs/architecture.md](docs/architecture.md) for details.
