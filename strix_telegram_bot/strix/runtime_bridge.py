@@ -4,29 +4,44 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from strix_telegram_bot.config import settings
+
+logger = logging.getLogger(__name__)
 
 _STRIX_AVAILABLE = False
 AgentCoordinator: Any = None
 run_strix_scan: Any = None
 ReportState: Any = None
 set_global_report_state: Any = None
+infer_target_type: Any = None
+assign_workspace_subdirs: Any = None
+_load_settings: Any = None
 
 try:
+    from strix.config import load_settings as _ls
     from strix.core.agents import AgentCoordinator as _AC
     from strix.core.runner import run_strix_scan as _rss
+    from strix.interface.utils import (
+        assign_workspace_subdirs as _aws,
+        infer_target_type as _itt,
+    )
     from strix.report.state import ReportState as _RS, set_global_report_state as _sgrs
 
     AgentCoordinator = _AC
     run_strix_scan = _rss
     ReportState = _RS
     set_global_report_state = _sgrs
+    infer_target_type = _itt
+    assign_workspace_subdirs = _aws
+    _load_settings = _ls
     _STRIX_AVAILABLE = True
 except ImportError:
     pass
@@ -83,6 +98,7 @@ class StrixRuntimeBridge:
         self._stop_event = threading.Event()
         self._root_agent_id: Optional[str] = None
         self._run_name: Optional[str] = None
+        self._scan_image: str = ""
         self._start_time: float = 0.0
 
     @property
@@ -115,30 +131,36 @@ class StrixRuntimeBridge:
         scope_mode: str = "auto",
         diff_base: Optional[str] = None,
         non_interactive: bool = False,
-        agent_name: str = "strix",
+        image: Optional[str] = None,
     ) -> tuple[bool, str]:
         if not _STRIX_AVAILABLE:
             return False, "STRIX 1.0.4 no está instalado (strix package not found)"
         if self.is_running:
             return False, "Ya hay un escaneo en ejecución"
 
+        run_name = f"scan-{uuid.uuid4().hex[:8]}"
         targets_info = self._build_targets_info(targets)
+        diff_scope = {"active": bool(diff_base), "diff_base": diff_base} if diff_base else {"active": False}
+
         scan_config: dict[str, Any] = {
-            "targets_info": targets_info,
-            "instruction": instruction if instruction else None,
+            "scan_id": run_name,
+            "targets": targets_info,
+            "user_instructions": instruction,
+            "run_name": run_name,
             "scan_mode": scan_mode,
+            "diff_scope": diff_scope,
             "scope_mode": scope_mode,
-            "agent_name": agent_name,
+            "diff_base": diff_base,
+            "non_interactive": non_interactive,
+            "local_sources": [],
+            "resume_instruction": "",
         }
-        if diff_base:
-            scan_config["diff_base"] = diff_base
-        if non_interactive:
-            scan_config["non_interactive"] = True
 
         self._stop_event.clear()
         self._coordinator = AgentCoordinator()
         self._root_agent_id = None
-        self._run_name = None
+        self._run_name = run_name
+        self._scan_image = image or self._resolve_image()
         self._start_time = time.time()
 
         self._thread = threading.Thread(
@@ -148,14 +170,23 @@ class StrixRuntimeBridge:
         )
         self._thread.start()
 
-        for _ in range(100):
-            if self._run_name:
+        for _ in range(200):
+            if self._root_agent_id:
                 break
             time.sleep(0.1)
 
-        if self._run_name:
-            return True, f"Escaneo iniciado: {self._run_name}"
-        return True, "Escaneo iniciado..."
+        if self._root_agent_id:
+            return True, f"Escaneo iniciado: {run_name}"
+        return True, f"Escaneo iniciado: {run_name}"
+
+    @staticmethod
+    def _resolve_image() -> str:
+        if _load_settings:
+            try:
+                return _load_settings().runtime.image
+            except Exception:
+                pass
+        return "strix-sandbox:latest"
 
     @staticmethod
     def _build_targets_info(targets: list[str]) -> list[dict]:
@@ -164,32 +195,60 @@ class StrixRuntimeBridge:
             t = t.strip()
             if not t:
                 continue
-            if t.startswith(("http://", "https://")):
-                info.append({"type": "url", "value": t})
-            elif t.startswith("git@") or t.endswith(".git"):
-                info.append({"type": "git", "value": t})
-            elif t.startswith(("/", "~", ".")):
-                info.append({"type": "local", "value": t})
-            else:
-                info.append({"type": "url", "value": f"https://{t}"})
+            try:
+                target_type, target_dict = infer_target_type(t)
+                info.append(
+                    {"type": target_type, "details": target_dict, "original": t}
+                )
+            except ValueError:
+                info.append(
+                    {
+                        "type": "web_application",
+                        "details": {"target_url": f"https://{t}"},
+                        "original": t,
+                    }
+                )
+        assign_workspace_subdirs(info)
         return info
 
     def _scan_thread(self, scan_config: dict) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
-        try:
-            rs = ReportState()
+        async def _scan_with_discovery() -> Any:
+            rs = ReportState(run_name=self._run_name)
             set_global_report_state(rs)
+            rs.set_scan_config(scan_config)
 
-            result = self._loop.run_until_complete(
+            async def _poll_root() -> None:
+                for _ in range(200):
+                    parent_of = getattr(self._coordinator, "parent_of", None)
+                    if parent_of:
+                        for aid, p in parent_of.items():
+                            if p is None:
+                                self._root_agent_id = aid
+                                return
+                    await asyncio.sleep(0.1)
+
+            discovery = asyncio.create_task(_poll_root())
+            scan = asyncio.create_task(
                 run_strix_scan(
                     scan_config=scan_config,
+                    scan_id=self._run_name,
+                    image=self._scan_image,
                     coordinator=self._coordinator,
                     interactive=True,
                     event_sink=self._capture_event,
                 )
             )
+            await asyncio.wait(
+                [discovery, scan],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return await scan
+
+        try:
+            result = self._loop.run_until_complete(_scan_with_discovery())
             self._emit_event("scan_complete", "", "Escaneo finalizado")
         except asyncio.CancelledError:
             self._emit_event("scan_cancelled", "", "Escaneo cancelado")
@@ -199,36 +258,121 @@ class StrixRuntimeBridge:
             self._loop.close()
             self._loop = None
 
-    def _capture_event(self, agent_id: str, event: dict) -> None:
-        ev_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
-        content = ""
-        prompt = ""
-        awaiting = False
+    def _capture_event(self, agent_id: str, event: Any) -> None:
+        event_type = getattr(event, "type", "")
+        now = time.time()
 
-        if isinstance(event, dict):
-            content = event.get("content", event.get("message", ""))
-            prompt = event.get("prompt", "")
-            awaiting = event.get("type") == "input_request"
+        if event_type == "raw_response_event":
+            self._ingest_raw_response(agent_id, event)
+            return
+        if event_type != "run_item_stream_event":
+            return
 
-            if ev_type == "agent.created" and not self._root_agent_id:
-                self._root_agent_id = agent_id if agent_id else event.get("agent_id", "")
+        item = getattr(event, "item", None)
+        item_type = getattr(item, "type", "")
+        if item_type == "message_output_item":
+            text = self._sdk_message_text(item)
+            if text:
+                se = ScanEvent(
+                    type="agent_message",
+                    agent_id=agent_id,
+                    content=text,
+                    timestamp=now,
+                    awaiting_input=False,
+                    prompt="",
+                )
+                self._queue_event(se)
+        elif item_type == "tool_call_item":
+            tool_data = self._sdk_tool_call_data(item)
+            content = json.dumps({
+                "tool_name": tool_data["tool_name"],
+                "args": tool_data["args"],
+            }, ensure_ascii=False)
+            se = ScanEvent(
+                type="tool_call",
+                agent_id=agent_id,
+                content=content,
+                timestamp=now,
+            )
+            self._queue_event(se)
+        elif item_type == "tool_call_output_item":
+            pass
 
-            run_n = event.get("run_name") or event.get("scan_id", "")
-            if run_n and not self._run_name:
-                self._run_name = run_n
-        else:
-            content = str(event)
+    def _ingest_raw_response(self, agent_id: str, event: Any) -> None:
+        data = getattr(event, "data", None)
+        if data is None:
+            return
+        data_type = getattr(data, "type", "")
+        if data_type == "response.output_text.delta":
+            delta = getattr(data, "delta", "")
+            if delta:
+                se = ScanEvent(
+                    type="stream_delta",
+                    agent_id=agent_id,
+                    content=delta,
+                    timestamp=time.time(),
+                )
+                self._queue_event(se)
+        elif data_type == "tool_call_cancelled":
+            tool_name = getattr(data, "name", "unknown")
+            se = ScanEvent(
+                type="tool_cancelled",
+                agent_id=agent_id,
+                content=tool_name,
+                timestamp=time.time(),
+            )
+            self._queue_event(se)
 
-        timestamp = event.get("timestamp", time.time()) if isinstance(event, dict) else time.time()
+    @staticmethod
+    def _raw_field(raw: Any, key: str, default: Any = None) -> Any:
+        if isinstance(raw, dict):
+            return raw.get(key, default)
+        return getattr(raw, key, default)
 
-        se = ScanEvent(
-            type=ev_type,
-            agent_id=agent_id,
-            content=str(content),
-            timestamp=timestamp,
-            awaiting_input=awaiting,
-            prompt=str(prompt),
+    def _sdk_message_text(self, item: Any) -> str:
+        raw = self._raw_field(item, "raw_item", None)
+        content = self._raw_field(raw, "content", [])
+        return self._message_content_text(content)
+
+    @staticmethod
+    def _message_content_text(content: Any) -> str:
+        parts: list[str] = []
+        items = content if isinstance(content, list) else [content]
+        for part in items:
+            if isinstance(part, str):
+                parts.append(part)
+                continue
+            text = StrixRuntimeBridge._raw_field(part, "text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+
+    @staticmethod
+    def _parse_json_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return value if isinstance(value, dict) else {}
+
+    def _sdk_tool_call_data(self, item: Any) -> dict[str, Any]:
+        raw = self._raw_field(item, "raw_item", None)
+        call_id = str(self._raw_field(raw, "call_id") or self._raw_field(raw, "id") or id(item))
+        tool_name = str(
+            self._raw_field(raw, "name")
+            or self._raw_field(raw, "type")
+            or getattr(item, "title", None)
+            or "tool"
         )
+        return {
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "args": self._parse_json_object(self._raw_field(raw, "arguments")),
+        }
+
+    def _queue_event(self, se: ScanEvent) -> None:
         try:
             self._event_queue.put_nowait(se)
         except queue.Full:
@@ -251,25 +395,30 @@ class StrixRuntimeBridge:
 
         message = {"from": "user", "content": text, "type": "instruction"}
         try:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self._coordinator.send(agent_id, message),
                 self._loop,
             )
-            return True
-        except Exception:
+            result = future.result(timeout=30)
+            logger.debug("send_message(%s): result=%s", agent_id, result)
+            return bool(result)
+        except Exception as exc:
+            logger.warning("send_message(%s) failed: %s", agent_id, exc)
             return False
 
     def send_message_to_agent(self, text: str, agent_id: Optional[str] = None) -> bool:
-        aid = agent_id or self._root_agent_id or "strix"
+        aid = agent_id or self._root_agent_id or ""
+        if not aid:
+            return False
         return self.send_message(aid, text)
 
     def stop_scan(self) -> bool:
         self._stop_event.set()
-        if self._coordinator and self._loop and not self._loop.is_closed():
+        aid = self._root_agent_id or ""
+        if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
-                root = self._root_agent_id or "strix"
                 asyncio.run_coroutine_threadsafe(
-                    self._coordinator.stop_agent(root),
+                    self._coordinator.request_stop(aid),
                     self._loop,
                 )
                 return True
@@ -287,36 +436,49 @@ class StrixRuntimeBridge:
         return events
 
     def get_agent_tree(self) -> Optional[dict]:
-        if not self._coordinator:
+        if not self._coordinator or not self._loop or self._loop.is_closed():
             return None
         try:
-            return self._coordinator.graph_snapshot()
-        except Exception:
+            future = asyncio.run_coroutine_threadsafe(
+                self._coordinator.graph_snapshot(),
+                self._loop,
+            )
+            parent_of, statuses, names = future.result(timeout=10)
+            tree: dict[str, Any] = {"agents": {}}
+            for aid, parent in parent_of.items():
+                tree["agents"][aid] = {
+                    "id": aid,
+                    "name": names.get(aid, aid),
+                    "status": str(statuses.get(aid, "unknown")),
+                    "parent_id": parent,
+                }
+            return tree
+        except Exception as exc:
+            logger.warning("get_agent_tree failed: %s", exc)
             return None
 
     def list_agents(self) -> list[dict]:
-        """Return flat list of agents from coordinator tree."""
+        """Return flat list of agents from coordinator."""
         tree = self.get_agent_tree()
         if not tree:
             return []
-        agents: list[dict] = []
-        self._flatten_tree(tree, agents)
-        return agents
+        return list(tree["agents"].values())
 
-    @staticmethod
-    def _flatten_tree(node: Any, agents: list[dict], parent_id: Optional[str] = None) -> None:
-        if isinstance(node, dict):
-            for agent_id, data in node.items():
-                entry = {
-                    "id": agent_id,
-                    "name": data.get("name", agent_id),
-                    "status": data.get("status", "unknown"),
-                    "parent_id": parent_id,
-                }
-                agents.append(entry)
-                children = data.get("children", {})
-                if children:
-                    StrixRuntimeBridge._flatten_tree(children, agents, agent_id)
+    def _discover_root_agent(self) -> None:
+        """Discover root agent from coordinator (parent=None) and set _root_agent_id."""
+        if not self._coordinator:
+            return
+        try:
+            parent_of = getattr(self._coordinator, "parent_of", None)
+            if parent_of is None:
+                return
+            for aid, parent in parent_of.items():
+                if parent is None:
+                    self._root_agent_id = aid
+                    logger.debug("Root agent discovered: %s", aid)
+                    return
+        except Exception as exc:
+            logger.debug("Root agent discovery failed: %s", exc)
 
     def get_run_status(self) -> dict:
         status: dict[str, Any] = {
@@ -341,11 +503,12 @@ class StrixRuntimeBridge:
         return status
 
     def cleanup(self) -> None:
+        aid = self._root_agent_id or ""
         self._stop_event.set()
-        if self._coordinator and self._loop and not self._loop.is_closed():
+        if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
                 asyncio.run_coroutine_threadsafe(
-                    self._coordinator.stop_agent(self._root_agent_id or "strix"),
+                    self._coordinator.request_stop(aid),
                     self._loop,
                 )
             except Exception:
