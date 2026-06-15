@@ -127,7 +127,6 @@ def help_text() -> str:
     return (
         "Centro de Control STRIX — Ayuda\n"
         "\n"
-        "/start — Menú principal\n"
         "/status — Estado actual\n"
         "/stop — Detener escaneo\n"
         "/jobs — Historial de trabajos\n"
@@ -135,7 +134,8 @@ def help_text() -> str:
         "/health — Estado del sistema\n"
         "\n"
         "Durante un escaneo, cualquier mensaje de texto\n"
-        "se envía automáticamente al agente STRIX."
+        "se envía automáticamente al agente STRIX.\n"
+        "Usá el botón Escanear para iniciar un escaneo."
     )
 
 

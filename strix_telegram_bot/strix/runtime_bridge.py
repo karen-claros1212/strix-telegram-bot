@@ -246,14 +246,10 @@ class StrixRuntimeBridge:
         )
         self._thread.start()
 
-        self._thread.join(timeout=5)
-        if self._thread.is_alive():
-            return True, f"Escaneo iniciado: {run_name}"
-
         if self._last_error:
             return False, self._last_error
 
-        return False, "El runtime de STRIX no pudo iniciar."
+        return True, f"Escaneo iniciado: {run_name}"
 
     @staticmethod
     def _resolve_image() -> str:

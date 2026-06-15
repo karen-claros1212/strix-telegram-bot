@@ -95,8 +95,8 @@ class TestMessages:
 
     def test_help_text(self):
         text = help_text()
-        assert "/start" in text
         assert "/status" in text
+        assert "Escanear" in text
 
     def test_escape_md(self):
         result = escape_md("hello_world")

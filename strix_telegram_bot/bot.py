@@ -137,7 +137,7 @@ class StrixBot:
         else:
             send_message(
                 self, chat_id,
-                "Usá /start o el botón Escanear para iniciar.",
+                "No hay un escaneo activo.",
                 reply_markup=main_menu(),
             )
 
