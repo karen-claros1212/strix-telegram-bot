@@ -698,9 +698,7 @@ class StrixBot:
 
         self._process_chat_events(events)
 
-        if self._active_job_chat_id is None or self._active_job_message_id is None:
-            return
-
+        # Always update JobStore first (independent of active job chat/message)
         status = self._bridge.to_status_dict()
 
         if not status.get("run_name") and not self._bridge.is_running:
@@ -724,6 +722,10 @@ class StrixBot:
                 job.input_prompt = status.get("input_prompt")
                 job.error = status.get("error")
                 self._job_store.save(job)
+
+        # Then update Telegram UI only if we have an active job message
+        if self._active_job_chat_id is None or self._active_job_message_id is None:
+            return
 
         text = job_status_text(status)
         edit_message(
@@ -834,11 +836,12 @@ class StrixBot:
                     s.exit_chat()
 
     @staticmethod
-    def _prepare_scan_targets(targets: list[str]) -> tuple[list[str], list[str]]:
+    def _prepare_scan_targets(targets: list[str]) -> tuple[list[str], list[dict[str, str]]]:
         from strix_telegram_bot.config import settings
+        from strix_telegram_bot.strix.runtime_bridge import clone_repository
 
         final_targets: list[str] = []
-        local_sources: list[str] = []
+        local_sources: list[dict[str, str]] = []
         repos_dir = settings.strix_runs_dir / "repos"
 
         for t in targets:
@@ -848,26 +851,42 @@ class StrixBot:
             if p.exists():
                 resolved = str(p.resolve())
                 final_targets.append(resolved)
-                local_sources.append(resolved)
+                local_sources.append({"source_path": resolved, "workspace_subdir": None})
                 continue
 
             m = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$', t)
             if m:
                 repo_full = m.group(1).rstrip("/")
                 clone_dir = repos_dir / repo_full
-                if not clone_dir.exists():
-                    try:
+                should_clone = not clone_dir.exists()
+
+                try:
+                    if should_clone and clone_repository:
                         clone_dir.parent.mkdir(parents=True, exist_ok=True)
+                        clone_repository(
+                            repo_url=f"https://github.com/{repo_full}.git",
+                            clone_dir=str(clone_dir),
+                        )
+                    elif should_clone:
                         subprocess.run(
-                            ["git", "clone", "--depth=1", f"https://github.com/{repo_full}.git", str(clone_dir)],
+                            ["git", "clone", f"https://github.com/{repo_full}.git", str(clone_dir)],
                             capture_output=True, text=True, timeout=120, check=True,
                         )
-                    except Exception as e:
-                        logger.warning("Failed to clone %s: %s", t, e)
-                        final_targets.append(t)
-                        continue
+                    # Validate clone has full history (no shallow)
+                    if clone_dir.exists():
+                        git_dir = clone_dir / ".git"
+                        if (git_dir / "shallow").exists():
+                            (git_dir / "shallow").unlink()
+                            fetch_dir = git_dir / "fetch"
+                            if fetch_dir.exists():
+                                fetch_dir.rmdir()
+                except Exception as e:
+                    logger.warning("Failed to clone %s: %s", t, e)
+                    final_targets.append(t)
+                    continue
+
                 final_targets.append(str(clone_dir))
-                local_sources.append(str(clone_dir))
+                local_sources.append({"source_path": str(clone_dir), "workspace_subdir": repo_full})
                 continue
 
             final_targets.append(t)

@@ -33,6 +33,12 @@ try:
         assign_workspace_subdirs as _aws,
         infer_target_type as _itt,
         collect_local_sources as _cls,
+        clone_repository as _clone,
+        resolve_diff_scope_context as _resolve_diff,
+        rewrite_localhost_targets as _rewrite,
+        build_diff_scope_instruction as _build_diff_instr,
+        DiffScopeResult,
+        RepoDiffScope,
     )
     from strix.report.state import ReportState as _RS, set_global_report_state as _sgrs
 
@@ -43,6 +49,10 @@ try:
     infer_target_type = _itt
     assign_workspace_subdirs = _aws
     collect_local_sources = _cls
+    clone_repository = _clone
+    resolve_diff_scope_context = _resolve_diff
+    rewrite_localhost_targets = _rewrite
+    build_diff_scope_instruction = _build_diff_instr
     _load_settings = _ls
     _STRIX_AVAILABLE = True
 except ImportError:
@@ -145,7 +155,7 @@ class StrixRuntimeBridge:
         diff_base: Optional[str] = None,
         non_interactive: bool = False,
         image: Optional[str] = None,
-        local_sources: Optional[list[str]] = None,
+        local_sources: Optional[list[dict[str, str]]] = None,
     ) -> tuple[bool, str]:
         if not _STRIX_AVAILABLE:
             return False, "STRIX 1.0.4 no está instalado (strix package not found)"
@@ -154,8 +164,38 @@ class StrixRuntimeBridge:
 
         run_name = f"scan-{uuid.uuid4().hex[:8]}"
         targets_info = self._build_targets_info(targets)
-        diff_scope = {"active": bool(diff_base), "diff_base": diff_base} if diff_base else {"active": False}
 
+        # Resolve diff scope using STRIX official function
+        diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
+        if scope_mode == "diff" and diff_base:
+            try:
+                diff_result = resolve_diff_scope_context(targets_info, diff_base)
+                if isinstance(diff_result, DiffScopeResult):
+                    diff_scope = {
+                        "active": True,
+                        "diff_base": diff_base,
+                        "changed_files": diff_result.changed_files,
+                        "instruction": diff_result.instruction,
+                    }
+                    # Append diff instruction to user instruction
+                    if diff_result.instruction:
+                        instruction = f"{instruction}\n\n{diff_result.instruction}" if instruction else diff_result.instruction
+                elif isinstance(diff_result, RepoDiffScope):
+                    diff_scope = {
+                        "active": True,
+                        "diff_base": diff_base,
+                        "changed_files": diff_result.changed_files,
+                        "instruction": diff_result.instruction,
+                    }
+                    if diff_result.instruction:
+                        instruction = f"{instruction}\n\n{diff_result.instruction}" if instruction else diff_result.instruction
+            except Exception as exc:
+                logger.warning("resolve_diff_scope_context failed: %s", exc)
+                diff_scope = {"active": True, "diff_base": diff_base}
+        elif scope_mode == "auto":
+            diff_scope = {"active": True, "diff_base": diff_base or "auto"}
+
+        # Collect local sources using STRIX official function (expects targets_info format)
         strix_sources: list[dict] = []
         if collect_local_sources:
             try:
@@ -163,7 +203,13 @@ class StrixRuntimeBridge:
             except Exception as exc:
                 logger.warning("collect_local_sources failed: %s", exc)
 
-        extra_sources = [{"source_path": p, "workspace_subdir": None} for p in (local_sources or [])]
+        # Merge caller-provided local_sources with STRIX-collected ones
+        extra_sources: list[dict] = []
+        for src in (local_sources or []):
+            if isinstance(src, dict):
+                extra_sources.append(src)
+            else:
+                extra_sources.append({"source_path": str(src), "workspace_subdir": None})
         merged_sources = strix_sources + extra_sources
 
         scan_config: dict[str, Any] = {
@@ -196,7 +242,7 @@ class StrixRuntimeBridge:
 
         self._thread = threading.Thread(
             target=self._scan_thread,
-            args=(scan_config,),
+            args=(scan_config, merged_sources),
             daemon=True,
         )
         self._thread.start()
@@ -206,12 +252,17 @@ class StrixRuntimeBridge:
                 break
             time.sleep(0.1)
 
-        if self._root_agent_id:
-            return True, f"Escaneo iniciado: {run_name}"
-        # If root agent wasn't discovered, check if the thread is still alive
-        if self._thread and self._thread.is_alive():
-            return True, f"Escaneo iniciado: {run_name} (agente en proceso)"
-        return False, f"Error al iniciar escaneo: {run_name}"
+        # Fail-loud checks
+        if self._last_error:
+            return False, self._last_error
+
+        if not self._thread or not self._thread.is_alive():
+            return False, "El runtime de STRIX no pudo iniciar."
+
+        if not non_interactive and not self._root_agent_id:
+            return False, "STRIX no registró el agente raíz."
+
+        return True, f"Escaneo iniciado: {run_name}"
 
     @staticmethod
     def _resolve_image() -> str:
@@ -247,7 +298,7 @@ class StrixRuntimeBridge:
         assign_workspace_subdirs(info)
         return info
 
-    def _scan_thread(self, scan_config: dict) -> None:
+    def _scan_thread(self, scan_config: dict, local_sources: list[dict]) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
@@ -296,6 +347,7 @@ class StrixRuntimeBridge:
                 coordinator=self._coordinator,
                 interactive=not non_interactive,
                 event_sink=self._capture_event,
+                local_sources=local_sources or [],
             )
 
         async def _main() -> None:
@@ -525,6 +577,7 @@ class StrixRuntimeBridge:
 
     def stop_scan(self) -> bool:
         self._stop_event.set()
+        cancel_failed = False
         aid = self._root_agent_id or ""
         if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
@@ -536,6 +589,7 @@ class StrixRuntimeBridge:
                 logger.info("stop_scan: agents cancelled gracefully")
             except Exception as exc:
                 logger.warning("stop_scan: graceful cancel failed: %s", exc)
+                cancel_failed = True
         if self._loop and not self._loop.is_closed() and self._scan_task is not None:
             try:
                 async def _cancel_task() -> None:
@@ -549,10 +603,11 @@ class StrixRuntimeBridge:
                 logger.info("stop_scan: scan task cancelled")
             except Exception as exc:
                 logger.warning("stop_scan: task cancel failed: %s", exc)
+                cancel_failed = True
         self._scan_completed = True
         self._phase = "stopped"
         self._scan_status = "stopped"
-        return True
+        return not cancel_failed
 
     def poll_events(self) -> list[ScanEvent]:
         events: list[ScanEvent] = []
