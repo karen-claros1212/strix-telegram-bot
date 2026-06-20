@@ -391,10 +391,15 @@ class StrixBot:
 
         prepared_targets, local_sources = self._prepare_scan_targets(targets)
 
+        # Always append Spanish instruction
+        full_instruction = instruction
+        if "responde siempre en español" not in instruction.lower():
+            full_instruction = f"{instruction}\n\nResponde siempre en español." if instruction else "Responde siempre en español."
+
         ok, start_msg = self._bridge.start_scan(
             targets=prepared_targets,
             scan_mode="deep",
-            instruction=instruction,
+            instruction=full_instruction,
             scope_mode="auto",
             non_interactive=False,
             local_sources=local_sources,
@@ -499,10 +504,15 @@ class StrixBot:
         from .telegram import send_chat_action, send_message
 
         chat_id = self._active_job_chat_id
+        current_run = self._active_job_run_name
         last_ts: float = self._last_broadcast.get("event", 0.0)
 
         for ev in events:
             if ev.timestamp <= last_ts:
+                continue
+
+            # Filter: only process events belonging to the active job
+            if current_run and getattr(ev, "run_name", "") and ev.run_name != current_run:
                 continue
 
             if ev.type == "agent_message":
@@ -542,17 +552,25 @@ class StrixBot:
                 send_message(self, chat_id, f"❌ Error: {escape_md(ev.content)}", reply_markup=main_menu())
 
             elif ev.type == "scan_cancelled":
-                send_message(self, chat_id, "⏹ Escaneo detenido.", reply_markup=main_menu())
+                # Close handled by cmd_stop — do NOT send duplicate message
+                pass
 
         if events:
             self._last_broadcast["event"] = events[-1].timestamp
 
     def _drain_loop(self) -> None:
+        _last_typing: float = 0.0
         while self._running:
             try:
                 self._drain_update_queue()
             except Exception as e:
                 logger.error(f"Drain error: {e}")
+            # Keepalive: send typing indicator every 4s while a scan is active
+            now = time.time()
+            if self._active_job_chat_id is not None and self._bridge.is_running and now - _last_typing > 4.0:
+                from .telegram import send_chat_action
+                send_chat_action(self, self._active_job_chat_id)
+                _last_typing = now
             time.sleep(0.5)
 
     def process_update(self, update: dict) -> None:

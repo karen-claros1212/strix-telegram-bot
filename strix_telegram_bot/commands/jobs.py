@@ -41,8 +41,15 @@ def cmd_stop(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     bridge = getattr(bot, "_bridge", None)
     if bridge and bridge.is_running:
-        bridge.stop_scan()
-        send_message(bot, chat_id, "Escaneo detenido.", reply_markup=back_to_menu())
+        ok = bridge.stop_scan()
+        if ok:
+            send_message(bot, chat_id, "⏹ Deteniendo escaneo…", reply_markup=back_to_menu())
+        else:
+            send_message(
+                bot, chat_id,
+                "⚠ No se pudo detener limpiamente. El escaneo puede seguir activo.",
+                reply_markup=back_to_menu(),
+            )
     else:
         send_message(
             bot, chat_id,
