@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -10,7 +11,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from strix_telegram_bot.models import JobPhase, ScanMode
-from strix_telegram_bot.strix.runtime_bridge import ScanEvent, StrixRuntimeBridge, _fmt_duration
+from strix_telegram_bot.strix.runtime_bridge import ScanEvent, StrixRuntimeBridge, _fmt_duration, _MAX_EVENTS
 
 
 def _make_sdk_event(event_type: str, item_type: str = "", output: str = "",
@@ -326,6 +327,73 @@ class TestStrixRuntimeBridge:
     @patch("strix_telegram_bot.strix.runtime_bridge.set_global_report_state", MagicMock())
     def test_normalize_output_string(self, *_):
         assert StrixRuntimeBridge._normalize_output("hello") == "hello"
+
+
+class TestEventIsolation:
+    """Verify that events are tagged with run_name and stale events are filtered."""
+
+    def test_scan_event_has_run_name(self):
+        ev = ScanEvent(type="agent_message", agent_id="a1", content="hello", run_name="scan-abc123")
+        assert ev.run_name == "scan-abc123"
+        d = ev.to_dict()
+        assert "run_name" in d
+        assert d["run_name"] == "scan-abc123"
+
+    def test_scan_event_run_name_defaults_empty(self):
+        ev = ScanEvent(type="agent_message", agent_id="a1", content="hello")
+        assert ev.run_name == ""
+
+    def test_emit_event_tags_with_run_name(self):
+        bridge = StrixRuntimeBridge()
+        bridge._run_name = "test-run-999"
+        bridge._emit_event("scan_complete", "", "Done")
+        events = bridge.poll_events()
+        assert len(events) == 1
+        assert events[0].run_name == "test-run-999"
+
+    @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
+    @patch("strix_telegram_bot.strix.runtime_bridge.ReportState", MagicMock())
+    @patch("strix_telegram_bot.strix.runtime_bridge.set_global_report_state", MagicMock())
+    def test_closed_runs_block_events(self, *_):
+        bridge = StrixRuntimeBridge()
+        bridge._run_name = "scan-old"
+        bridge._closed_runs.add("scan-old")
+        ev = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output="stale message")
+        bridge._capture_event("scan-old", "a1", ev)
+        assert bridge._event_queue.qsize() == 0
+
+    @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
+    @patch("strix_telegram_bot.strix.runtime_bridge.ReportState", MagicMock())
+    @patch("strix_telegram_bot.strix.runtime_bridge.set_global_report_state", MagicMock())
+    def test_closed_runs_allow_cancelled(self, *_):
+        bridge = StrixRuntimeBridge()
+        bridge._run_name = "scan-old"
+        bridge._closed_runs.add("scan-old")
+        bridge._emit_event("scan_cancelled", "", "Cancelled")
+        events = bridge.poll_events()
+        assert len(events) == 1
+        assert events[0].type == "scan_cancelled"
+
+    @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
+    @patch("strix_telegram_bot.strix.runtime_bridge.ReportState", MagicMock())
+    @patch("strix_telegram_bot.strix.runtime_bridge.set_global_report_state", MagicMock())
+    def test_active_runs_accept_events(self, *_):
+        bridge = StrixRuntimeBridge()
+        bridge._run_name = "scan-current"
+        ev = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output="active message")
+        bridge._capture_event("scan-current", "a1", ev)
+        events = bridge.poll_events()
+        assert len(events) == 1
+        assert events[0].run_name == "scan-current"
+
+    def test_fresh_queue_on_start(self):
+        bridge = StrixRuntimeBridge()
+        # Simulate leftover events
+        bridge._event_queue.put(ScanEvent(type="agent_message", run_name="old", content="stale"))
+        assert bridge._event_queue.qsize() == 1
+        # Fresh queue replaces old one
+        bridge._event_queue = queue.Queue(maxsize=_MAX_EVENTS)
+        assert bridge._event_queue.qsize() == 0
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
     @patch("strix_telegram_bot.strix.runtime_bridge.ReportState", MagicMock())

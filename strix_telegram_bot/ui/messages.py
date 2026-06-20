@@ -70,6 +70,8 @@ def job_status_text(status: dict, last_tool: str = "", last_tool_status: str = "
     if last_tool:
         icon = {"ejecutando": "▶", "completado": "✅", "cancelada": "⏹"}.get(last_tool_status, "")
         lines.append(f"{icon} Herramienta: {escape_md(last_tool[:40])}")
+        if last_tool_status == "completado":
+            lines.append("   Última actividad: ahora")
 
     if error:
         lines.append("")

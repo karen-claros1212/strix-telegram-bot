@@ -528,7 +528,11 @@ class StrixBot:
                 send_chat_action(self, chat_id)
                 raw = ev.content or ""
                 content = self._sanitize_agent_content(raw)[:4000]
-                send_message(self, chat_id, f"*{escape_md(ev.agent_id)}*:\n{escape_md(content)}")
+                send_message(
+                    self, chat_id,
+                    f"STRIX:\n{content}",
+                    parse_mode=None,
+                )
 
             elif ev.type == "tool_call":
                 try:
