@@ -122,6 +122,7 @@ class StrixRuntimeBridge:
         self._last_error: Optional[str] = None
         self._scan_task: Optional[Any] = None
         self._scan_status: str = "unknown"
+        self._closed_runs: set[str] = set()
 
     @property
     def is_available(self) -> bool:
@@ -233,7 +234,6 @@ class StrixRuntimeBridge:
         self._coordinator = AgentCoordinator()
         self._root_agent_id = None
         self._run_name = run_name
-        self._current_run_name: str = run_name  # captured for event tagging
         self._scan_image = image or self._resolve_image()
         self._start_time = time.time()
         self._scan_completed = False
@@ -335,14 +335,19 @@ class StrixRuntimeBridge:
             set_global_report_state(rs)
             rs.set_scan_config(scan_config)
 
+            current_run = self._run_name
+
+            def bound_event_sink(agent_id: str, event: Any) -> None:
+                self._capture_event(current_run, agent_id, event)
+
             return await run_strix_scan(
                 scan_config=scan_config,
-                scan_id=self._run_name,
+                scan_id=current_run,
                 image=self._scan_image,
                 local_sources=scan_config.get("local_sources"),
                 coordinator=self._coordinator,
                 interactive=not non_interactive,
-                event_sink=self._capture_event,
+                event_sink=bound_event_sink,
             )
 
         async def _main() -> None:
@@ -384,13 +389,16 @@ class StrixRuntimeBridge:
             self._loop.close()
             self._loop = None
 
-    def _capture_event(self, agent_id: str, event: Any) -> None:
+    def _capture_event(self, run_name: str, agent_id: str, event: Any) -> None:
+        # Block events from closed runs (except terminal events from the bridge)
+        if run_name in self._closed_runs:
+            return
+
         event_type = getattr(event, "type", "")
         now = time.time()
-        rn = getattr(self, "_current_run_name", self._run_name or "")
 
         if event_type == "raw_response_event":
-            self._ingest_raw_response(agent_id, event)
+            self._ingest_raw_response(run_name, agent_id, event)
             return
         if event_type != "run_item_stream_event":
             return
@@ -405,7 +413,7 @@ class StrixRuntimeBridge:
                     agent_id=agent_id,
                     content=text,
                     timestamp=now,
-                    run_name=rn,
+                    run_name=run_name,
                 )
                 self._queue_event(se)
         elif item_type == "tool_call_item":
@@ -419,7 +427,7 @@ class StrixRuntimeBridge:
                 agent_id=agent_id,
                 content=content,
                 timestamp=now,
-                run_name=rn,
+                run_name=run_name,
             )
             self._queue_event(se)
         elif item_type == "tool_call_output_item":
@@ -434,15 +442,16 @@ class StrixRuntimeBridge:
                 agent_id=agent_id,
                 content=content,
                 timestamp=now,
-                run_name=rn,
+                run_name=run_name,
             )
             self._queue_event(se)
 
-    def _ingest_raw_response(self, agent_id: str, event: Any) -> None:
+    def _ingest_raw_response(self, run_name: str, agent_id: str, event: Any) -> None:
+        if run_name in self._closed_runs:
+            return
         data = getattr(event, "data", None)
         if data is None:
             return
-        rn = getattr(self, "_current_run_name", self._run_name or "")
         data_type = getattr(data, "type", "")
         if data_type == "response.output_text.delta":
             delta = getattr(data, "delta", "")
@@ -452,7 +461,7 @@ class StrixRuntimeBridge:
                     agent_id=agent_id,
                     content=delta,
                     timestamp=time.time(),
-                    run_name=rn,
+                    run_name=run_name,
                 )
                 self._queue_event(se)
         elif data_type == "tool_call_cancelled":
@@ -462,7 +471,7 @@ class StrixRuntimeBridge:
                 agent_id=agent_id,
                 content=tool_name,
                 timestamp=time.time(),
-                run_name=rn,
+                run_name=run_name,
             )
             self._queue_event(se)
 
@@ -544,7 +553,10 @@ class StrixRuntimeBridge:
                 pass
 
     def _emit_event(self, type: str, agent_id: str, content: str) -> None:
-        rn = getattr(self, "_current_run_name", self._run_name or "")
+        rn = self._run_name or ""
+        # Block non-terminal events for closed runs
+        if rn in self._closed_runs and type != "scan_cancelled":
+            return
         se = ScanEvent(type=type, agent_id=agent_id, content=content, timestamp=time.time(), run_name=rn)
         try:
             self._event_queue.put_nowait(se)
@@ -576,6 +588,8 @@ class StrixRuntimeBridge:
 
     def stop_scan(self) -> bool:
         self._stop_event.set()
+        current_run = self._run_name or ""
+        self._closed_runs.add(current_run)
         cancel_failed = False
         aid = self._root_agent_id or ""
         if self._coordinator and self._loop and not self._loop.is_closed() and aid:
@@ -604,15 +618,16 @@ class StrixRuntimeBridge:
                 logger.warning("stop_scan: task cancel failed: %s", exc)
                 cancel_failed = True
 
-        if self._thread:
-            self._thread.join(timeout=10)
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=20)
+        if thread and thread.is_alive():
+            logger.error("stop_scan: STRIX thread still alive after join timeout")
+            cancel_failed = True
 
         # Drain remaining events from this run so they don't leak
         self._drain_queue_for_run()
 
-        self._scan_completed = True
-        self._phase = "stopped"
-        self._scan_status = "stopped"
         return not cancel_failed
 
     def _drain_queue_for_run(self) -> None:

@@ -155,7 +155,7 @@ class TestStrixRuntimeBridge:
 
     def test_capture_event_ignores_unknown(self):
         bridge = StrixRuntimeBridge()
-        bridge._capture_event("a1", {"type": "unknown_event"})
+        bridge._capture_event("test-run", "a1", {"type": "unknown_event"})
         assert bridge._event_queue.qsize() == 0
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
@@ -164,7 +164,7 @@ class TestStrixRuntimeBridge:
     def test_capture_raw_response_stores_delta(self, *_):
         bridge = StrixRuntimeBridge()
         ev = _make_sdk_raw_response(delta="hello")
-        bridge._capture_event("a1", ev)
+        bridge._capture_event("test-run", "a1", ev)
         events = bridge.poll_events()
         assert len(events) == 1
         assert events[0].type == "stream_delta"
@@ -176,7 +176,7 @@ class TestStrixRuntimeBridge:
     def test_capture_event_queues_message_event(self, *_):
         bridge = StrixRuntimeBridge()
         ev = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output="Hello agent")
-        bridge._capture_event("a1", ev)
+        bridge._capture_event("test-run", "a1", ev)
 
         events = bridge.poll_events()
         assert len(events) == 1
@@ -189,7 +189,7 @@ class TestStrixRuntimeBridge:
     def test_capture_event_queues_tool_call(self, *_):
         bridge = StrixRuntimeBridge()
         ev = _make_sdk_event("run_item_stream_event", item_type="tool_call_item", tool_name="scan")
-        bridge._capture_event("a1", ev)
+        bridge._capture_event("test-run", "a1", ev)
 
         events = bridge.poll_events()
         assert len(events) == 1
@@ -203,7 +203,7 @@ class TestStrixRuntimeBridge:
         bridge = StrixRuntimeBridge()
         ev = _make_sdk_event("run_item_stream_event", item_type="tool_call_output_item",
                              tool_name="scan", output="results")
-        bridge._capture_event("a1", ev)
+        bridge._capture_event("test-run", "a1", ev)
 
         events = bridge.poll_events()
         assert len(events) == 1
@@ -217,7 +217,7 @@ class TestStrixRuntimeBridge:
         bridge = StrixRuntimeBridge()
         for i in range(600):
             ev = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output=str(i))
-            bridge._capture_event("a", ev)
+            bridge._capture_event("test-run", "a", ev)
         assert bridge._event_queue.qsize() <= 500
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
@@ -238,8 +238,8 @@ class TestStrixRuntimeBridge:
         bridge = StrixRuntimeBridge()
         ev1 = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output="msg1")
         ev2 = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output="msg2")
-        bridge._capture_event("a", ev1)
-        bridge._capture_event("a", ev2)
+        bridge._capture_event("test-run", "a", ev1)
+        bridge._capture_event("test-run", "a", ev2)
 
         first = bridge.poll_events()
         assert len(first) == 2
@@ -319,7 +319,6 @@ class TestStrixRuntimeBridge:
     def test_stop_scan_when_not_running(self, *_):
         bridge = StrixRuntimeBridge()
         assert bridge.stop_scan() is True
-        assert bridge.scan_status == "stopped"
         assert bridge.is_running is False
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)

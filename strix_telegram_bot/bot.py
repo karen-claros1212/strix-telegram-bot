@@ -391,10 +391,18 @@ class StrixBot:
 
         prepared_targets, local_sources = self._prepare_scan_targets(targets)
 
-        # Always append Spanish instruction
-        full_instruction = instruction
-        if "responde siempre en español" not in instruction.lower():
-            full_instruction = f"{instruction}\n\nResponde siempre en español." if instruction else "Responde siempre en español."
+        # Always prepend Spanish instruction
+        _LANGUAGE_INSTRUCTION = (
+            "Responde siempre al usuario en español. "
+            "Describe en español el progreso, los hallazgos y las preguntas. "
+            "Usa inglés solo en comandos, código, nombres técnicos y salidas literales."
+        )
+        full_instruction = _LANGUAGE_INSTRUCTION
+        if instruction.strip():
+            full_instruction += (
+                "\n\nInstrucción específica del usuario:\n"
+                + instruction.strip()
+            )
 
         ok, start_msg = self._bridge.start_scan(
             targets=prepared_targets,
@@ -432,6 +440,7 @@ class StrixBot:
         self._active_job_chat_id = chat_id
         self._active_job_message_id = panel_msg_id
         self._active_job_run_name = run_name
+        self._last_broadcast.pop("event", None)  # reset timestamp tracking for new scan
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
