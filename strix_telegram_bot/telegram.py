@@ -26,6 +26,7 @@ def _request(
     method: str,
     payload: Optional[dict] = None,
     retries: int = _MAX_RETRIES,
+    request_timeout: int = 30,
 ) -> Optional[dict]:
     url = _api_url(method)
     data = json.dumps(payload).encode() if payload else None
@@ -34,7 +35,7 @@ def _request(
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, data=data, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=request_timeout) as resp:
                 body = resp.read().decode()
                 result = json.loads(body)
                 if result.get("ok"):
@@ -76,7 +77,12 @@ def get_updates(offset: Optional[int] = None, timeout: int = 30) -> list[dict]:
     }
     if offset is not None:
         payload["offset"] = offset
-    result = _request("getUpdates", payload)
+    result = _request(
+        "getUpdates",
+        payload,
+        retries=1,
+        request_timeout=timeout + 10,
+    )
     return result if result else []
 
 

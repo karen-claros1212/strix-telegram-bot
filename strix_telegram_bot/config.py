@@ -38,6 +38,38 @@ _dotenv = _find_dotenv()
 if _dotenv:
     _load_dotenv(_dotenv)
 
+# Normalize STRIX_REASONING_EFFORT immediately after loading .env
+# so runtime_bridge (which imports strix.config) sees a valid value.
+_VALID_REASONING_EFFORTS = {
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+}
+
+
+def _normalize_reasoning_effort() -> None:
+    raw = os.getenv("STRIX_REASONING_EFFORT")
+
+    if raw is None or not raw.strip():
+        os.environ.pop("STRIX_REASONING_EFFORT", None)
+        return
+
+    value = raw.strip().lower()
+
+    if value not in _VALID_REASONING_EFFORTS:
+        raise RuntimeError(
+            "STRIX_REASONING_EFFORT inválido: "
+            "usa none, minimal, low, medium, high o xhigh."
+        )
+
+    os.environ["STRIX_REASONING_EFFORT"] = value
+
+
+_normalize_reasoning_effort()
+
 
 def resolve_workspace() -> Path:
     env = os.environ.get("STRIX_BOT_DIR")
