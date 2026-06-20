@@ -72,12 +72,11 @@ class TestMessages:
             "mode": "deep",
             "elapsed": "10s",
             "is_active": True,
-            "agents": [{"id": "root-agent", "status": "running"}],
-            "tools": [{"name": "nmap", "status": "running"}],
         }
-        text = job_status_text(status)
-        assert "Agentes" in text
-        assert "root\\-agent" in text
+        text = job_status_text(status, last_tool="nuclei", last_tool_status="ejecutando")
+        assert "Herramienta" in text
+        assert "nuclei" in text
+        assert "▶" in text
 
     def test_job_status_initializing(self):
         status = {

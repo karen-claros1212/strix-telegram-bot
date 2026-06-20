@@ -83,6 +83,7 @@ class StrixBot:
     def _register_slash_commands(self) -> None:
         from .telegram import _request
         commands = [
+            {"command": "scan", "description": "Iniciar escaneo profundo"},
             {"command": "status", "description": "Estado del escaneo activo"},
             {"command": "stop", "description": "Detener escaneo activo"},
             {"command": "jobs", "description": "Historial de trabajos"},
@@ -461,7 +462,7 @@ class StrixBot:
                     self._job_store.save(job)
 
         if self._active_job_chat_id is not None and self._active_job_message_id is not None:
-            text = job_status_text(status)
+            text = job_status_text(status, last_tool=self._last_tool, last_tool_status=self._last_tool_status)
             agent_count = len(self._bridge.list_agents() or [])
             edit_message(
                 self,
@@ -472,14 +473,24 @@ class StrixBot:
             )
 
             if not status.get("is_active") and run_name:
-                delta = status.get("elapsed", "0s")
-                phase = status.get("phase", "completed")
-                final = f"Escaneo finalizado.\nEstado: {phase}\nDuración: {delta}"
-                chat_id = self._active_job_chat_id
                 self._active_job_chat_id = None
                 self._active_job_message_id = None
                 self._active_job_run_name = None
-                send_message(self, chat_id, final, reply_markup=back_to_menu())
+                self._last_tool = ""
+                self._last_tool_status = ""
+
+    _last_tool: str = ""
+    _last_tool_status: str = ""
+
+    @staticmethod
+    def _sanitize_agent_content(content: str) -> str:
+        """Strip base64, data URLs, internal paths, and raw tool output from agent messages."""
+        import re
+        content = re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]{80,}', '[imagen]', content)
+        content = re.sub(r'data:[^;]+;base64,[A-Za-z0-9+/=]{80,}', '[datos binarios]', content)
+        content = re.sub(r'/(home|tmp|root|strix|sandbox)/[^ ]*/(scan-[a-f0-9]+)', r'[sandbox]/\2', content)
+        content = re.sub(r'/sandbox/[^ ]{20,}', '[ruta interna]', content)
+        return content
 
     def _process_scan_events(self, events: list) -> None:
         if not events or self._active_job_chat_id is None:
@@ -496,28 +507,36 @@ class StrixBot:
 
             if ev.type == "agent_message":
                 send_chat_action(self, chat_id)
-                content = ev.content[:4000] if ev.content else "..."
+                raw = ev.content or ""
+                content = self._sanitize_agent_content(raw)[:4000]
                 send_message(self, chat_id, f"*{escape_md(ev.agent_id)}*:\n{escape_md(content)}")
 
             elif ev.type == "tool_call":
-                content = ev.content[:200] if ev.content else "..."
-                send_message(self, chat_id, f"▶ *{escape_md(ev.agent_id)}* ejecuta: {escape_md(content)}")
+                try:
+                    data = json.loads(ev.content) if ev.content else {}
+                    self._last_tool = data.get("tool_name", ev.content[:40] if ev.content else "?")
+                except Exception:
+                    self._last_tool = (ev.content or "?")[:40]
+                self._last_tool_status = "ejecutando"
 
             elif ev.type == "tool_output":
                 try:
                     data = json.loads(ev.content)
-                    tool_name = data.get("tool_name", "?")
-                    output = data.get("output", "")[:500]
+                    self._last_tool = data.get("tool_name", self._last_tool)
                 except Exception:
-                    tool_name = "?"
-                    output = ev.content[:200]
-                send_message(self, chat_id, f"✅ *{escape_md(tool_name)}* completado:\n`{escape_md(output)}`")
+                    pass
+                self._last_tool_status = "completado"
 
             elif ev.type == "tool_cancelled":
-                send_message(self, chat_id, f"⏹ *{escape_md(ev.content)}* cancelada")
+                self._last_tool_status = "cancelada"
 
             elif ev.type == "scan_complete":
-                send_message(self, chat_id, "✅ Escaneo completado.", reply_markup=main_menu())
+                delta = self._bridge.to_status_dict().get("elapsed", "0s")
+                send_message(
+                    self, chat_id,
+                    f"✅ Escaneo completado\\.\nDuración: {delta}",
+                    reply_markup=main_menu(),
+                )
 
             elif ev.type == "scan_error":
                 send_message(self, chat_id, f"❌ Error: {escape_md(ev.content)}", reply_markup=main_menu())

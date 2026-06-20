@@ -40,7 +40,7 @@ def waiting_for_targets_text() -> str:
     return "¿Qué querés escanear? Enviá URLs, repos, o rutas locales."
 
 
-def job_status_text(status: dict) -> str:
+def job_status_text(status: dict, last_tool: str = "", last_tool_status: str = "") -> str:
     phase_str = status.get("phase", "unknown")
     phase_label = _PHASE_LABELS.get(phase_str, phase_str)
     mode_str = status.get("mode", "deep")
@@ -54,9 +54,6 @@ def job_status_text(status: dict) -> str:
     target = status.get("target", [])
     elapsed = status.get("elapsed", "0s")
     error = status.get("error")
-    agents = status.get("agents", [])
-    tools = status.get("tools", [])
-    vulns = status.get("vulnerabilities", [])
     awaiting = status.get("awaiting_input", False)
     prompt = status.get("input_prompt")
 
@@ -68,39 +65,11 @@ def job_status_text(status: dict) -> str:
 
     if target:
         target_str = ", ".join(target) if isinstance(target, list) else str(target)
-        lines.append(f"Target: {escape_md(target_str)}")
+        lines.append(f"Objetivo: {escape_md(target_str)}")
 
-    if agents:
-        lines.append("")
-        lines.append("━ Agentes ━")
-        for a in agents[:5]:
-            aid = a.get("id", "?")[:20]
-            st = a.get("status", "?")
-            icon = _status_icon(st)
-            lines.append(f"{icon} {escape_md(aid)}")
-        if len(agents) > 5:
-            lines.append(f"... y {len(agents) - 5} más")
-
-    if tools:
-        lines.append("")
-        lines.append("━ Herramientas ━")
-        for t in tools[:8]:
-            tname = t.get("name", "?")[:30]
-            tstatus = t.get("status", "running")
-            lines.append(f"  ᴛ {escape_md(tname)} ({tstatus})")
-        if len(tools) > 8:
-            lines.append(f"... y {len(tools) - 8} más")
-
-    if vulns:
-        lines.append("")
-        lines.append("━ Vulnerabilidades ━")
-        for v in vulns[:5]:
-            severity = v.get("severity", "?")
-            title = v.get("title", "?")[:40]
-            sev_icon = {"critical": "⬛", "high": "🔴", "medium": "🟡", "low": "🔵"}.get(severity.lower(), "⚪")
-            lines.append(f"{sev_icon} [{severity.upper()}] {escape_md(title)}")
-        if len(vulns) > 5:
-            lines.append(f"... y {len(vulns) - 5} más")
+    if last_tool:
+        icon = {"ejecutando": "▶", "completado": "✅", "cancelada": "⏹"}.get(last_tool_status, "")
+        lines.append(f"{icon} Herramienta: {escape_md(last_tool[:40])}")
 
     if error:
         lines.append("")
