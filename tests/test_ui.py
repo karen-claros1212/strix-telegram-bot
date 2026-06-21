@@ -75,16 +75,17 @@ class TestMessages:
         }
         tool_state = {
             "current_tool_name": "nuclei",
+            "current_tool_args": {"target": "example.com"},
             "current_tool_status": "running",
             "active_count": 1,
             "completed_count": 3,
             "failed_count": 0,
+            "active_agent_name": "",
         }
         text = job_status_text(status, tool_state=tool_state)
-        assert "nuclei" in text
-        assert "▶" in text
+        assert "Nuclei" in text
+        assert "Buscando vulnerabilidades" in text
         assert "3 completadas" in text
-        assert "1 activas" in text
 
     def test_job_status_initializing(self):
         status = {

@@ -68,13 +68,21 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
     if tool_state:
         current_name = tool_state.get("current_tool_name", "")
         current_status = tool_state.get("current_tool_status", "")
+        current_args = tool_state.get("current_tool_args") or {}
         active = tool_state.get("active_count", 0)
         completed = tool_state.get("completed_count", 0)
         failed = tool_state.get("failed_count", 0)
+        agent_name = tool_state.get("active_agent_name", "")
 
         if current_name:
+            # Translate internal tool name to readable labels
+            tool_label, action_label = describe_tool_activity(current_name, current_args)
             icon = {"running": "▶", "completed": "✅"}.get(current_status, "")
-            lines.append(f"{icon} Herramienta: {escape_md(current_name[:50])}")
+            lines.append(f"{icon} {tool_label}")
+            lines.append(f"   {action_label}")
+
+        if agent_name and agent_name != "STRIX":
+            lines.append(f"Agente: {escape_md(agent_name)}")
 
         tool_summary_parts = []
         if completed:
@@ -84,7 +92,7 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
         if failed:
             tool_summary_parts.append(f"{failed} fallidas")
         if tool_summary_parts:
-            lines.append(f"Herramientas: {' · '.join(tool_summary_parts)}")
+            lines.append(f"{' · '.join(tool_summary_parts)}")
 
     lines.append(f"Tiempo: {elapsed}")
 
@@ -107,6 +115,61 @@ def _status_icon(st: str) -> str:
         "failed": "❌",
         "stopped": "⏹",
     }.get(st, "?")
+
+
+def describe_tool_activity(tool_name: str, args: dict | None = None) -> tuple[str, str]:
+    """Translate internal tool names into human-readable tool + action labels."""
+    args = args or {}
+    name_lower = tool_name.lower() if tool_name else ""
+
+    if "scope_rules/list" in name_lower or name_lower == "list_scope_rules":
+        return ("Alcance", "Consultando reglas del objetivo")
+    if "scope_rules/create" in name_lower or name_lower == "create_scope_rule":
+        return ("Alcance", "Configurando dominios permitidos")
+    if "list_sitemap" in name_lower:
+        return ("Mapa del sitio", "Consultando rutas y endpoints")
+    if "list_requests" in name_lower:
+        return ("Tráfico HTTP", "Revisando solicitudes capturadas")
+    if "agent-browser" in name_lower or "agent_browser" in name_lower:
+        action = "Navegando"
+        if args:
+            url = args.get("url", "") or args.get("target", "")
+            if url:
+                action = f"Abriendo {str(url)[:60]}"
+        return ("Navegador", action)
+    if "snapshot" in name_lower and ("browser" in name_lower or "page" in name_lower):
+        return ("Navegador", "Analizando la estructura de la página")
+    if "view_image" in name_lower or "screenshot" in name_lower:
+        return ("Visión", "Analizando una captura de pantalla")
+    if "nuclei" in name_lower:
+        return ("Nuclei", "Buscando vulnerabilidades conocidas")
+    if "subfinder" in name_lower:
+        return ("Subfinder", "Buscando subdominios")
+    if "ffuf" in name_lower:
+        return ("FFUF", "Descubriendo rutas y archivos")
+    if "curl" in name_lower or "http_request" in name_lower:
+        url = args.get("url", "") or args.get("target", "")
+        action = f"Consultando {str(url)[:50]}" if url else "Revisando respuesta HTTP"
+        return ("HTTP", action)
+    if "create_vulnerability_report" in name_lower or "report_vulnerability" in name_lower:
+        return ("Reporte", "Registrando vulnerabilidad")
+    if "exec_command" in name_lower or "execute_command" in name_lower or "run_command" in name_lower:
+        cmd = args.get("cmd", "") or args.get("command", "") or ""
+        exe = str(cmd).split()[0] if cmd else "comando"
+        return ("Ejecutar", f"{exe[:40]}")
+    if "start_proxy" in name_lower or "ensure_proxy" in name_lower:
+        return ("Proxy", "Iniciando proxy de captura")
+    if "stop_proxy" in name_lower:
+        return ("Proxy", "Deteniendo proxy")
+    if "write_file" in name_lower or "save_file" in name_lower:
+        return ("Archivos", "Guardando resultado")
+    if "read_file" in name_lower:
+        fname = str(args.get("path", "") or args.get("file", "")).split("/")[-1][:30]
+        return ("Archivos", f"Leyendo {fname}" if fname else "Leyendo archivo")
+
+    # Fallback: use the tool name directly, cleaned
+    clean = tool_name.replace("_", " ").replace("-", " ")
+    return (clean.capitalize()[:40], "Ejecutando")
 
 
 def help_text() -> str:

@@ -734,12 +734,26 @@ class StrixRuntimeBridge:
         active = [t for t in self._tool_calls.values() if t["status"] == "running"]
         completed = [t for t in self._tool_calls.values() if t["status"] == "completed"]
         current_tool = active[-1] if active else (completed[-1] if completed else None)
+
+        # Resolve agent name from current tool or graph_snapshot
+        agent_name = ""
+        if current_tool:
+            agent_id = current_tool.get("agent_id", "")
+            tree = self.get_agent_tree()
+            if tree:
+                for aid, info in tree.get("agents", {}).items():
+                    if aid == agent_id:
+                        agent_name = info.get("name", aid)[:8]
+                        break
+
         return {
             "active_count": len(active),
             "completed_count": self._completed_tool_count,
             "failed_count": self._failed_tool_count,
             "current_tool_name": current_tool["tool_name"] if current_tool else "",
+            "current_tool_args": current_tool.get("args") if current_tool else {},
             "current_tool_status": "running" if active else ("completed" if completed else ""),
+            "active_agent_name": agent_name,
         }
 
     def list_agents(self) -> list[dict]:
