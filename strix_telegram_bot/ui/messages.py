@@ -40,7 +40,7 @@ def waiting_for_targets_text() -> str:
     return "¿Qué querés escanear? Enviá URLs, repos, o rutas locales."
 
 
-def job_status_text(status: dict, last_tool: str = "", last_tool_status: str = "") -> str:
+def job_status_text(status: dict, tool_state: dict | None = None) -> str:
     phase_str = status.get("phase", "unknown")
     phase_label = _PHASE_LABELS.get(phase_str, phase_str)
     mode_str = status.get("mode", "deep")
@@ -58,20 +58,35 @@ def job_status_text(status: dict, last_tool: str = "", last_tool_status: str = "
     prompt = status.get("input_prompt")
 
     lines = [
-        f"STRIX {mode_label}",
-        f"Fase: {phase_label}",
-        f"Tiempo: {elapsed}",
+        f"STRIX {mode_label} — {phase_label.capitalize()}",
     ]
 
     if target:
         target_str = ", ".join(target) if isinstance(target, list) else str(target)
         lines.append(f"Objetivo: {escape_md(target_str)}")
 
-    if last_tool:
-        icon = {"ejecutando": "▶", "completado": "✅", "cancelada": "⏹"}.get(last_tool_status, "")
-        lines.append(f"{icon} Herramienta: {escape_md(last_tool[:40])}")
-        if last_tool_status == "completado":
-            lines.append("   Última actividad: ahora")
+    if tool_state:
+        current_name = tool_state.get("current_tool_name", "")
+        current_status = tool_state.get("current_tool_status", "")
+        active = tool_state.get("active_count", 0)
+        completed = tool_state.get("completed_count", 0)
+        failed = tool_state.get("failed_count", 0)
+
+        if current_name:
+            icon = {"running": "▶", "completed": "✅"}.get(current_status, "")
+            lines.append(f"{icon} Herramienta: {escape_md(current_name[:50])}")
+
+        tool_summary_parts = []
+        if completed:
+            tool_summary_parts.append(f"{completed} completadas")
+        if active:
+            tool_summary_parts.append(f"{active} activas")
+        if failed:
+            tool_summary_parts.append(f"{failed} fallidas")
+        if tool_summary_parts:
+            lines.append(f"Herramientas: {' · '.join(tool_summary_parts)}")
+
+    lines.append(f"Tiempo: {elapsed}")
 
     if error:
         lines.append("")

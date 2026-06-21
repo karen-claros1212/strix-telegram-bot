@@ -476,7 +476,8 @@ class StrixBot:
                     self._job_store.save(job)
 
         if self._active_job_chat_id is not None and self._active_job_message_id is not None:
-            text = job_status_text(status, last_tool=self._last_tool, last_tool_status=self._last_tool_status)
+            tool_state = self._bridge.get_tool_state()
+            text = job_status_text(status, tool_state=tool_state)
             agent_count = len(self._bridge.list_agents() or [])
             edit_message(
                 self,
@@ -490,11 +491,6 @@ class StrixBot:
                 self._active_job_chat_id = None
                 self._active_job_message_id = None
                 self._active_job_run_name = None
-                self._last_tool = ""
-                self._last_tool_status = ""
-
-    _last_tool: str = ""
-    _last_tool_status: str = ""
 
     @staticmethod
     def _sanitize_agent_content(content: str) -> str:
@@ -535,23 +531,13 @@ class StrixBot:
                 )
 
             elif ev.type == "tool_call":
-                try:
-                    data = json.loads(ev.content) if ev.content else {}
-                    self._last_tool = data.get("tool_name", ev.content[:40] if ev.content else "?")
-                except Exception:
-                    self._last_tool = (ev.content or "?")[:40]
-                self._last_tool_status = "ejecutando"
+                pass  # Tracked by bridge._tool_calls
 
             elif ev.type == "tool_output":
-                try:
-                    data = json.loads(ev.content)
-                    self._last_tool = data.get("tool_name", self._last_tool)
-                except Exception:
-                    pass
-                self._last_tool_status = "completado"
+                pass  # Tracked by bridge._tool_calls
 
             elif ev.type == "tool_cancelled":
-                self._last_tool_status = "cancelada"
+                pass  # Tracked by bridge._tool_calls
 
             elif ev.type == "scan_complete":
                 delta = self._bridge.to_status_dict().get("elapsed", "0s")

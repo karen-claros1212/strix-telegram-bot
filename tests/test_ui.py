@@ -62,7 +62,7 @@ class TestMessages:
         }
         text = job_status_text(status)
         assert "STRIX" in text
-        assert "ejecutando" in text
+        assert "Ejecutando" in text
 
     def test_job_status_with_agents(self):
         status = {
@@ -73,10 +73,18 @@ class TestMessages:
             "elapsed": "10s",
             "is_active": True,
         }
-        text = job_status_text(status, last_tool="nuclei", last_tool_status="ejecutando")
-        assert "Herramienta" in text
+        tool_state = {
+            "current_tool_name": "nuclei",
+            "current_tool_status": "running",
+            "active_count": 1,
+            "completed_count": 3,
+            "failed_count": 0,
+        }
+        text = job_status_text(status, tool_state=tool_state)
         assert "nuclei" in text
         assert "▶" in text
+        assert "3 completadas" in text
+        assert "1 activas" in text
 
     def test_job_status_initializing(self):
         status = {
@@ -86,7 +94,7 @@ class TestMessages:
             "is_active": True,
         }
         text = job_status_text(status)
-        assert "inicializando" in text
+        assert "Inicializando" in text
 
     def test_health_text(self):
         text = health_text("1.0.2", "3.12.0", "1h 30m", 2, "Active")

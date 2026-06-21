@@ -123,6 +123,11 @@ class StrixRuntimeBridge:
         self._scan_task: Optional[Any] = None
         self._scan_status: str = "unknown"
         self._closed_runs: set[str] = set()
+        self._tool_calls: dict[str, dict[str, Any]] = {}
+        self._active_tool_call_ids: set[str] = set()
+        self._completed_tool_count: int = 0
+        self._failed_tool_count: int = 0
+        self._current_targets: list[str] = []
 
     @property
     def is_available(self) -> bool:
@@ -231,6 +236,11 @@ class StrixRuntimeBridge:
 
         self._stop_event.clear()
         self._event_queue = queue.Queue(maxsize=_MAX_EVENTS)  # fresh queue per scan
+        self._tool_calls.clear()
+        self._active_tool_call_ids.clear()
+        self._completed_tool_count = 0
+        self._failed_tool_count = 0
+        self._current_targets = list(targets)  # preserve original targets for display
         self._coordinator = AgentCoordinator()
         self._root_agent_id = None
         self._run_name = run_name
@@ -418,6 +428,16 @@ class StrixRuntimeBridge:
                 self._queue_event(se)
         elif item_type == "tool_call_item":
             tool_data = self._sdk_tool_call_data(item)
+            call_id = tool_data["call_id"]
+            self._tool_calls[call_id] = {
+                "call_id": call_id,
+                "tool_name": tool_data["tool_name"],
+                "args": tool_data["args"],
+                "agent_id": agent_id,
+                "status": "running",
+                "started_at": now,
+            }
+            self._active_tool_call_ids.add(call_id)
             content = json.dumps({
                 "tool_name": tool_data["tool_name"],
                 "args": tool_data["args"],
@@ -432,9 +452,20 @@ class StrixRuntimeBridge:
             self._queue_event(se)
         elif item_type == "tool_call_output_item":
             tool_data = self._sdk_tool_output_data(item)
+            call_id = tool_data["call_id"]
+            # Resolve real tool name from stored call data
+            stored = self._tool_calls.get(call_id)
+            if stored:
+                stored["status"] = "completed"
+                stored["completed_at"] = now
+                self._active_tool_call_ids.discard(call_id)
+                self._completed_tool_count += 1
+                real_name = stored["tool_name"]
+            else:
+                real_name = tool_data["tool_name"]
             output_text = self._normalize_output(tool_data["output"])[:500]
             content = json.dumps({
-                "tool_name": tool_data["tool_name"],
+                "tool_name": real_name,
                 "output": output_text,
             }, ensure_ascii=False)
             se = ScanEvent(
@@ -521,9 +552,12 @@ class StrixRuntimeBridge:
     def _sdk_tool_output_data(self, item: Any) -> dict[str, Any]:
         raw = self._raw_field(item, "raw_item", None)
         call_id = str(self._raw_field(raw, "call_id") or self._raw_field(raw, "id") or id(item))
+        # Never use raw "type" field (which is "function_call_output") as tool_name
+        # The caller resolves the real name from _tool_calls[call_id]
+        name = self._raw_field(raw, "name")
         return {
             "call_id": call_id,
-            "tool_name": str(self._raw_field(raw, "name") or self._raw_field(raw, "type") or "tool"),
+            "tool_name": str(name) if name else "tool",
             "output": getattr(item, "output", self._raw_field(raw, "output")),
         }
 
@@ -695,6 +729,19 @@ class StrixRuntimeBridge:
             logger.warning("get_agent_tree failed: %s", exc)
             return None
 
+    def get_tool_state(self) -> dict[str, Any]:
+        """Return current tool state for live panel display."""
+        active = [t for t in self._tool_calls.values() if t["status"] == "running"]
+        completed = [t for t in self._tool_calls.values() if t["status"] == "completed"]
+        current_tool = active[-1] if active else (completed[-1] if completed else None)
+        return {
+            "active_count": len(active),
+            "completed_count": self._completed_tool_count,
+            "failed_count": self._failed_tool_count,
+            "current_tool_name": current_tool["tool_name"] if current_tool else "",
+            "current_tool_status": "running" if active else ("completed" if completed else ""),
+        }
+
     def list_agents(self) -> list[dict]:
         """Return flat list of agents from coordinator."""
         tree = self.get_agent_tree()
@@ -792,7 +839,7 @@ class StrixRuntimeBridge:
 
         state: dict[str, Any] = {
             "run_name": status.get("run_name", "pending"),
-            "target": [],
+            "target": self._current_targets,
             "mode": status.get("mode", "deep"),
             "phase": phase,
             "elapsed": _fmt_duration(status["elapsed"]),
