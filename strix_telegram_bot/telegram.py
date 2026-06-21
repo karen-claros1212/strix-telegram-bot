@@ -101,17 +101,18 @@ def send_message(
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": parse_mode,
         "disable_web_page_preview": disable_web_page_preview,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     result = _request("sendMessage", payload)
     if result:
         return result
-    # Markdown fallback: retry as plain text if parse_mode was set
-    if parse_mode == "Markdown":
-        payload["parse_mode"] = None
+    # Markdown fallback: retry without parse_mode
+    if parse_mode:
+        payload.pop("parse_mode", None)
         result = _request("sendMessage", payload)
     return result
 
@@ -128,16 +129,17 @@ def edit_message(
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
-        "parse_mode": parse_mode,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     result = _request("editMessageText", payload)
     if result:
         return result
-    # Markdown fallback: retry as plain text if parse_mode was set
-    if parse_mode == "Markdown":
-        payload["parse_mode"] = None
+    # Markdown fallback: retry without parse_mode
+    if parse_mode:
+        payload.pop("parse_mode", None)
         result = _request("editMessageText", payload)
     return result
 
