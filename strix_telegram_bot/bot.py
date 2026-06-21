@@ -49,6 +49,7 @@ class StrixBot:
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
         self._drain_thread: Optional[threading.Thread] = None
+        self._last_panel_text: str = ""
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -479,13 +480,15 @@ class StrixBot:
             tool_state = self._bridge.get_tool_state()
             text = job_status_text(status, tool_state=tool_state)
             agent_count = len(self._bridge.list_agents() or [])
-            edit_message(
-                self,
-                self._active_job_chat_id,
-                self._active_job_message_id,
-                text,
-                reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
-            )
+            if text != self._last_panel_text:
+                edit_message(
+                    self,
+                    self._active_job_chat_id,
+                    self._active_job_message_id,
+                    text,
+                    reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
+                )
+                self._last_panel_text = text
 
             if not status.get("is_active") and run_name:
                 self._active_job_chat_id = None
@@ -535,6 +538,9 @@ class StrixBot:
 
             elif ev.type == "tool_output":
                 pass  # Tracked by bridge._tool_calls
+
+            elif ev.type == "stream_delta":
+                pass  # Tracked by bridge._streaming — shown in panel
 
             elif ev.type == "tool_cancelled":
                 pass  # Tracked by bridge._tool_calls

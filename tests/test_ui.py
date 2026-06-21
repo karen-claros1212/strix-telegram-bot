@@ -81,6 +81,10 @@ class TestMessages:
             "completed_count": 3,
             "failed_count": 0,
             "active_agent_name": "",
+            "streaming": False,
+            "task": "",
+            "awaiting_input": False,
+            "input_prompt": "",
         }
         text = job_status_text(status, tool_state=tool_state)
         assert "Nuclei" in text

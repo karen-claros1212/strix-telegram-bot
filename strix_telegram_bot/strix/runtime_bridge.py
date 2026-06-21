@@ -128,6 +128,8 @@ class StrixRuntimeBridge:
         self._completed_tool_count: int = 0
         self._failed_tool_count: int = 0
         self._current_targets: list[str] = []
+        self._streaming: bool = False
+        self._last_agent_message: str = ""
 
     @property
     def is_available(self) -> bool:
@@ -417,7 +419,9 @@ class StrixRuntimeBridge:
         item_type = getattr(item, "type", "")
         if item_type == "message_output_item":
             text = self._sdk_message_text(item)
+            self._streaming = False
             if text:
+                self._last_agent_message = text
                 se = ScanEvent(
                     type="agent_message",
                     agent_id=agent_id,
@@ -453,17 +457,27 @@ class StrixRuntimeBridge:
         elif item_type == "tool_call_output_item":
             tool_data = self._sdk_tool_output_data(item)
             call_id = tool_data["call_id"]
+            output_raw = tool_data["output"]
             # Resolve real tool name from stored call data
             stored = self._tool_calls.get(call_id)
+            # Detect failure from output
+            is_error = False
+            if isinstance(output_raw, str) and ("error" in output_raw.lower()[:200] or "traceback" in output_raw.lower()[:200]):
+                is_error = True
             if stored:
-                stored["status"] = "completed"
+                if is_error:
+                    stored["status"] = "failed"
+                    self._failed_tool_count += 1
+                else:
+                    stored["status"] = "completed"
+                    self._completed_tool_count += 1
                 stored["completed_at"] = now
                 self._active_tool_call_ids.discard(call_id)
-                self._completed_tool_count += 1
                 real_name = stored["tool_name"]
             else:
                 real_name = tool_data["tool_name"]
-            output_text = self._normalize_output(tool_data["output"])[:500]
+                self._completed_tool_count += 1
+            output_text = self._normalize_output(output_raw)[:500]
             content = json.dumps({
                 "tool_name": real_name,
                 "output": output_text,
@@ -487,6 +501,7 @@ class StrixRuntimeBridge:
         if data_type == "response.output_text.delta":
             delta = getattr(data, "delta", "")
             if delta:
+                self._streaming = True
                 se = ScanEvent(
                     type="stream_delta",
                     agent_id=agent_id,
@@ -733,10 +748,12 @@ class StrixRuntimeBridge:
         """Return current tool state for live panel display."""
         active = [t for t in self._tool_calls.values() if t["status"] == "running"]
         completed = [t for t in self._tool_calls.values() if t["status"] == "completed"]
-        current_tool = active[-1] if active else (completed[-1] if completed else None)
+        failed = [t for t in self._tool_calls.values() if t["status"] == "failed"]
+        current_tool = active[-1] if active else None
 
         # Resolve agent name from current tool or graph_snapshot
         agent_name = ""
+        agent_id = ""
         if current_tool:
             agent_id = current_tool.get("agent_id", "")
             tree = self.get_agent_tree()
@@ -746,14 +763,32 @@ class StrixRuntimeBridge:
                         agent_name = info.get("name", aid)[:8]
                         break
 
+        # Task summary from last agent message (max 120 chars)
+        task = ""
+        if self._last_agent_message:
+            # Take first sentence or first 120 chars
+            msg = self._last_agent_message.strip()
+            for end in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+                idx = msg.find(end)
+                if 10 < idx < 120:
+                    task = msg[:idx + 1].strip()
+                    break
+            if not task:
+                task = msg[:120].rsplit(" ", 1)[0].strip()
+
         return {
             "active_count": len(active),
             "completed_count": self._completed_tool_count,
             "failed_count": self._failed_tool_count,
             "current_tool_name": current_tool["tool_name"] if current_tool else "",
             "current_tool_args": current_tool.get("args") if current_tool else {},
-            "current_tool_status": "running" if active else ("completed" if completed else ""),
+            "current_tool_status": "running",
             "active_agent_name": agent_name,
+            "active_agent_id": agent_id,
+            "streaming": self._streaming,
+            "task": task,
+            "awaiting_input": self._awaiting_input,
+            "input_prompt": self._input_prompt,
         }
 
     def list_agents(self) -> list[dict]:

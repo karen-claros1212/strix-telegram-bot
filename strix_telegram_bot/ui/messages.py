@@ -66,18 +66,25 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
         lines.append(f"Objetivo: {escape_md(target_str)}")
 
     if tool_state:
+        streaming = tool_state.get("streaming", False)
+        task = tool_state.get("task", "")
         current_name = tool_state.get("current_tool_name", "")
-        current_status = tool_state.get("current_tool_status", "")
         current_args = tool_state.get("current_tool_args") or {}
         active = tool_state.get("active_count", 0)
         completed = tool_state.get("completed_count", 0)
         failed = tool_state.get("failed_count", 0)
         agent_name = tool_state.get("active_agent_name", "")
+        panel_awaiting = tool_state.get("awaiting_input", False)
+        panel_prompt = tool_state.get("input_prompt", "")
+
+        if streaming and not current_name:
+            lines.append("Actividad: Redactando respuesta")
+        elif task:
+            lines.append(f"Tarea: {escape_md(task[:120])}")
 
         if current_name:
-            # Translate internal tool name to readable labels
             tool_label, action_label = describe_tool_activity(current_name, current_args)
-            icon = {"running": "▶", "completed": "✅"}.get(current_status, "")
+            icon = "▶"
             lines.append(f"{icon} {tool_label}")
             lines.append(f"   {action_label}")
 
