@@ -46,6 +46,10 @@ def _request(
                 )
             return None
         except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            # Don't retry on permanent errors
+            if "message is not modified" in body or "message to edit not found" in body or "message can't be edited" in body:
+                return None
             logger.warning(
                 "HTTP %d on %s (attempt %d/%d): %s",
                 e.code, method, attempt + 1, retries, e.reason,

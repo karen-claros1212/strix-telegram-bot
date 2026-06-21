@@ -480,16 +480,23 @@ class StrixBot:
             tool_state = self._bridge.get_tool_state()
             text = job_status_text(status, tool_state=tool_state)
             agent_count = len(self._bridge.list_agents() or [])
-            if text != self._last_panel_text:
-                edit_message(
-                    self,
-                    self._active_job_chat_id,
-                    self._active_job_message_id,
-                    text,
-                    reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
-                    parse_mode=None,
-                )
-                self._last_panel_text = text
+            # Throttle panel edits: max once per 3s, and only when content changes
+            now = time.time()
+            _last = getattr(self, '_last_panel_edit', 0.0)
+            if text != self._last_panel_text and now - _last >= 3.0:
+                try:
+                    edit_message(
+                        self,
+                        self._active_job_chat_id,
+                        self._active_job_message_id,
+                        text,
+                        reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
+                        parse_mode=None,
+                    )
+                    self._last_panel_text = text
+                    self._last_panel_edit = now
+                except Exception:
+                    pass  # Panel edit is best-effort; don't crash drain loop
 
             if not status.get("is_active") and run_name:
                 self._active_job_chat_id = None
@@ -567,13 +574,14 @@ class StrixBot:
 
     def _drain_loop(self) -> None:
         _last_typing: float = 0.0
+        _last_panel_edit: float = 0.0
         while self._running:
             try:
                 self._drain_update_queue()
             except Exception as e:
                 logger.error(f"Drain error: {e}")
-            # Keepalive: send typing indicator every 4s while a scan is active
             now = time.time()
+            # Keepalive: send typing indicator every 4s while a scan is active
             if self._active_job_chat_id is not None and self._bridge.is_running and now - _last_typing > 4.0:
                 from .telegram import send_chat_action
                 send_chat_action(self, self._active_job_chat_id)
