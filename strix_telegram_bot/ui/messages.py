@@ -63,7 +63,7 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
 
     if target:
         target_str = ", ".join(target) if isinstance(target, list) else str(target)
-        lines.append(f"Objetivo: {escape_md(target_str)}")
+        lines.append(f"Objetivo: {target_str}")
 
     if tool_state:
         streaming = tool_state.get("streaming", False)
@@ -85,13 +85,14 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
             lines.append("Actividad: Redactando una respuesta")
         elif panel_awaiting:
             if panel_prompt:
-                # Only show prompt if agent actually asked a real question
-                lines.append(f"Estado: {escape_md(panel_prompt)}")
+                lines.append(f"Estado: {panel_prompt}")
             else:
                 lines.append("Estado: Disponible para recibir instrucciones")
+        else:
+            lines.append("Actividad: Analizando resultados")
 
         if agent_name and agent_name != "STRIX":
-            lines.append(f"Agente: {escape_md(agent_name)}")
+            lines.append(f"Agente: {agent_name}")
 
         tool_summary_parts = []
         if completed:
@@ -107,7 +108,7 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
 
     if error:
         lines.append("")
-        lines.append(f"⚠ Error: {escape_md(error)}")
+        lines.append(f"⚠ Error: {error}")
 
     return "\n".join(lines)
 

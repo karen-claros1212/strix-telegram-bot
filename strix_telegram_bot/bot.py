@@ -487,6 +487,7 @@ class StrixBot:
                     self._active_job_message_id,
                     text,
                     reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
+                    parse_mode=None,
                 )
                 self._last_panel_text = text
 
@@ -549,8 +550,9 @@ class StrixBot:
                 delta = self._bridge.to_status_dict().get("elapsed", "0s")
                 send_message(
                     self, chat_id,
-                    f"✅ Escaneo completado\\.\nDuración: {delta}",
+                    f"✅ Escaneo completado.\nDuración: {delta}",
                     reply_markup=main_menu(),
+                    parse_mode=None,
                 )
 
             elif ev.type == "scan_error":
