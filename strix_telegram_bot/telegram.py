@@ -59,9 +59,13 @@ def _request(
                 continue
             return None
         except (urllib.error.URLError, OSError) as e:
+            reason = str(e.reason) if hasattr(e, "reason") else str(e)
+            # Don't retry on permanent network failures
+            if "Network is unreachable" in reason or "Name or service not known" in reason:
+                return None
             logger.warning(
                 "Connection error on %s (attempt %d/%d): %s",
-                method, attempt + 1, retries, e.reason if hasattr(e, "reason") else str(e),
+                method, attempt + 1, retries, reason,
             )
             if attempt < retries - 1:
                 time.sleep(_RETRY_DELAY * (2 ** attempt))

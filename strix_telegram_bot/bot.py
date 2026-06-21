@@ -583,8 +583,11 @@ class StrixBot:
             now = time.time()
             # Keepalive: send typing indicator every 4s while a scan is active
             if self._active_job_chat_id is not None and self._bridge.is_running and now - _last_typing > 4.0:
-                from .telegram import send_chat_action
-                send_chat_action(self, self._active_job_chat_id)
+                try:
+                    from .telegram import send_chat_action
+                    send_chat_action(self, self._active_job_chat_id)
+                except Exception:
+                    pass
                 _last_typing = now
             time.sleep(0.5)
 
