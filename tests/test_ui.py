@@ -82,7 +82,6 @@ class TestMessages:
             "failed_count": 0,
             "active_agent_name": "",
             "streaming": False,
-            "task": "",
             "awaiting_input": False,
             "input_prompt": "",
         }
@@ -90,6 +89,47 @@ class TestMessages:
         assert "Nuclei" in text
         assert "Buscando vulnerabilidades" in text
         assert "3 completadas" in text
+
+    def test_job_status_awaiting(self):
+        status = {
+            "phase": "running",
+            "mode": "deep",
+            "elapsed": "2m",
+            "is_active": True,
+        }
+        # Awaiting with no real prompt: shows generic message
+        tool_state = {
+            "current_tool_name": "",
+            "streaming": False,
+            "awaiting_input": True,
+            "input_prompt": "",
+            "active_count": 0,
+            "completed_count": 0,
+            "failed_count": 0,
+            "active_agent_name": "",
+        }
+        text = job_status_text(status, tool_state=tool_state)
+        assert "Disponible para recibir instrucciones" in text
+
+    def test_job_status_streaming(self):
+        status = {
+            "phase": "running",
+            "mode": "deep",
+            "elapsed": "1m",
+            "is_active": True,
+        }
+        tool_state = {
+            "current_tool_name": "",
+            "streaming": True,
+            "awaiting_input": False,
+            "input_prompt": "",
+            "active_count": 0,
+            "completed_count": 0,
+            "failed_count": 0,
+            "active_agent_name": "",
+        }
+        text = job_status_text(status, tool_state=tool_state)
+        assert "Redactando una respuesta" in text
 
     def test_job_status_initializing(self):
         status = {

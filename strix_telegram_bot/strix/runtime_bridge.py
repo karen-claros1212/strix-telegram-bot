@@ -336,7 +336,6 @@ class StrixRuntimeBridge:
                     elif root_waiting:
                         self._scan_status = "waiting"
                         self._awaiting_input = True
-                        self._input_prompt = "STRIX espera un mensaje"
                 except Exception:
                     pass
 
@@ -753,7 +752,6 @@ class StrixRuntimeBridge:
 
         # Resolve agent name from current tool or graph_snapshot
         agent_name = ""
-        agent_id = ""
         if current_tool:
             agent_id = current_tool.get("agent_id", "")
             tree = self.get_agent_tree()
@@ -763,19 +761,6 @@ class StrixRuntimeBridge:
                         agent_name = info.get("name", aid)[:8]
                         break
 
-        # Task summary from last agent message (max 120 chars)
-        task = ""
-        if self._last_agent_message:
-            # Take first sentence or first 120 chars
-            msg = self._last_agent_message.strip()
-            for end in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
-                idx = msg.find(end)
-                if 10 < idx < 120:
-                    task = msg[:idx + 1].strip()
-                    break
-            if not task:
-                task = msg[:120].rsplit(" ", 1)[0].strip()
-
         return {
             "active_count": len(active),
             "completed_count": self._completed_tool_count,
@@ -784,9 +769,7 @@ class StrixRuntimeBridge:
             "current_tool_args": current_tool.get("args") if current_tool else {},
             "current_tool_status": "running",
             "active_agent_name": agent_name,
-            "active_agent_id": agent_id,
             "streaming": self._streaming,
-            "task": task,
             "awaiting_input": self._awaiting_input,
             "input_prompt": self._input_prompt,
         }

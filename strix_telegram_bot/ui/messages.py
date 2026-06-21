@@ -67,7 +67,6 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
 
     if tool_state:
         streaming = tool_state.get("streaming", False)
-        task = tool_state.get("task", "")
         current_name = tool_state.get("current_tool_name", "")
         current_args = tool_state.get("current_tool_args") or {}
         active = tool_state.get("active_count", 0)
@@ -77,16 +76,19 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
         panel_awaiting = tool_state.get("awaiting_input", False)
         panel_prompt = tool_state.get("input_prompt", "")
 
-        if streaming and not current_name:
-            lines.append("Actividad: Redactando respuesta")
-        elif task:
-            lines.append(f"Tarea: {escape_md(task[:120])}")
-
+        # Activity priority: tool > streaming > awaiting > idle
         if current_name:
             tool_label, action_label = describe_tool_activity(current_name, current_args)
-            icon = "▶"
-            lines.append(f"{icon} {tool_label}")
+            lines.append(f"▶ {tool_label}")
             lines.append(f"   {action_label}")
+        elif streaming:
+            lines.append("Actividad: Redactando una respuesta")
+        elif panel_awaiting:
+            if panel_prompt:
+                # Only show prompt if agent actually asked a real question
+                lines.append(f"Estado: {escape_md(panel_prompt)}")
+            else:
+                lines.append("Estado: Disponible para recibir instrucciones")
 
         if agent_name and agent_name != "STRIX":
             lines.append(f"Agente: {escape_md(agent_name)}")
@@ -106,10 +108,6 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
     if error:
         lines.append("")
         lines.append(f"⚠ Error: {escape_md(error)}")
-
-    if awaiting and prompt:
-        lines.append("")
-        lines.append(f"⏳ STRIX necesita información: {escape_md(prompt)}")
 
     return "\n".join(lines)
 
