@@ -324,17 +324,38 @@ class StrixBot:
                     wrap_dir = repos_dir / "_attachments" / p.stem
                     wrap_dir.mkdir(parents=True, exist_ok=True)
                     target_path = wrap_dir / p.name
-                    if not target_path.exists():
-                        try:
-                            target_path.symlink_to(p.resolve())
-                        except OSError:
-                            try:
-                                import shutil
-                                shutil.copy2(str(p.resolve()), str(target_path))
-                            except OSError as e:
-                                logger.warning("Failed to copy attachment %s: %s", p, e)
-                                final_targets.append(t)
-                                continue
+                    import shutil
+
+                    source_path = p.resolve()
+
+                    try:
+                        # LocalDir no admite symlinks. El archivo entregado al sandbox
+                        # debe ser un archivo regular dentro del directorio montado.
+                        if target_path.is_symlink() or target_path.exists():
+                            target_path.unlink()
+
+                        shutil.copy2(source_path, target_path)
+
+                        if not target_path.is_file() or target_path.is_symlink():
+                            raise RuntimeError(
+                                f"Attachment was not materialized as a regular file: {target_path}"
+                            )
+
+                        logger.info(
+                            "Attachment prepared for sandbox: source=%s target=%s size=%d",
+                            source_path,
+                            target_path,
+                            target_path.stat().st_size,
+                        )
+
+                    except (OSError, shutil.Error, RuntimeError) as exc:
+                        logger.exception(
+                            "Failed to prepare attachment %s for sandbox: %s",
+                            source_path,
+                            exc,
+                        )
+                        final_targets.append(t)
+                        continue
                     final_targets.append(str(wrap_dir))
                     _add_local(wrap_dir, p.stem)
                 continue
