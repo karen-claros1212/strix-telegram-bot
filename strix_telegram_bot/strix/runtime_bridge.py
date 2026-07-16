@@ -345,6 +345,7 @@ class StrixRuntimeBridge:
                 local_sources=scan_config.get("local_sources"),
                 coordinator=self._coordinator,
                 interactive=not non_interactive,
+                continuous_interactive=not non_interactive,
                 event_sink=bound_event_sink,
             )
 
