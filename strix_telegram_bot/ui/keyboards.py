@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import logging
+
 from strix_telegram_bot.models import MenuState
 
+logger = logging.getLogger(__name__)
 
 _CALLBACK_SEP = ":"
 _MAX_CALLBACK_LEN = 64
@@ -9,7 +13,19 @@ _MAX_CALLBACK_LEN = 64
 
 def _cb(*parts: str) -> str:
     raw = _CALLBACK_SEP.join(parts)
-    return raw[:_MAX_CALLBACK_LEN]
+    if len(raw) <= _MAX_CALLBACK_LEN:
+        return raw
+    # Truncate long parts with a hash suffix for uniqueness
+    logger.warning("Callback too long (%d chars): %s... — truncating", len(raw), raw[:40])
+    shortened = list(parts)
+    for i in range(len(shortened) - 1, -1, -1):
+        if len(shortened[i]) > 8:
+            h = hashlib.md5(shortened[i].encode()).hexdigest()[:6]
+            shortened[i] = shortened[i][:4] + h
+        candidate = _CALLBACK_SEP.join(shortened)
+        if len(candidate) <= _MAX_CALLBACK_LEN:
+            return candidate
+    return raw[_MAX_CALLBACK_LEN - 10:] + raw[-10:]
 
 
 def _btn(text: str, callback_data: str) -> dict:
@@ -26,11 +42,24 @@ def main_menu() -> dict:
     ])
 
 
+def scan_mode_menu() -> dict:
+    return build_inline_keyboard([
+        [_btn("Quick", _cb("menu", "mode", "quick"))],
+        [_btn("Standard", _cb("menu", "mode", "standard"))],
+        [_btn("Deep", _cb("menu", "mode", "deep"))],
+        [_btn("Volver", _cb("menu", "main"))],
+    ])
+
+
 def job_panel(running: bool = False, agent_count: int = 0) -> dict:
     buttons = []
     if running:
         buttons.append(_btn("Detener", _cb("job", "stop")))
     rows = [buttons]
+    if running:
+        rows.append([_btn("Chat", _cb("job", "chat")),
+                     _btn("Arbol", _cb("job", "tree"))])
+        rows.append([_btn("Vulns", _cb("job", "vulns"))])
     if agent_count > 1:
         rows.append([_btn("Agentes", _cb("job", "agents"))])
     return build_inline_keyboard(rows)

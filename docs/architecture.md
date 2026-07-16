@@ -2,12 +2,12 @@
 
 ## Overview
 
-STRIX Telegram Bot bridges Telegram and STRIX 1.0.4's autonomous security scanning engine. It handles user interaction, job lifecycle, file management, and result delivery using raw HTTP polling (no external Telegram library).
+STRIX Telegram Bot bridges Telegram and STRIX 1.1.0's autonomous security scanning engine. It handles user interaction, job lifecycle, file management, and result delivery using raw HTTP polling (no external Telegram library).
 
 ## Component Diagram
 
 ```
-Telegram ──→ raw HTTP polling ──→ StrixBot ──→ StrixRuntimeBridge ──→ STRIX 1.0.4
+Telegram ──→ raw HTTP polling ──→ StrixBot ──→ StrixRuntimeBridge ──→ STRIX 1.1.0
     ↑              │                      │              │              │
     └──────────────┘                      └──────────────┘              └── AgentCoordinator
                                           │                                         └── run_strix_scan()

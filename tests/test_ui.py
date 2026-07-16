@@ -1,5 +1,6 @@
 from strix_telegram_bot.ui.keyboards import (
     main_menu,
+    scan_mode_menu,
     job_panel,
     parse_callback,
     back_to_menu,
@@ -23,16 +24,27 @@ class TestKeyboards:
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
         assert "Escanear" in texts
 
+    def test_scan_mode_menu(self):
+        kb = scan_mode_menu()
+        texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
+        assert "Quick" in texts
+        assert "Standard" in texts
+        assert "Deep" in texts
+
     def test_back_to_menu(self):
         kb = back_to_menu()
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
         assert "Volver al menú" in texts
 
+    def test_job_panel_has_chat(self):
+        kb = job_panel(running=True)
+        texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
+        assert "Chat" in texts
+
     def test_job_panel_has_stop(self):
         kb = job_panel(running=True)
         texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
         assert "Detener" in texts
-        assert "Estado" not in texts
 
     def test_job_panel_no_stop(self):
         kb = job_panel(running=False)

@@ -40,7 +40,9 @@ class BridgePhase(str, Enum):
 class MenuState(str, Enum):
     MAIN = "main"
     WAITING_FOR_TARGETS = "waiting_for_targets"
+    SCAN_MODE = "scan_mode"
     AGENT_SELECT = "agent_select"
+    CHAT = "chat"
 
 
 @dataclass

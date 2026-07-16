@@ -41,8 +41,9 @@ def _request(
                 if result.get("ok"):
                     return result.get("result")
                 logger.warning(
-                    "Telegram API error [%s]: %s — %s",
+                    "Telegram API error [%s]: %s — %s — payload: %s",
                     method, result.get("error_code", "?"), result.get("description", "?"),
+                    json.dumps(payload, default=str) if payload else "none",
                 )
             return None
         except urllib.error.HTTPError as e:
@@ -51,8 +52,8 @@ def _request(
             if "message is not modified" in body or "message to edit not found" in body or "message can't be edited" in body:
                 return None
             logger.warning(
-                "HTTP %d on %s (attempt %d/%d): %s",
-                e.code, method, attempt + 1, retries, e.reason,
+                "HTTP %d on %s (attempt %d/%d): %s — body: %s",
+                e.code, method, attempt + 1, retries, e.reason, body[:200],
             )
             if attempt < retries - 1:
                 time.sleep(_RETRY_DELAY * (2 ** attempt))

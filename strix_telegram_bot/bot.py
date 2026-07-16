@@ -40,11 +40,18 @@ class StrixBot:
         self._running = False
         self._job_store = JobStore()
         self._bridge = StrixRuntimeBridge()
-        self._last_broadcast: dict[str, float] = {}
-
         self._active_job_chat_id: Optional[int] = None
         self._active_job_message_id: Optional[int] = None
         self._active_job_run_name: Optional[str] = None
+
+        self._streaming_message_id: Optional[int] = None
+        self._streaming_event_id: Optional[str] = None
+        self._streaming_version: int = 0
+        self._tool_message_ids: dict[str, int] = {}
+
+        self._active_chat_agent_id: Optional[str] = None
+        self._active_chat_message_id: Optional[int] = None
+        self._active_chat_chat_id: Optional[int] = None
 
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
@@ -84,8 +91,9 @@ class StrixBot:
     def _register_slash_commands(self) -> None:
         from .telegram import _request
         commands = [
-            {"command": "scan", "description": "Iniciar escaneo profundo"},
+            {"command": "scan", "description": "Iniciar escaneo de seguridad"},
             {"command": "status", "description": "Estado del escaneo activo"},
+            {"command": "chat", "description": "Abrir conversacion con un agente"},
             {"command": "stop", "description": "Detener escaneo activo"},
             {"command": "jobs", "description": "Historial de trabajos"},
             {"command": "reports", "description": "Centro de reportes"},
@@ -143,7 +151,10 @@ class StrixBot:
         targets, instruction = self._extract_targets(text)
 
         if targets:
-            self._launch_scan(chat_id, targets, instruction)
+            scan_mode = getattr(pm, "_selected_scan_mode", "deep")
+            if isinstance(scan_mode, ScanMode):
+                scan_mode = scan_mode.value
+            self._launch_scan(chat_id, targets, instruction, scan_mode=scan_mode)
         else:
             send_message(
                 self,
@@ -192,17 +203,21 @@ class StrixBot:
     def _parse_and_launch(self, chat_id: int, text: str) -> None:
         targets, instruction = self._extract_targets(text)
         if not targets:
-            send_message(self, chat_id, "No encontré ningún objetivo (URL, ruta, repo).")
+            send_message(self, chat_id, "No encontre ningun objetivo (URL, ruta, repo).")
             return
 
         from .safety.attachment_policy import sanitize_target
         for t in targets:
             ok, err = sanitize_target(t)
             if not ok:
-                send_message(self, chat_id, f"Objetivo inválido {t}: {err}")
+                send_message(self, chat_id, f"Objetivo invalido {t}: {err}")
                 return
 
-        self._launch_scan(chat_id, targets, instruction)
+        pm = get_panel_manager(chat_id)
+        scan_mode = getattr(pm, "_selected_scan_mode", "deep")
+        if isinstance(scan_mode, ScanMode):
+            scan_mode = scan_mode.value
+        self._launch_scan(chat_id, targets, instruction, scan_mode=scan_mode)
 
     def _handle_callback(self, update: dict) -> None:
         cb = update.get("callback_query", {})
@@ -241,12 +256,9 @@ class StrixBot:
 
         self._bridge._preferred_agent_id = agent_id
         name = agent.get("name", agent_id)
-        agent_count = len(self._bridge.list_agents() or [])
-        edit_message(
-            bot, chat_id, msg_id,
-            f"Ahora enviando mensajes a: {escape_md(name)}",
-            reply_markup=job_panel(running=True, agent_count=agent_count),
-        )
+
+        from .commands.jobs import _show_agent_chat
+        _show_agent_chat(bot, chat_id, msg_id, self._bridge, agent_id)
 
     def _handle_document(self, update: dict) -> None:
         msg = update.get("message", {})
@@ -403,6 +415,7 @@ class StrixBot:
         chat_id: int,
         targets: list[str],
         instruction: str = "",
+        scan_mode: str = "deep",
     ) -> None:
         from .telegram import send_chat_action
         send_chat_action(self, chat_id)
@@ -428,7 +441,7 @@ class StrixBot:
 
         ok, start_msg = self._bridge.start_scan(
             targets=prepared_targets,
-            scan_mode="deep",
+            scan_mode=scan_mode,
             instruction=full_instruction,
             scope_mode="auto",
             non_interactive=False,
@@ -462,7 +475,10 @@ class StrixBot:
         self._active_job_chat_id = chat_id
         self._active_job_message_id = panel_msg_id
         self._active_job_run_name = run_name
-        self._last_broadcast.pop("event", None)  # reset timestamp tracking for new scan
+        self._streaming_message_id = None
+        self._streaming_event_id = None
+        self._streaming_version = 0
+        self._tool_message_ids.clear()
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
@@ -523,6 +539,30 @@ class StrixBot:
                 self._active_job_chat_id = None
                 self._active_job_message_id = None
                 self._active_job_run_name = None
+                self._active_chat_agent_id = None
+                self._active_chat_message_id = None
+
+        # Live refresh: if a chat view is open, push latest agent timeline
+        # Throttled: max 1 refresh per 3s, and only when signature changes
+        if (self._active_chat_agent_id and self._active_chat_message_id
+                and self._active_chat_chat_id and self._bridge.is_running):
+            now = time.time()
+            _last_chat_refresh = getattr(self, '_last_chat_refresh', 0.0)
+            if now - _last_chat_refresh >= 3.0:
+                try:
+                    from .commands.jobs import _show_agent_chat
+                    cursor = getattr(self, '_active_chat_cursor', '__latest__')
+                    _show_agent_chat(
+                        self,
+                        self._active_chat_chat_id,
+                        self._active_chat_message_id,
+                        self._bridge,
+                        self._active_chat_agent_id,
+                        before_event_id=cursor,
+                    )
+                    self._last_chat_refresh = now
+                except Exception:
+                    pass
 
     @staticmethod
     def _sanitize_agent_content(content: str) -> str:
@@ -534,76 +574,154 @@ class StrixBot:
         content = re.sub(r'/sandbox/[^ ]{20,}', '[ruta interna]', content)
         return content
 
-    def _process_scan_events(self, events: list) -> None:
+    def _process_scan_events(self, events: list[dict]) -> None:
         if not events or self._active_job_chat_id is None:
             return
 
-        from .telegram import send_chat_action, send_message
-
         chat_id = self._active_job_chat_id
         current_run = self._active_job_run_name
-        last_ts: float = self._last_broadcast.get("event", 0.0)
 
         for ev in events:
-            if ev.timestamp <= last_ts:
+            ev_type = ev.get("type", "")
+            data = ev.get("data", {})
+            ev_run = data.get("run_name", "")
+            ev_id = ev.get("id", "")
+            ev_version = int(ev.get("version", 0))
+
+            if current_run and ev_run and ev_run != current_run:
                 continue
 
-            # Filter: only process events belonging to the active job
-            if current_run and getattr(ev, "run_name", "") and ev.run_name != current_run:
-                continue
+            if ev_type == "chat":
+                role = data.get("role", "")
+                if role != "assistant":
+                    continue
+                streaming = data.get("metadata", {}).get("streaming", False)
+                content = data.get("content", "")
+                if not content:
+                    continue
+                raw = self._sanitize_agent_content(content)
 
-            if ev.type == "agent_message":
-                send_chat_action(self, chat_id)
-                raw = ev.content or ""
-                content = self._sanitize_agent_content(raw)[:4000]
-                send_message(
-                    self, chat_id,
-                    f"STRIX:\n{content}",
-                    parse_mode=None,
-                )
+                if streaming:
+                    # Provisional: create or edit a single message
+                    if self._streaming_event_id != ev_id:
+                        # New streaming session — send first fragment
+                        resp = self._send_long_message(chat_id, f"STRIX:\n{raw[:4000]}", send_message)
+                        if resp:
+                            self._streaming_message_id = resp.get("message_id")
+                        self._streaming_event_id = ev_id
+                        self._streaming_version = ev_version
+                    elif ev_version > self._streaming_version:
+                        # Update existing message with accumulated content
+                        if self._streaming_message_id:
+                            edit_message(self, chat_id, self._streaming_message_id,
+                                        f"STRIX:\n{raw[:4000]}", parse_mode=None)
+                        self._streaming_version = ev_version
+                else:
+                    # Final message: if was streaming, finalize the provisional; else send new
+                    if self._streaming_event_id == ev_id and self._streaming_message_id:
+                        edit_message(self, chat_id, self._streaming_message_id,
+                                    f"STRIX:\n{raw[:4000]}", parse_mode=None)
+                        self._streaming_message_id = None
+                        self._streaming_event_id = None
+                        self._streaming_version = 0
+                    else:
+                        self._send_long_message(chat_id, f"STRIX:\n{raw}", send_message)
 
-            elif ev.type == "tool_call":
-                pass  # Tracked by bridge._tool_calls
+            elif ev_type == "tool":
+                status = data.get("status", "")
+                tool_name = data.get("tool_name", "tool")
+                args = data.get("args", {})
+                result = data.get("result")
+                call_id = data.get("call_id", "")
 
-            elif ev.type == "tool_output":
-                pass  # Tracked by bridge._tool_calls
+                if status == "running":
+                    args_text = self._sanitize_tool_args(args)
+                    text = f"Herramienta: {tool_name}\n" + (f"{args_text}\n" if args_text else "") + "Estado: ejecutando..."
+                    resp = send_message(self, chat_id, text, parse_mode=None)
+                    if resp and call_id:
+                        self._tool_message_ids[call_id] = resp.get("message_id")
+                elif status in ("completed", "failed") and call_id:
+                    msg_id = self._tool_message_ids.get(call_id)
+                    if msg_id:
+                        status_label = "completada" if status == "completed" else "fallida"
+                        result_text = self._sanitize_tool_result(result)[:500]
+                        args_text = self._sanitize_tool_args(args)
+                        text = f"Herramienta: {tool_name}\n" + (f"{args_text}\n" if args_text else "") + f"Estado: {status_label}"
+                        if result_text:
+                            text += f"\nResultado: {result_text}"
+                        edit_message(self, chat_id, msg_id, text, parse_mode=None)
 
-            elif ev.type == "stream_delta":
-                pass  # Tracked by bridge._streaming — shown in panel
+            elif ev_type == "system":
+                event_name = data.get("event", "")
+                if event_name == "agent_waiting":
+                    agent_name = data.get("content", "strix")
+                    send_message(
+                        self, chat_id,
+                        f"STRIX esta esperando instrucciones.\n\n"
+                        f"Agente: {agent_name}\n\n"
+                        f"Escribe un mensaje para continuar.",
+                        parse_mode=None,
+                    )
+                elif event_name == "scan_complete":
+                    delta = self._bridge.to_status_dict().get("elapsed", "0s")
+                    send_message(
+                        self, chat_id,
+                        f"Escaneo completado.\n"
+                        f"Duracion: {delta}",
+                        reply_markup=main_menu(),
+                        parse_mode=None,
+                    )
+                elif event_name == "scan_error":
+                    content = data.get("content", "")
+                    send_message(self, chat_id, f"Error: {escape_md(content)}", reply_markup=main_menu())
+                elif event_name == "scan_cancelled":
+                    pass
 
-            elif ev.type == "tool_cancelled":
-                pass  # Tracked by bridge._tool_calls
+    def _send_long_message(self, chat_id: int, text: str, sender) -> Optional[dict]:
+        """Split text into valid Telegram messages (max 4096 chars each)."""
+        MAX_LEN = 4000
+        last_resp = None
+        for i in range(0, len(text), MAX_LEN):
+            frag = text[i:i + MAX_LEN]
+            last_resp = sender(self, chat_id, frag, parse_mode=None)
+        return last_resp
 
-            elif ev.type == "scan_complete":
-                delta = self._bridge.to_status_dict().get("elapsed", "0s")
-                send_message(
-                    self, chat_id,
-                    f"✅ Escaneo completado.\nDuración: {delta}",
-                    reply_markup=main_menu(),
-                    parse_mode=None,
-                )
+    @staticmethod
+    def _sanitize_tool_args(args: dict) -> str:
+        if not args:
+            return ""
+        safe_parts = []
+        for k, v in args.items():
+            if isinstance(v, str):
+                v = v[:200]
+                v = v.replace("\n", " ")
+            safe_parts.append(f"{k}: {v}")
+        return "\n".join(safe_parts[:5])
 
-            elif ev.type == "scan_error":
-                send_message(self, chat_id, f"❌ Error: {escape_md(ev.content)}", reply_markup=main_menu())
-
-            elif ev.type == "scan_cancelled":
-                # Close handled by cmd_stop — do NOT send duplicate message
-                pass
-
-        if events:
-            self._last_broadcast["event"] = events[-1].timestamp
+    @staticmethod
+    def _sanitize_tool_result(result) -> str:
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            return result[:500]
+        if isinstance(result, (int, float)):
+            return str(result)
+        try:
+            import json
+            return json.dumps(result, ensure_ascii=False, default=str)[:500]
+        except Exception:
+            return str(result)[:500]
 
     def _drain_loop(self) -> None:
         _last_typing: float = 0.0
-        _last_panel_edit: float = 0.0
         while self._running:
             try:
                 self._drain_update_queue()
             except Exception as e:
                 logger.error(f"Drain error: {e}")
             now = time.time()
-            # Keepalive: send typing indicator every 4s while a scan is active
-            if self._active_job_chat_id is not None and self._bridge.is_running and now - _last_typing > 4.0:
+            # Keepalive: send typing indicator only while actively working (not waiting)
+            if self._active_job_chat_id is not None and self._bridge.is_actively_working and now - _last_typing > 4.0:
                 try:
                     from .telegram import send_chat_action
                     send_chat_action(self, self._active_job_chat_id)

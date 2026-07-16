@@ -1,11 +1,15 @@
-"""StrixRuntimeBridge — asyncio thread wrapping AgentCoordinator + run_strix_scan."""
+"""StrixRuntimeBridge — asyncio thread wrapping AgentCoordinator + run_strix_scan.
+
+TuiLiveView is the single source of truth for all scan events.
+No parallel event queue or duplicate state — everything flows through
+the same TuiLiveView instance that the official TUI uses.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import queue
 import threading
 import time
 import uuid
@@ -21,14 +25,24 @@ AgentCoordinator: Any = None
 run_strix_scan: Any = None
 ReportState: Any = None
 set_global_report_state: Any = None
+TuiLiveView: Any = None
 infer_target_type: Any = None
 assign_workspace_subdirs: Any = None
+collect_local_sources: Any = None
+clone_repository: Any = None
+resolve_diff_scope_context: Any = None
+rewrite_localhost_targets: Any = None
+build_diff_scope_instruction: Any = None
+DiffScopeResult: Any = None
+RepoDiffScope: Any = None
 _load_settings: Any = None
 
 try:
     from strix.config import load_settings as _ls
     from strix.core.agents import AgentCoordinator as _AC
     from strix.core.runner import run_strix_scan as _rss
+    from strix.interface.tui.live_view import TuiLiveView as _TLV
+    from strix.runtime import session_manager
     from strix.interface.utils import (
         assign_workspace_subdirs as _aws,
         infer_target_type as _itt,
@@ -46,6 +60,7 @@ try:
     run_strix_scan = _rss
     ReportState = _RS
     set_global_report_state = _sgrs
+    TuiLiveView = _TLV
     infer_target_type = _itt
     assign_workspace_subdirs = _aws
     collect_local_sources = _cls
@@ -59,57 +74,13 @@ except ImportError:
     pass
 
 
-_MAX_EVENTS = 500
-
-
-class ScanEvent:
-    type: str
-    agent_id: str
-    content: str
-    timestamp: float
-    awaiting_input: bool
-    prompt: str
-    run_name: str
-
-    __slots__ = ("type", "agent_id", "content", "timestamp", "awaiting_input", "prompt", "run_name")
-
-    def __init__(self, type: str = "", agent_id: str = "", content: str = "",
-                 timestamp: float = 0.0, awaiting_input: bool = False,
-                 prompt: str = "", run_name: str = "") -> None:
-        self.type = type
-        self.agent_id = agent_id
-        self.content = content
-        self.timestamp = timestamp
-        self.awaiting_input = awaiting_input
-        self.prompt = prompt
-        self.run_name = run_name
-
-    def to_dict(self) -> dict:
-        return {
-            "type": self.type,
-            "agent_id": self.agent_id,
-            "content": self.content,
-            "timestamp": self.timestamp,
-            "awaiting_input": self.awaiting_input,
-            "prompt": self.prompt,
-            "run_name": self.run_name,
-        }
-
-
 class StrixRuntimeBridge:
-    """Bridge between STRIX 1.0.4 async runtime and Telegram bot sync world.
-
-    Owns a daemon thread with an asyncio event loop, creates AgentCoordinator
-    and passes it to run_strix_scan(). Provides synchronous interface for
-    the bot: start, send_message, stop, poll events, read state.
-    """
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._coordinator: Any = None
         self._scan_future: Optional[Any] = None
-        self._event_queue: queue.Queue[ScanEvent] = queue.Queue(maxsize=_MAX_EVENTS)
         self._stop_event = threading.Event()
         self._root_agent_id: Optional[str] = None
         self._run_name: Optional[str] = None
@@ -123,13 +94,15 @@ class StrixRuntimeBridge:
         self._scan_task: Optional[Any] = None
         self._scan_status: str = "unknown"
         self._closed_runs: set[str] = set()
-        self._tool_calls: dict[str, dict[str, Any]] = {}
-        self._active_tool_call_ids: set[str] = set()
-        self._completed_tool_count: int = 0
-        self._failed_tool_count: int = 0
         self._current_targets: list[str] = []
-        self._streaming: bool = False
-        self._last_agent_message: str = ""
+
+        self._live_view: Any = None
+        self._lv_lock: threading.Lock = threading.Lock()
+        self._last_event_index: int = 0
+        self._waiting_notified: bool = False
+        self._preferred_agent_id: Optional[str] = None
+
+    # ── lifecycle ──────────────────────────────────────────────
 
     @property
     def is_available(self) -> bool:
@@ -138,6 +111,10 @@ class StrixRuntimeBridge:
     @property
     def is_running(self) -> bool:
         return self._scan_status in ("initializing", "running", "waiting")
+
+    @property
+    def is_actively_working(self) -> bool:
+        return self._scan_status in ("initializing", "running")
 
     @property
     def scan_status(self) -> str:
@@ -157,6 +134,8 @@ class StrixRuntimeBridge:
             return 0.0
         return time.time() - self._start_time
 
+    # ── start / stop ───────────────────────────────────────────
+
     def start_scan(
         self,
         targets: list[str],
@@ -169,14 +148,13 @@ class StrixRuntimeBridge:
         local_sources: Optional[list[dict[str, str]]] = None,
     ) -> tuple[bool, str]:
         if not _STRIX_AVAILABLE:
-            return False, "STRIX 1.0.4 no está instalado (strix package not found)"
+            return False, "STRIX no esta instalado (strix package not found)"
         if self.is_running:
-            return False, "Ya hay un escaneo en ejecución"
+            return False, "Ya hay un escaneo en ejecucion"
 
         run_name = f"scan-{uuid.uuid4().hex[:8]}"
         targets_info = self._build_targets_info(targets)
 
-        # Resolve diff scope using STRIX official function
         diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
         if scope_mode == "diff" and diff_base:
             try:
@@ -188,7 +166,6 @@ class StrixRuntimeBridge:
                         "changed_files": diff_result.changed_files,
                         "instruction": diff_result.instruction,
                     }
-                    # Append diff instruction to user instruction
                     if diff_result.instruction:
                         instruction = f"{instruction}\n\n{diff_result.instruction}" if instruction else diff_result.instruction
                 elif isinstance(diff_result, RepoDiffScope):
@@ -206,7 +183,6 @@ class StrixRuntimeBridge:
         elif scope_mode == "auto":
             diff_scope = {"active": True, "diff_base": diff_base or "auto"}
 
-        # Collect local sources using STRIX official function (expects targets_info format)
         strix_sources: list[dict] = []
         if collect_local_sources:
             try:
@@ -237,12 +213,7 @@ class StrixRuntimeBridge:
         }
 
         self._stop_event.clear()
-        self._event_queue = queue.Queue(maxsize=_MAX_EVENTS)  # fresh queue per scan
-        self._tool_calls.clear()
-        self._active_tool_call_ids.clear()
-        self._completed_tool_count = 0
-        self._failed_tool_count = 0
-        self._current_targets = list(targets)  # preserve original targets for display
+        self._current_targets = list(targets)
         self._coordinator = AgentCoordinator()
         self._root_agent_id = None
         self._run_name = run_name
@@ -255,6 +226,11 @@ class StrixRuntimeBridge:
         self._last_error = None
         self._scan_task = None
         self._scan_status = "initializing"
+        self._preferred_agent_id = None
+
+        self._live_view = TuiLiveView()
+        self._last_event_index = 0
+        self._waiting_notified = False
 
         self._thread = threading.Thread(
             target=self._scan_thread,
@@ -302,6 +278,8 @@ class StrixRuntimeBridge:
         assign_workspace_subdirs(info)
         return info
 
+    # ── scan thread (asyncio) ──────────────────────────────────
+
     def _scan_thread(self, scan_config: dict, local_sources: list[dict]) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -314,7 +292,9 @@ class StrixRuntimeBridge:
                         if p is None:
                             self._root_agent_id = aid
                             self._scan_status = "running"
-                            self._emit_event("root_discovered", aid, f"Agente raíz: {aid}")
+                            with self._lv_lock:
+                                self._live_view.upsert_agent(aid, status="running")
+                            self._emit_event("root_discovered", aid, f"Agente raiz: {aid}")
                             return
                 await asyncio.sleep(0.1)
             logger.warning("Root agent not discovered within 60s")
@@ -333,9 +313,14 @@ class StrixRuntimeBridge:
                     if any_running:
                         self._scan_status = "running"
                         self._awaiting_input = False
+                        self._waiting_notified = False
                     elif root_waiting:
+                        was_already_waiting = self._scan_status == "waiting"
                         self._scan_status = "waiting"
                         self._awaiting_input = True
+                        if not was_already_waiting and not self._waiting_notified:
+                            self._waiting_notified = True
+                            self._notify_agent_waiting(root)
                 except Exception:
                     pass
 
@@ -346,10 +331,12 @@ class StrixRuntimeBridge:
             set_global_report_state(rs)
             rs.set_scan_config(scan_config)
 
+            live_view: Any = self._live_view
             current_run = self._run_name
 
             def bound_event_sink(agent_id: str, event: Any) -> None:
-                self._capture_event(current_run, agent_id, event)
+                with self._lv_lock:
+                    live_view.ingest_sdk_event(agent_id, event)
 
             return await run_strix_scan(
                 scan_config=scan_config,
@@ -366,14 +353,44 @@ class StrixRuntimeBridge:
             discovery = asyncio.create_task(_poll_root())
             status_poller = asyncio.create_task(_poll_status())
 
-            result = await self._scan_task
-
-            status_poller.cancel()
-            discovery.cancel()
-            self._scan_status = "completed"
-            self._phase = "completed"
-            self._scan_completed = True
-            self._emit_event("scan_complete", "", "Escaneo finalizado")
+            try:
+                await self._scan_task
+                self._scan_status = "completed"
+                self._phase = "completed"
+                self._scan_completed = True
+                self._emit_event("scan_complete", "", "Escaneo finalizado")
+            except asyncio.CancelledError:
+                self._scan_status = "stopped"
+                self._phase = "stopped"
+                self._scan_completed = True
+                self._emit_event("scan_cancelled", "", "Escaneo cancelado")
+            except Exception as e:
+                self._scan_status = "failed"
+                self._phase = "failed"
+                self._scan_completed = True
+                self._last_error = str(e)
+                self._emit_event("scan_error", "", f"Error en escaneo: {e}")
+            finally:
+                status_poller.cancel()
+                discovery.cancel()
+                # Clean up sandbox via Strix official API
+                current_run = self._run_name or ""
+                if current_run:
+                    try:
+                        await session_manager.cleanup(current_run)
+                        logger.info("Sandbox cleaned up for run %s", current_run)
+                    except Exception as exc:
+                        logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
+                for t in asyncio.all_tasks(self._loop):
+                    t.cancel()
+                if self._loop.is_running():
+                    self._loop.stop()
+                try:
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                except Exception:
+                    pass
+                self._loop.close()
+                self._loop = None
 
         try:
             self._loop.run_until_complete(_main())
@@ -400,220 +417,63 @@ class StrixRuntimeBridge:
             self._loop.close()
             self._loop = None
 
-    def _capture_event(self, run_name: str, agent_id: str, event: Any) -> None:
-        # Block events from closed runs (except terminal events from the bridge)
-        if run_name in self._closed_runs:
-            return
+    # ── event emission (synthetic bridge events) ───────────────
 
-        event_type = getattr(event, "type", "")
-        now = time.time()
-
-        if event_type == "raw_response_event":
-            self._ingest_raw_response(run_name, agent_id, event)
-            return
-        if event_type != "run_item_stream_event":
-            return
-
-        item = getattr(event, "item", None)
-        item_type = getattr(item, "type", "")
-        if item_type == "message_output_item":
-            text = self._sdk_message_text(item)
-            self._streaming = False
-            if text:
-                self._last_agent_message = text
-                se = ScanEvent(
-                    type="agent_message",
-                    agent_id=agent_id,
-                    content=text,
-                    timestamp=now,
-                    run_name=run_name,
-                )
-                self._queue_event(se)
-        elif item_type == "tool_call_item":
-            tool_data = self._sdk_tool_call_data(item)
-            call_id = tool_data["call_id"]
-            self._tool_calls[call_id] = {
-                "call_id": call_id,
-                "tool_name": tool_data["tool_name"],
-                "args": tool_data["args"],
-                "agent_id": agent_id,
-                "status": "running",
-                "started_at": now,
-            }
-            self._active_tool_call_ids.add(call_id)
-            content = json.dumps({
-                "tool_name": tool_data["tool_name"],
-                "args": tool_data["args"],
-            }, ensure_ascii=False)
-            se = ScanEvent(
-                type="tool_call",
-                agent_id=agent_id,
-                content=content,
-                timestamp=now,
-                run_name=run_name,
-            )
-            self._queue_event(se)
-        elif item_type == "tool_call_output_item":
-            tool_data = self._sdk_tool_output_data(item)
-            call_id = tool_data["call_id"]
-            output_raw = tool_data["output"]
-            # Resolve real tool name from stored call data
-            stored = self._tool_calls.get(call_id)
-            # Detect failure from output
-            is_error = False
-            if isinstance(output_raw, str) and ("error" in output_raw.lower()[:200] or "traceback" in output_raw.lower()[:200]):
-                is_error = True
-            if stored:
-                if is_error:
-                    stored["status"] = "failed"
-                    self._failed_tool_count += 1
-                else:
-                    stored["status"] = "completed"
-                    self._completed_tool_count += 1
-                stored["completed_at"] = now
-                self._active_tool_call_ids.discard(call_id)
-                real_name = stored["tool_name"]
-            else:
-                real_name = tool_data["tool_name"]
-                self._completed_tool_count += 1
-            output_text = self._normalize_output(output_raw)[:500]
-            content = json.dumps({
-                "tool_name": real_name,
-                "output": output_text,
-            }, ensure_ascii=False)
-            se = ScanEvent(
-                type="tool_output",
-                agent_id=agent_id,
-                content=content,
-                timestamp=now,
-                run_name=run_name,
-            )
-            self._queue_event(se)
-
-    def _ingest_raw_response(self, run_name: str, agent_id: str, event: Any) -> None:
-        if run_name in self._closed_runs:
-            return
-        data = getattr(event, "data", None)
-        if data is None:
-            return
-        data_type = getattr(data, "type", "")
-        if data_type == "response.output_text.delta":
-            delta = getattr(data, "delta", "")
-            if delta:
-                self._streaming = True
-                se = ScanEvent(
-                    type="stream_delta",
-                    agent_id=agent_id,
-                    content=delta,
-                    timestamp=time.time(),
-                    run_name=run_name,
-                )
-                self._queue_event(se)
-        elif data_type == "tool_call_cancelled":
-            tool_name = getattr(data, "name", "unknown")
-            se = ScanEvent(
-                type="tool_cancelled",
-                agent_id=agent_id,
-                content=tool_name,
-                timestamp=time.time(),
-                run_name=run_name,
-            )
-            self._queue_event(se)
-
-    @staticmethod
-    def _raw_field(raw: Any, key: str, default: Any = None) -> Any:
-        if isinstance(raw, dict):
-            return raw.get(key, default)
-        return getattr(raw, key, default)
-
-    def _sdk_message_text(self, item: Any) -> str:
-        raw = self._raw_field(item, "raw_item", None)
-        content = self._raw_field(raw, "content", [])
-        return self._message_content_text(content)
-
-    @staticmethod
-    def _message_content_text(content: Any) -> str:
-        parts: list[str] = []
-        items = content if isinstance(content, list) else [content]
-        for part in items:
-            if isinstance(part, str):
-                parts.append(part)
-                continue
-            text = StrixRuntimeBridge._raw_field(part, "text")
-            if isinstance(text, str):
-                parts.append(text)
-        return "".join(parts)
-
-    @staticmethod
-    def _normalize_output(raw: Any) -> str:
-        if isinstance(raw, str):
-            return raw
-        try:
-            return json.dumps(raw, ensure_ascii=False, default=str)
-        except Exception:
-            return str(raw)
-
-    @staticmethod
-    def _parse_json_object(value: Any) -> dict[str, Any]:
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-                return parsed if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
-                return {}
-        return value if isinstance(value, dict) else {}
-
-    def _sdk_tool_output_data(self, item: Any) -> dict[str, Any]:
-        raw = self._raw_field(item, "raw_item", None)
-        call_id = str(self._raw_field(raw, "call_id") or self._raw_field(raw, "id") or id(item))
-        # Never use raw "type" field (which is "function_call_output") as tool_name
-        # The caller resolves the real name from _tool_calls[call_id]
-        name = self._raw_field(raw, "name")
-        return {
-            "call_id": call_id,
-            "tool_name": str(name) if name else "tool",
-            "output": getattr(item, "output", self._raw_field(raw, "output")),
-        }
-
-    def _sdk_tool_call_data(self, item: Any) -> dict[str, Any]:
-        raw = self._raw_field(item, "raw_item", None)
-        call_id = str(self._raw_field(raw, "call_id") or self._raw_field(raw, "id") or id(item))
-        tool_name = str(
-            self._raw_field(raw, "name")
-            or self._raw_field(raw, "type")
-            or getattr(item, "title", None)
-            or "tool"
-        )
-        return {
-            "call_id": call_id,
-            "tool_name": tool_name,
-            "args": self._parse_json_object(self._raw_field(raw, "arguments")),
-        }
-
-    def _queue_event(self, se: ScanEvent) -> None:
-        try:
-            self._event_queue.put_nowait(se)
-        except queue.Full:
-            try:
-                self._event_queue.get_nowait()
-                self._event_queue.put_nowait(se)
-            except queue.Empty:
-                pass
-
-    def _emit_event(self, type: str, agent_id: str, content: str) -> None:
+    def _emit_event(self, event_type: str, agent_id: str, content: str) -> None:
         rn = self._run_name or ""
-        # Block non-terminal events for closed runs
-        if rn in self._closed_runs and type != "scan_cancelled":
+        if rn in self._closed_runs and event_type not in ("scan_cancelled",):
             return
-        se = ScanEvent(type=type, agent_id=agent_id, content=content, timestamp=time.time(), run_name=rn)
-        try:
-            self._event_queue.put_nowait(se)
-        except queue.Full:
-            pass
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return
+            event = {
+                "id": f"bridge_{event_type}_{lv._next_event_id}",
+                "type": "system",
+                "agent_id": agent_id,
+                "timestamp": time.time(),
+                "version": 0,
+                "data": {
+                    "event": event_type,
+                    "content": content,
+                    "run_name": rn,
+                },
+            }
+            lv._next_event_id += 1
+            lv.events.append(event)
+
+    def _notify_agent_waiting(self, agent_id: str) -> None:
+        agent_name = ""
+        with self._lv_lock:
+            lv = self._live_view
+            if lv and agent_id in lv.agents:
+                agent_name = lv.agents[agent_id].get("name", agent_id)
+        self._emit_event(
+            "agent_waiting",
+            agent_id,
+            agent_name or agent_id,
+        )
+
+    # ── bot interface (synchronous, called from drain thread) ──
+
+    def poll_events(self) -> list[dict[str, Any]]:
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return []
+            events = list(lv.events[self._last_event_index:])
+            if events:
+                self._last_event_index = len(lv.events)
+        return events
 
     def send_message(self, agent_id: str, text: str) -> bool:
         if not self._coordinator or not self._loop or self._loop.is_closed():
             return False
+
+        with self._lv_lock:
+            lv = self._live_view
+            if lv:
+                lv.record_user_message(agent_id, text)
 
         message = {"from": "user", "content": text, "type": "instruction"}
         try:
@@ -673,129 +533,113 @@ class StrixRuntimeBridge:
             logger.error("stop_scan: STRIX thread still alive after join timeout")
             cancel_failed = True
 
-        # Drain remaining events from this run so they don't leak
-        self._drain_queue_for_run()
-
         return not cancel_failed
 
-    def _drain_queue_for_run(self) -> None:
-        """Drain all events matching current run from the queue."""
-        rn = self._run_name or ""
-        while not self._event_queue.empty():
-            try:
-                ev = self._event_queue.get_nowait()
-                if ev.run_name == rn:
-                    continue  # discard events from this run
-                # Re-queue events from other runs
-                try:
-                    self._event_queue.put_nowait(ev)
-                    break  # can't re-queue, stop draining
-                except queue.Full:
-                    break
-            except queue.Empty:
-                break
+    # ── read-only state (consumed by bot) ──────────────────────
 
-    def poll_events(self) -> list[ScanEvent]:
-        events: list[ScanEvent] = []
-        while not self._event_queue.empty():
-            try:
-                events.append(self._event_queue.get_nowait())
-            except queue.Empty:
-                break
-        self._update_status_from_events(events)
-        return events
-
-    def _update_status_from_events(self, events: list[ScanEvent]) -> None:
-        for ev in events:
-            if ev.awaiting_input:
-                self._awaiting_input = True
-                self._input_prompt = ev.prompt or ""
-            if ev.type == "scan_complete":
-                self._phase = "completed"
-                self._scan_completed = True
-            elif ev.type == "scan_cancelled":
-                self._phase = "stopped"
-                self._scan_completed = True
-            elif ev.type == "scan_error":
-                self._phase = "failed"
-                self._scan_completed = True
-                self._last_error = ev.content
-
-    def get_agent_tree(self) -> Optional[dict]:
-        if not self._coordinator or not self._loop or self._loop.is_closed():
-            return None
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._coordinator.graph_snapshot(),
-                self._loop,
-            )
-            parent_of, statuses, names = future.result(timeout=10)
+    def get_agent_tree(self) -> Optional[dict[str, Any]]:
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return None
             tree: dict[str, Any] = {"agents": {}}
-            for aid, parent in parent_of.items():
-                tree["agents"][aid] = {
-                    "id": aid,
-                    "name": names.get(aid, aid),
-                    "status": str(statuses.get(aid, "unknown")),
-                    "parent_id": parent,
-                }
-            return tree
-        except Exception as exc:
-            logger.warning("get_agent_tree failed: %s", exc)
-            return None
+            for aid, info in lv.agents.items():
+                tree["agents"][aid] = dict(info)
+        return tree
 
     def get_tool_state(self) -> dict[str, Any]:
-        """Return current tool state for live panel display."""
-        active = [t for t in self._tool_calls.values() if t["status"] == "running"]
-        completed = [t for t in self._tool_calls.values() if t["status"] == "completed"]
-        failed = [t for t in self._tool_calls.values() if t["status"] == "failed"]
-        current_tool = active[-1] if active else None
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return {
+                    "active_count": 0,
+                    "completed_count": 0,
+                    "failed_count": 0,
+                    "current_tool_name": "",
+                    "current_tool_args": {},
+                    "current_tool_status": "idle",
+                    "active_agent_name": "",
+                    "streaming": False,
+                    "awaiting_input": self._awaiting_input,
+                    "input_prompt": self._input_prompt,
+                }
 
-        # Resolve agent name from current tool or graph_snapshot
-        agent_name = ""
-        if current_tool:
-            agent_id = current_tool.get("agent_id", "")
-            tree = self.get_agent_tree()
-            if tree:
-                for aid, info in tree.get("agents", {}).items():
-                    if aid == agent_id:
-                        agent_name = info.get("name", aid)[:8]
-                        break
+            running_tools: list[dict] = []
+            completed = 0
+            failed = 0
+            for ev in lv.events:
+                if ev.get("type") != "tool":
+                    continue
+                data = ev.get("data", {})
+                status = data.get("status", "")
+                if status == "running":
+                    running_tools.append(data)
+                elif status == "completed":
+                    completed += 1
+                elif status == "failed":
+                    failed += 1
+
+            current_tool = running_tools[-1] if running_tools else None
+            agent_name = ""
+            if current_tool:
+                agent_id = current_tool.get("agent_id", "")
+                if agent_id in lv.agents:
+                    agent_name = lv.agents[agent_id].get("name", agent_id)[:8]
+
+            streaming = any(
+                ev.get("type") == "chat"
+                and ev.get("data", {}).get("metadata", {}).get("streaming")
+                for ev in reversed(lv.events)
+            )
 
         return {
-            "active_count": len(active),
-            "completed_count": self._completed_tool_count,
-            "failed_count": self._failed_tool_count,
+            "active_count": len(running_tools),
+            "completed_count": completed,
+            "failed_count": failed,
             "current_tool_name": current_tool["tool_name"] if current_tool else "",
-            "current_tool_args": current_tool.get("args") if current_tool else {},
-            "current_tool_status": "running",
+            "current_tool_args": current_tool.get("args", {}) if current_tool else {},
+            "current_tool_status": "running" if current_tool else "idle",
             "active_agent_name": agent_name,
-            "streaming": self._streaming,
+            "streaming": streaming,
             "awaiting_input": self._awaiting_input,
             "input_prompt": self._input_prompt,
         }
 
     def list_agents(self) -> list[dict]:
-        """Return flat list of agents from coordinator."""
         tree = self.get_agent_tree()
         if not tree:
             return []
         return list(tree["agents"].values())
 
-    def _discover_root_agent(self) -> None:
-        """Discover root agent from coordinator (parent=None) and set _root_agent_id."""
-        if not self._coordinator:
-            return
+    def agent_timeline(self, agent_id: str) -> list[dict[str, Any]]:
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return []
+            events = list(lv.events_for_agent(agent_id))
+        return events
+
+    def stop_agent(self, agent_id: str) -> bool:
+        if not self._coordinator or not self._loop or self._loop.is_closed():
+            return False
         try:
-            parent_of = getattr(self._coordinator, "parent_of", None)
-            if parent_of is None:
-                return
-            for aid, parent in parent_of.items():
-                if parent is None:
-                    self._root_agent_id = aid
-                    logger.debug("Root agent discovered: %s", aid)
-                    return
+            future = asyncio.run_coroutine_threadsafe(
+                self._coordinator.cancel_descendants_graceful(agent_id),
+                self._loop,
+            )
+            future.result(timeout=30)
+            logger.info("stop_agent(%s): cancelled gracefully", agent_id)
+            return True
         except Exception as exc:
-            logger.debug("Root agent discovery failed: %s", exc)
+            logger.warning("stop_agent(%s) failed: %s", agent_id, exc)
+            return False
+
+    def get_vulnerabilities(self) -> list[dict[str, Any]]:
+        from strix.report.state import get_global_report_state
+        rs = get_global_report_state()
+        if rs is None:
+            return []
+        return list(rs.vulnerability_reports)
 
     def get_run_status(self) -> dict:
         status: dict[str, Any] = {
@@ -818,6 +662,33 @@ class StrixRuntimeBridge:
                     pass
             status["run_dir"] = str(run_dir)
         return status
+
+    def to_status_dict(self) -> dict[str, Any]:
+        status = self.get_run_status()
+
+        phase = self._phase
+        if self._scan_status == "initializing":
+            phase = "initializing"
+        elif not status.get("is_running") and not status.get("is_active"):
+            if not self._last_error and self._phase == "running":
+                phase = "completed"
+
+        state: dict[str, Any] = {
+            "run_name": status.get("run_name", "pending"),
+            "target": self._current_targets,
+            "mode": status.get("mode", "deep"),
+            "phase": phase,
+            "elapsed": _fmt_duration(status["elapsed"]),
+            "error": self._last_error,
+            "is_active": self.is_running,
+            "awaiting_input": self._awaiting_input,
+            "input_prompt": self._input_prompt,
+        }
+
+        if not status.get("is_running") and not status.get("is_active"):
+            state["is_active"] = False
+
+        return state
 
     def cleanup(self) -> None:
         self._stop_event.set()
@@ -852,39 +723,6 @@ class StrixRuntimeBridge:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:
                 pass
-
-    def to_status_dict(self) -> dict[str, Any]:
-        """Build a flat status dict compatible with job_status_text().
-
-        Does NOT drain the event queue. Reads from cached state that is
-        updated by poll_events(). Callers MUST call poll_events() first
-        in their main loop to keep the cache current.
-        """
-        status = self.get_run_status()
-
-        phase = self._phase
-        if self._scan_status == "initializing":
-            phase = "initializing"
-        elif not status.get("is_running") and not status.get("is_active"):
-            if not self._last_error and self._phase == "running":
-                phase = "completed"
-
-        state: dict[str, Any] = {
-            "run_name": status.get("run_name", "pending"),
-            "target": self._current_targets,
-            "mode": status.get("mode", "deep"),
-            "phase": phase,
-            "elapsed": _fmt_duration(status["elapsed"]),
-            "error": self._last_error,
-            "is_active": self.is_running,
-            "awaiting_input": self._awaiting_input,
-            "input_prompt": self._input_prompt,
-        }
-
-        if not status.get("is_running") and not status.get("is_active"):
-            state["is_active"] = False
-
-        return state
 
 
 def _fmt_duration(seconds: float) -> str:

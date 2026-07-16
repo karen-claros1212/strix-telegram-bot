@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from strix_telegram_bot.telegram import send_message, edit_message
-from strix_telegram_bot.ui.keyboards import main_menu, parse_callback, back_to_menu
+from strix_telegram_bot.ui.keyboards import main_menu, scan_mode_menu, parse_callback, back_to_menu
 from strix_telegram_bot.ui.messages import main_menu_text, help_text
 from strix_telegram_bot.ui.panels import get_panel_manager
-from strix_telegram_bot.models import MenuState
+from strix_telegram_bot.models import MenuState, ScanMode
 
 
 def cmd_start(bot: Any, update: dict) -> None:
@@ -41,6 +41,24 @@ def callback_menu(bot: Any, update: dict) -> None:
 
     elif action == "scan":
         pm = get_panel_manager(chat_id)
+        pm.push(MenuState.SCAN_MODE)
+        edit_message(
+            bot, chat_id, msg_id,
+            "Selecciona el modo de escaneo:",
+            reply_markup=scan_mode_menu(),
+        )
+
+    elif action == "mode":
+        if len(parts) < 3:
+            return
+        mode_str = parts[2]
+        try:
+            mode = ScanMode(mode_str)
+        except ValueError:
+            return
+
+        pm = get_panel_manager(chat_id)
+        pm._selected_scan_mode = mode
         pm.push(MenuState.WAITING_FOR_TARGETS)
         from strix_telegram_bot.ui.messages import waiting_for_targets_text
         edit_message(
