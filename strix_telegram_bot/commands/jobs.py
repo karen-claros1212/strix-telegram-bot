@@ -307,13 +307,13 @@ def _show_agent_chat(bot: Any, chat_id: str, msg_id: str, bridge, agent_id: str,
                 streaming = data.get("metadata", {}).get("streaming", False)
                 if streaming:
                     lines.append(f">> STRIX (escribiendo)")
-                    lines.append(f"   {content[:200]}")
+                    lines.append(f"   {content}")
                 elif role == "user":
                     lines.append(f">> Tu")
-                    lines.append(f"   {content[:200]}")
+                    lines.append(f"   {content}")
                 elif role == "assistant":
                     lines.append(f">> STRIX")
-                    lines.append(f"   {content[:300]}")
+                    lines.append(f"   {content}")
             elif ev_type == "tool":
                 from strix_telegram_bot.strix.telegram_renderers import render_tool_event
                 name = data.get("tool_name", "tool")

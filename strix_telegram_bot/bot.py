@@ -36,6 +36,8 @@ _GITHUB_RE = re.compile(r"github\.com[:/][^\s,]+")
 
 
 class StrixBot:
+    _MAX_MSG = 4000
+
     def __init__(self) -> None:
         self._updates_offset: Optional[int] = None
         self._running = False
@@ -45,9 +47,10 @@ class StrixBot:
         self._active_job_message_id: Optional[int] = None
         self._active_job_run_name: Optional[str] = None
 
-        self._streaming_message_id: Optional[int] = None
-        self._streaming_event_id: Optional[str] = None
-        self._streaming_version: int = 0
+        # Chat fragmentation: event_id -> list of Telegram message_ids
+        self._chat_fragments: dict[str, list[int]] = {}
+        self._chat_fragment_count: dict[str, int] = {}
+        self._chat_event_version: dict[str, int] = {}
         self._tool_message_ids: dict[str, int] = {}
 
         self._active_chat_agent_id: Optional[str] = None
@@ -608,31 +611,16 @@ class StrixBot:
                     continue
                 raw = self._sanitize_agent_content(content)
 
+                header = "STRIX:\n"
+                full_text = header + raw
+
                 if streaming:
-                    # Provisional: create or edit a single message
-                    if self._streaming_event_id != ev_id:
-                        # New streaming session — send first fragment
-                        resp = self._send_long_message(chat_id, f"STRIX:\n{raw[:4000]}", send_message)
-                        if resp:
-                            self._streaming_message_id = resp.get("message_id")
-                        self._streaming_event_id = ev_id
-                        self._streaming_version = ev_version
-                    elif ev_version > self._streaming_version:
-                        # Update existing message with accumulated content
-                        if self._streaming_message_id:
-                            edit_message(self, chat_id, self._streaming_message_id,
-                                        f"STRIX:\n{raw[:4000]}", parse_mode=None)
-                        self._streaming_version = ev_version
+                    self._update_chat_fragments(chat_id, ev_id, ev_version, full_text)
                 else:
-                    # Final message: if was streaming, finalize the provisional; else send new
-                    if self._streaming_event_id == ev_id and self._streaming_message_id:
-                        edit_message(self, chat_id, self._streaming_message_id,
-                                    f"STRIX:\n{raw[:4000]}", parse_mode=None)
-                        self._streaming_message_id = None
-                        self._streaming_event_id = None
-                        self._streaming_version = 0
+                    if ev_id in self._chat_fragments:
+                        self._finalize_chat_fragments(chat_id, ev_id, ev_version, full_text)
                     else:
-                        self._send_long_message(chat_id, f"STRIX:\n{raw}", send_message)
+                        self._send_fragmented(chat_id, ev_id, ev_version, full_text)
 
             elif ev_type == "tool":
                 status = data.get("status", "")
@@ -647,10 +635,11 @@ class StrixBot:
                     resp = send_message(self, chat_id, text, parse_mode=None)
                     if resp and call_id:
                         self._tool_message_ids[call_id] = resp.get("message_id")
-                elif status in ("completed", "failed") and call_id:
-                    msg_id = self._tool_message_ids.get(call_id)
-                    if msg_id:
-                        edit_message(self, chat_id, msg_id, text, parse_mode=None)
+                elif status in ("completed", "failed"):
+                    if call_id and call_id in self._tool_message_ids:
+                        edit_message(self, chat_id, self._tool_message_ids[call_id], text, parse_mode=None)
+                    else:
+                        send_message(self, chat_id, text, parse_mode=None)
 
             elif ev_type == "system":
                 event_name = data.get("event", "")
@@ -680,12 +669,85 @@ class StrixBot:
 
     def _send_long_message(self, chat_id: int, text: str, sender) -> Optional[dict]:
         """Split text into valid Telegram messages (max 4096 chars each)."""
-        MAX_LEN = 4000
+        MAX_LEN = self._MAX_MSG
         last_resp = None
         for i in range(0, len(text), MAX_LEN):
             frag = text[i:i + MAX_LEN]
             last_resp = sender(self, chat_id, frag, parse_mode=None)
         return last_resp
+
+    def _split_into_fragments(self, text: str) -> list[str]:
+        """Split text into Telegram-safe fragments of _MAX_MSG chars."""
+        parts: list[str] = []
+        for i in range(0, len(text), self._MAX_MSG):
+            parts.append(text[i:i + self._MAX_MSG])
+        return parts
+
+    def _update_chat_fragments(
+        self, chat_id: int, ev_id: str, ev_version: int, full_text: str
+    ) -> None:
+        """Update (or create) fragmented Telegram messages for a streaming event.
+
+        Skips if version hasn't changed (same content). Splits full_text into
+        fragments, edits existing message_ids, creates new ones as needed.
+        Never truncates silently.
+        """
+        existing_version = self._chat_event_version.get(ev_id, -1)
+        if ev_version <= existing_version:
+            return
+
+        fragments = self._split_into_fragments(full_text)
+        existing_ids = self._chat_fragments.get(ev_id, [])
+        existing_count = len(existing_ids)
+
+        for i, frag in enumerate(fragments):
+            if i < existing_count:
+                try:
+                    edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None)
+                except Exception:
+                    pass
+            else:
+                resp = send_message(self, chat_id, frag, parse_mode=None)
+                if resp and resp.get("message_id"):
+                    existing_ids.append(resp["message_id"])
+
+        self._chat_fragments[ev_id] = existing_ids
+        self._chat_event_version[ev_id] = ev_version
+
+    def _finalize_chat_fragments(
+        self, chat_id: int, ev_id: str, ev_version: int, full_text: str
+    ) -> None:
+        """Finalize a streaming event: update all fragments, then clean up."""
+        fragments = self._split_into_fragments(full_text)
+        existing_ids = self._chat_fragments.get(ev_id, [])
+        existing_count = len(existing_ids)
+
+        for i, frag in enumerate(fragments):
+            if i < existing_count:
+                try:
+                    edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None)
+                except Exception:
+                    pass
+            else:
+                resp = send_message(self, chat_id, frag, parse_mode=None)
+                if resp and resp.get("message_id"):
+                    existing_ids.append(resp["message_id"])
+
+        self._chat_fragments.pop(ev_id, None)
+        self._chat_event_version.pop(ev_id, None)
+
+    def _send_fragmented(
+        self, chat_id: int, ev_id: str, ev_version: int, full_text: str
+    ) -> None:
+        """Send a non-streaming event as one or more fragments."""
+        fragments = self._split_into_fragments(full_text)
+        ids: list[int] = []
+        for frag in fragments:
+            resp = send_message(self, chat_id, frag, parse_mode=None)
+            if resp and resp.get("message_id"):
+                ids.append(resp["message_id"])
+        self._chat_fragments[ev_id] = ids
+        self._chat_event_version[ev_id] = ev_version
 
     @staticmethod
     def _sanitize_tool_args(args: dict) -> str:

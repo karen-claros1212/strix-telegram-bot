@@ -9,9 +9,22 @@ See: strix/interface/tui/renderers/ for the official TUI renderers.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 _TOOL_RENDERERS: dict[str, Any] = {}
+
+_EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
+_SESSION_RE = re.compile(r"Process running with session ID (\d+)")
+_OUTPUT_HEADER = "\nOutput:\n"
+
+STRIP_PATTERNS = [
+    r"^Chunk ID: [0-9a-f]+\s*$",
+    r"^Wall time: [\d.]+ seconds\s*$",
+    r"^Process exited with code -?\d+\s*$",
+    r"^Process running with session ID \d+\s*$",
+    r"^Original token count: \d+\s*$",
+]
 
 
 def register(name: str):
@@ -53,15 +66,22 @@ def _render_default(tool_name: str, status: str, args: dict, result: Any) -> str
         ● In progress...        (if running)
         ✓ Done                  (if completed, no result)
         ✗ Failed                (if failed, no result)
+
+    Args and result are truncated at safe limits to prevent Telegram overflow.
+    Truncation is explicit with '...' marker.
     """
     lines = [f"→ Using tool {tool_name}"]
 
     for k, v in args.items():
         str_v = str(v)
+        if len(str_v) > 200:
+            str_v = str_v[:197] + "..."
         lines.append(f"  {k}: {str_v}")
 
     if status in ("completed", "failed", "error") and result is not None:
         result_str = str(result)
+        if len(result_str) > 500:
+            result_str = result_str[:497] + "..."
         lines.append(f"Result: {result_str}")
     else:
         icon = {
@@ -83,6 +103,7 @@ def _render_default(tool_name: str, status: str, args: dict, result: Any) -> str
 def _render_shell(status: str, args: dict, result: Any) -> str:
     """Shell renderer mirroring TUI shell_renderer.py.
 
+    Parses real SDK string results via _parse_sdk_shell_result().
     TUI limits: MAX_OUTPUT_LINES=50, MAX_LINE_LENGTH=200.
     Truncation marker: '... N lines truncated ...' when lines omitted.
     """
@@ -95,24 +116,25 @@ def _render_shell(status: str, args: dict, result: Any) -> str:
         lines.append("   ● In progress...")
         return "\n".join(lines)
 
-    if status == "completed" and isinstance(result, dict):
-        exit_code = result.get("exit_code", result.get("exitcode", "?"))
-        output = result.get("output", "") or result.get("stdout", "")
-        lines = [">> shell"]
-        if cmd:
-            lines.append(f"   $ {cmd[:200]}")
-        lines.append(f"   exit: {exit_code}")
-        if output:
-            truncated = _truncate_output(output, max_lines=50, max_line_len=200)
-            lines.append(f"   {truncated}")
-        return "\n".join(lines)
+    if status in ("completed", "failed"):
+        parsed = _parse_sdk_shell_result(result)
+        output = parsed.get("content", "")
+        exit_code = parsed.get("exit_code")
 
-    if status == "failed":
-        lines = [">> shell ✗ Failed"]
+        if status == "failed":
+            lines = [">> shell ✗ Failed"]
+        else:
+            lines = [">> shell"]
         if cmd:
             lines.append(f"   $ {cmd[:200]}")
-        if isinstance(result, str):
-            lines.append(f"   {result[:200]}")
+        if exit_code is not None:
+            lines.append(f"   exit: {exit_code}")
+        if output:
+            cleaned = _clean_shell_output(output)
+            truncated = _truncate_output(cleaned, max_lines=50, max_line_len=200)
+            lines.append(f"   {truncated}")
+        elif exit_code is not None and exit_code != 0 and status == "completed":
+            lines.append(f"   exit {exit_code}")
         return "\n".join(lines)
 
     return _render_default("shell", status, args, result)
@@ -479,6 +501,65 @@ def _render_send_agent(status: str, args: dict, result: Any) -> str:
 
 
 # ── Helpers ──────────────────────────────────────────────────────
+
+def _parse_sdk_shell_result(result: Any) -> dict[str, Any]:
+    """Parse real SDK shell result (string or dict) into normalized dict.
+
+    The SDK returns a header-prefixed string ending with 'Output:\\n<actual>'.
+    We extract content, exit_code, and session_id.
+    For dict results, normalize output/stdout -> content, exitcode -> exit_code.
+    Mirrors TUI shell_renderer._parse_sdk_shell_result().
+    """
+    if isinstance(result, dict):
+        parsed = dict(result)
+        # Normalize TUI/SDK key names to canonical keys
+        if "content" not in parsed:
+            for key in ("output", "stdout", "data"):
+                if key in parsed:
+                    parsed["content"] = parsed[key]
+                    break
+        if "exit_code" not in parsed and "exitcode" in parsed:
+            parsed["exit_code"] = parsed["exitcode"]
+        return parsed
+    if not isinstance(result, str):
+        return {"content": "" if result is None else str(result)}
+
+    exit_match = _EXIT_RE.search(result)
+    session_match = _SESSION_RE.search(result)
+    idx = result.find(_OUTPUT_HEADER)
+    content = result[idx + len(_OUTPUT_HEADER):] if idx >= 0 else result
+
+    parsed_result: dict[str, Any] = {"content": content}
+    if exit_match:
+        parsed_result["exit_code"] = int(exit_match.group(1))
+    if session_match:
+        parsed_result["session_id"] = int(session_match.group(1))
+    return parsed_result
+
+
+def _clean_shell_output(output: str) -> str:
+    """Clean shell output: strip noise patterns, control bytes, blank lines.
+
+    Mirrors TUI shell_renderer._clean_output().
+    """
+    cleaned = output
+    for pattern in STRIP_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.MULTILINE)
+
+    if cleaned.strip():
+        lines = cleaned.splitlines()
+        filtered: list[str] = []
+        for line in lines:
+            if not filtered and not line.strip():
+                continue
+            if line.strip() == "Output:":
+                continue
+            filtered.append(line)
+        while filtered and not filtered[-1].strip():
+            filtered.pop()
+        cleaned = "\n".join(filtered)
+
+    return cleaned.strip()
 
 def _truncate_str(s: str, max_len: int) -> str:
     if len(s) <= max_len:

@@ -122,8 +122,7 @@ class TestStreamingRenderer:
         ev2 = _make_chat_event("chat_1", version=1, content="final content", streaming=False)
         bot._process_scan_events([ev2])
 
-        assert bot._streaming_message_id is None
-        assert bot._streaming_event_id is None
+        assert "chat_1" not in bot._chat_fragments
         assert mock_edit.call_count == 1
 
     def test_streaming_reset_on_new_stream(self, bot, mock_telegram):
@@ -137,7 +136,7 @@ class TestStreamingRenderer:
         bot._process_scan_events([ev2])
 
         assert mock_send.call_count == 2
-        assert bot._streaming_event_id == "chat_2"
+        assert "chat_2" in bot._chat_fragments
 
     def test_non_streaming_sends_direct(self, bot, mock_telegram):
         mock_send, _ = mock_telegram
@@ -202,11 +201,13 @@ class TestToolRenderer:
         assert bot._tool_message_ids["call_x"] == 300
         assert bot._tool_message_ids.get("call_y") is not None
 
-    def test_tool_output_without_running_not_tracked(self, bot, mock_telegram):
-        _, mock_edit = mock_telegram
+    def test_tool_output_without_running_sends_new_message(self, bot, mock_telegram):
+        mock_send, mock_edit = mock_telegram
+        mock_send.return_value = {"message_id": 400}
         ev = _make_tool_event(call_id="unknown", tool_name="tool", status="completed",
                               result="orphan")
         bot._process_scan_events([ev])
+        assert mock_send.call_count == 1
         assert mock_edit.call_count == 0
 
 
@@ -487,3 +488,130 @@ class TestNoSdkEventsLeaked:
         sanitized = StrixBot._sanitize_agent_content(content)
         assert "AAAAAAAAAA" not in sanitized
         assert "[imagen]" in sanitized
+
+
+class TestChatFragmentation:
+    """Defect 1: chat messages must use fragmentation, not raw[:4000]."""
+
+    def test_long_content_creates_multiple_fragments(self, bot, mock_telegram):
+        mock_send, _ = mock_telegram
+        mock_send.return_value = {"message_id": 100}
+        long_text = "X" * 8500
+        ev = _make_chat_event("chat_1", version=0, content=long_text, streaming=True)
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 3
+        assert bot._chat_fragments["chat_1"] == [100, 100, 100]
+
+    def test_finalize_clears_fragments(self, bot, mock_telegram):
+        mock_send, mock_edit = mock_telegram
+        mock_send.return_value = {"message_id": 100}
+        ev1 = _make_chat_event("chat_1", version=0, content="partial", streaming=True)
+        bot._process_scan_events([ev1])
+        assert "chat_1" in bot._chat_fragments
+        ev2 = _make_chat_event("chat_1", version=1, content="final", streaming=False)
+        bot._process_scan_events([ev2])
+        assert "chat_1" not in bot._chat_fragments
+
+    def test_non_streaming_sends_fragmented(self, bot, mock_telegram):
+        mock_send, _ = mock_telegram
+        mock_send.return_value = {"message_id": 200}
+        long_text = "A" * 5000
+        ev = _make_chat_event("chat_1", version=0, content=long_text, streaming=False)
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 2
+
+    def test_chat_view_no_content_truncation(self, bot, mock_telegram):
+        mock_send, _ = mock_telegram
+        mock_send.return_value = {"message_id": 100}
+        content = "X" * 500
+        ev = _make_chat_event("chat_1", version=0, content=content, streaming=False)
+        bot._process_scan_events([ev])
+        sent_text = mock_send.call_args_list[0][0][2]
+        assert len(sent_text) >= 500
+
+
+class TestShellRendererSDKString:
+    """Defect 2: shell renderer must parse real SDK string results."""
+
+    def test_sdk_string_result_parsed(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        sdk_result = (
+            "Chunk ID: a1b2c3d4\n"
+            "Wall time: 0.5 seconds\n"
+            "Process exited with code 0\n"
+            "Output:\n"
+            "hello world"
+        )
+        text = render_tool_event("execute_command", "completed", {"command": "echo hi"}, sdk_result)
+        assert "hello world" in text
+        assert "exit: 0" in text
+        assert "Chunk ID" not in text
+
+    def test_sdk_string_nonzero_exit(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        sdk_result = (
+            "Chunk ID: xyz\n"
+            "Process exited with code 1\n"
+            "Output:\n"
+            "error: not found"
+        )
+        text = render_tool_event("execute_command", "completed", {"command": "bad"}, sdk_result)
+        assert "exit: 1" in text
+        assert "not found" in text
+
+    def test_dict_result_still_works(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("execute_command", "completed", {"command": "ls"}, {"exit_code": 0, "output": "file.txt"})
+        assert "exit: 0" in text
+        assert "file.txt" in text
+
+
+class TestOrphanToolCompleted:
+    """Defect 3: orphan tool completed must send new message, not discard."""
+
+    def test_orphan_completed_sends_new_message(self, bot, mock_telegram):
+        mock_send, mock_edit = mock_telegram
+        mock_send.return_value = {"message_id": 500}
+        ev = _make_tool_event(call_id="orphan", tool_name="nuclei", status="completed",
+                              result="found 3 vulns")
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 1
+        text = mock_send.call_args[0][2]
+        assert "found 3 vulns" in text
+        assert mock_edit.call_count == 0
+
+    def test_tracked_completed_still_edits(self, bot, mock_telegram):
+        mock_send, mock_edit = mock_telegram
+        mock_send.return_value = {"message_id": 500}
+        bot._tool_message_ids["tracked"] = 500
+        ev = _make_tool_event(call_id="tracked", tool_name="curl", status="completed",
+                              result="ok")
+        bot._process_scan_events([ev])
+        assert mock_edit.call_count == 1
+        assert mock_send.call_count == 0
+
+
+class TestFallbackTruncation:
+    """Defect 4: oversized tool cards must be truncated in fallback renderer."""
+
+    def test_long_arg_truncated(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        long_val = "A" * 300
+        text = render_tool_event("curl", "completed", {"url": long_val}, "ok")
+        assert len([l for l in text.split("\n") if "url:" in l][0]) < 250
+        assert "..." in text
+
+    def test_long_result_truncated(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        long_result = "B" * 600
+        text = render_tool_event("curl", "completed", {}, long_result)
+        result_line = [l for l in text.split("\n") if "Result:" in l][0]
+        assert len(result_line) < 550
+        assert "..." in result_line
+
+    def test_short_content_not_truncated(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("curl", "completed", {"url": "short"}, "ok")
+        assert "short" in text
+        assert "ok" in text
+        assert "..." not in text
