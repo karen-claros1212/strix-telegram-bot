@@ -281,8 +281,8 @@ class StrixRuntimeBridge:
     # ── scan thread (asyncio) ──────────────────────────────────
 
     def _scan_thread(self, scan_config: dict, local_sources: list[dict]) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
+        loop = asyncio.new_event_loop()
+        self._loop = loop
 
         async def _poll_root() -> None:
             for _ in range(600):
@@ -356,66 +356,79 @@ class StrixRuntimeBridge:
 
             try:
                 await self._scan_task
-                self._scan_status = "completed"
-                self._phase = "completed"
-                self._scan_completed = True
-                self._emit_event("scan_complete", "", "Escaneo finalizado")
             except asyncio.CancelledError:
                 self._scan_status = "stopped"
                 self._phase = "stopped"
                 self._scan_completed = True
                 self._emit_event("scan_cancelled", "", "Escaneo cancelado")
+                return
             except Exception as e:
                 self._scan_status = "failed"
                 self._phase = "failed"
                 self._scan_completed = True
                 self._last_error = str(e)
                 self._emit_event("scan_error", "", f"Error en escaneo: {e}")
+                return
             finally:
                 status_poller.cancel()
                 discovery.cancel()
-                # Clean up sandbox via Strix official API
-                current_run = self._run_name or ""
-                if current_run:
-                    try:
-                        await session_manager.cleanup(current_run)
-                        logger.info("Sandbox cleaned up for run %s", current_run)
-                    except Exception as exc:
-                        logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
-                for t in asyncio.all_tasks(self._loop):
-                    t.cancel()
-                if self._loop.is_running():
-                    self._loop.stop()
                 try:
-                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                    await asyncio.gather(status_poller, discovery, return_exceptions=True)
                 except Exception:
                     pass
-                self._loop.close()
-                self._loop = None
+
+            # Scan completed successfully — cleanup before announcing
+            current_run = self._run_name or ""
+            cleanup_error = None
+            if current_run:
+                try:
+                    await session_manager.cleanup(current_run)
+                    logger.info("Sandbox cleaned up for run %s", current_run)
+                except Exception as exc:
+                    logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
+                    cleanup_error = str(exc)
+
+            self._scan_status = "completed"
+            self._phase = "completed"
+            self._scan_completed = True
+            self._emit_event("scan_complete", "", "Escaneo finalizado")
+
+            if cleanup_error:
+                logger.warning(
+                    "Scan %s completed but sandbox cleanup failed: %s",
+                    current_run, cleanup_error,
+                )
 
         try:
-            self._loop.run_until_complete(_main())
+            loop.run_until_complete(_main())
         except asyncio.CancelledError:
             self._scan_status = "stopped"
             self._phase = "stopped"
             self._scan_completed = True
             self._emit_event("scan_cancelled", "", "Escaneo cancelado")
         except Exception as e:
-            self._scan_status = "failed"
-            self._phase = "failed"
-            self._scan_completed = True
-            self._last_error = str(e)
-            self._emit_event("scan_error", "", f"Error en escaneo: {e}")
+            if self._scan_status != "completed":
+                self._scan_status = "failed"
+                self._phase = "failed"
+                self._scan_completed = True
+                self._last_error = str(e)
+                self._emit_event("scan_error", "", f"Error en escaneo: {e}")
+            else:
+                logger.warning("Post-scan teardown error (scan was completed): %s", e)
         finally:
-            for t in asyncio.all_tasks(self._loop):
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for t in pending:
                 t.cancel()
-            if self._loop.is_running():
-                self._loop.stop()
+            if pending:
+                try:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
             try:
-                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_asyncgens())
             except Exception:
                 pass
-            self._loop.close()
+            loop.close()
             self._loop = None
 
     # ── event emission (synthetic bridge events) ───────────────
@@ -717,13 +730,6 @@ class StrixRuntimeBridge:
                 pass
         self._scan_completed = True
         self._scan_status = "stopped"
-        if self._thread:
-            self._thread.join(timeout=5)
-        if self._loop and not self._loop.is_closed():
-            try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
-            except Exception:
-                pass
 
 
 def _fmt_duration(seconds: float) -> str:
