@@ -564,6 +564,12 @@ class StrixBot:
                 except Exception:
                     pass
 
+        # Check for waiting transition (from coordinator, not inferred)
+        if self._active_job_chat_id is not None and self._bridge.is_running:
+            waiting_ev = self._bridge.check_waiting_notification()
+            if waiting_ev:
+                self._process_scan_events([waiting_ev])
+
     @staticmethod
     def _sanitize_agent_content(content: str) -> str:
         """Strip base64, data URLs, internal paths, and raw tool output from agent messages."""

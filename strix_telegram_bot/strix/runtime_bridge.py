@@ -1,8 +1,13 @@
-"""StrixRuntimeBridge — asyncio thread wrapping AgentCoordinator + run_strix_scan.
+"""StrixRuntimeBridge — thin projection of the official Strix TUI for Telegram.
 
-TuiLiveView is the single source of truth for all scan events.
-No parallel event queue or duplicate state — everything flows through
-the same TuiLiveView instance that the official TUI uses.
+Telegram does NOT control or infer scan state. It reads directly from:
+  - AgentCoordinator.statuses   → agent state (running/waiting/completed/...)
+  - TuiLiveView.agents          → agent tree
+  - TuiLiveView.events          → chat / tool stream with event.id:event.version
+  - ReportState                 → vulnerabilities
+  - run_strix_scan return       → scan finished
+
+No parallel event queue. No duplicate state. No synthetic lifecycle events.
 """
 
 from __future__ import annotations
@@ -80,27 +85,23 @@ class StrixRuntimeBridge:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._coordinator: Any = None
-        self._scan_future: Optional[Any] = None
         self._stop_event = threading.Event()
         self._root_agent_id: Optional[str] = None
         self._run_name: Optional[str] = None
         self._scan_image: str = ""
         self._start_time: float = 0.0
         self._scan_completed: bool = False
-        self._awaiting_input: bool = False
-        self._input_prompt: str = ""
-        self._phase: str = "running"
-        self._last_error: Optional[str] = None
         self._scan_task: Optional[Any] = None
-        self._scan_status: str = "unknown"
         self._closed_runs: set[str] = set()
         self._current_targets: list[str] = []
+        self._last_error: Optional[str] = None
 
         self._live_view: Any = None
         self._lv_lock: threading.Lock = threading.Lock()
-        self._last_event_index: int = 0
-        self._waiting_notified: bool = False
+        self._seen_versions: dict[str, int] = {}
         self._preferred_agent_id: Optional[str] = None
+
+        self._last_waiting_root: Optional[str] = None
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -110,23 +111,46 @@ class StrixRuntimeBridge:
 
     @property
     def is_running(self) -> bool:
-        return self._scan_status in ("initializing", "running", "waiting")
+        if self._scan_completed:
+            return False
+        if not self._coordinator:
+            return self._scan_task is not None
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            if not statuses:
+                return self._scan_task is not None
+            root = self._root_agent_id
+            if root and root in statuses:
+                s = str(statuses[root])
+                return s in ("running", "waiting")
+            return any(str(s) == "running" for s in statuses.values())
+        except Exception:
+            return self._scan_task is not None
 
     @property
     def is_actively_working(self) -> bool:
-        return self._scan_status in ("initializing", "running")
-
-    @property
-    def scan_status(self) -> str:
-        return self._scan_status
-
-    @property
-    def run_name(self) -> Optional[str]:
-        return self._run_name
+        if self._scan_completed:
+            return False
+        if not self._coordinator:
+            return False
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            if not statuses:
+                return False
+            root = self._root_agent_id
+            if root and root in statuses:
+                return str(statuses[root]) == "running"
+            return any(str(s) == "running" for s in statuses.values())
+        except Exception:
+            return False
 
     @property
     def root_agent_id(self) -> Optional[str]:
         return self._root_agent_id
+
+    @property
+    def run_name(self) -> Optional[str]:
+        return self._run_name
 
     @property
     def elapsed(self) -> float:
@@ -161,22 +185,22 @@ class StrixRuntimeBridge:
                 diff_result = resolve_diff_scope_context(targets_info, diff_base)
                 if isinstance(diff_result, DiffScopeResult):
                     diff_scope = {
-                        "active": True,
-                        "diff_base": diff_base,
+                        "active": True, "diff_base": diff_base,
                         "changed_files": diff_result.changed_files,
                         "instruction": diff_result.instruction,
                     }
                     if diff_result.instruction:
-                        instruction = f"{instruction}\n\n{diff_result.instruction}" if instruction else diff_result.instruction
+                        instruction = (f"{instruction}\n\n{diff_result.instruction}"
+                                       if instruction else diff_result.instruction)
                 elif isinstance(diff_result, RepoDiffScope):
                     diff_scope = {
-                        "active": True,
-                        "diff_base": diff_base,
+                        "active": True, "diff_base": diff_base,
                         "changed_files": diff_result.changed_files,
                         "instruction": diff_result.instruction,
                     }
                     if diff_result.instruction:
-                        instruction = f"{instruction}\n\n{diff_result.instruction}" if instruction else diff_result.instruction
+                        instruction = (f"{instruction}\n\n{diff_result.instruction}"
+                                       if instruction else diff_result.instruction)
             except Exception as exc:
                 logger.warning("resolve_diff_scope_context failed: %s", exc)
                 diff_scope = {"active": True, "diff_base": diff_base}
@@ -199,17 +223,12 @@ class StrixRuntimeBridge:
                 merged_sources.append(s)
 
         scan_config: dict[str, Any] = {
-            "scan_id": run_name,
-            "targets": targets_info,
-            "user_instructions": instruction,
-            "run_name": run_name,
-            "scan_mode": scan_mode,
-            "diff_scope": diff_scope,
-            "scope_mode": scope_mode,
-            "diff_base": diff_base,
+            "scan_id": run_name, "targets": targets_info,
+            "user_instructions": instruction, "run_name": run_name,
+            "scan_mode": scan_mode, "diff_scope": diff_scope,
+            "scope_mode": scope_mode, "diff_base": diff_base,
             "non_interactive": non_interactive,
-            "local_sources": merged_sources,
-            "resume_instruction": "",
+            "local_sources": merged_sources, "resume_instruction": "",
         }
 
         self._stop_event.clear()
@@ -220,28 +239,20 @@ class StrixRuntimeBridge:
         self._scan_image = image or self._resolve_image()
         self._start_time = time.time()
         self._scan_completed = False
-        self._awaiting_input = False
-        self._input_prompt = ""
-        self._phase = "running"
-        self._last_error = None
         self._scan_task = None
-        self._scan_status = "initializing"
+        self._last_error = None
         self._preferred_agent_id = None
+        self._last_waiting_root = None
 
         self._live_view = TuiLiveView()
-        self._last_event_index = 0
-        self._waiting_notified = False
+        self._seen_versions.clear()
 
         self._thread = threading.Thread(
-            target=self._scan_thread,
-            args=(scan_config, merged_sources),
-            daemon=True,
-        )
+            target=self._scan_thread, args=(scan_config, merged_sources), daemon=True)
         self._thread.start()
 
         if self._last_error:
             return False, self._last_error
-
         return True, f"Escaneo iniciado: {run_name}"
 
     @staticmethod
@@ -264,21 +275,17 @@ class StrixRuntimeBridge:
                 continue
             try:
                 target_type, target_dict = infer_target_type(t)
-                info.append(
-                    {"type": target_type, "details": target_dict, "original": t}
-                )
+                info.append({"type": target_type, "details": target_dict, "original": t})
             except ValueError:
-                info.append(
-                    {
-                        "type": "web_application",
-                        "details": {"target_url": f"https://{t}"},
-                        "original": t,
-                    }
-                )
+                info.append({
+                    "type": "web_application",
+                    "details": {"target_url": f"https://{t}"},
+                    "original": t,
+                })
         assign_workspace_subdirs(info)
         return info
 
-    # ── scan thread (asyncio) ──────────────────────────────────
+    # ── scan thread ────────────────────────────────────────────
 
     def _scan_thread(self, scan_config: dict, local_sources: list[dict]) -> None:
         loop = asyncio.new_event_loop()
@@ -291,7 +298,6 @@ class StrixRuntimeBridge:
                     for aid, p in parent_of.items():
                         if p is None:
                             self._root_agent_id = aid
-                            self._scan_status = "running"
                             with self._lv_lock:
                                 self._live_view.upsert_agent(aid, status="running")
                             self._emit_event("root_discovered", aid, f"Agente raiz: {aid}")
@@ -299,38 +305,12 @@ class StrixRuntimeBridge:
                 await asyncio.sleep(0.1)
             logger.warning("Root agent not discovered within 60s")
 
-        async def _poll_status() -> None:
-            while not self._scan_completed:
-                await asyncio.sleep(1.0)
-                try:
-                    statuses = getattr(self._coordinator, "statuses", None)
-                    if not statuses:
-                        continue
-                    root = self._root_agent_id
-                    any_running = any(str(s) == "running" for s in statuses.values())
-                    root_waiting = root is not None and str(statuses.get(root, "")) == "waiting"
-
-                    if any_running:
-                        self._scan_status = "running"
-                        self._awaiting_input = False
-                        self._waiting_notified = False
-                    elif root_waiting:
-                        was_already_waiting = self._scan_status == "waiting"
-                        self._scan_status = "waiting"
-                        self._awaiting_input = True
-                        if not was_already_waiting and not self._waiting_notified:
-                            self._waiting_notified = True
-                            self._notify_agent_waiting(root)
-                except Exception:
-                    pass
-
         non_interactive = bool(scan_config.get("non_interactive", False))
 
         async def _run_scan() -> Any:
             rs = ReportState(run_name=self._run_name)
             set_global_report_state(rs)
             rs.set_scan_config(scan_config)
-
             live_view: Any = self._live_view
             current_run = self._run_name
 
@@ -339,8 +319,7 @@ class StrixRuntimeBridge:
                     live_view.ingest_sdk_event(agent_id, event)
 
             return await run_strix_scan(
-                scan_config=scan_config,
-                scan_id=current_run,
+                scan_config=scan_config, scan_id=current_run,
                 image=self._scan_image,
                 local_sources=scan_config.get("local_sources"),
                 coordinator=self._coordinator,
@@ -352,32 +331,25 @@ class StrixRuntimeBridge:
         async def _main() -> None:
             self._scan_task = asyncio.create_task(_run_scan())
             discovery = asyncio.create_task(_poll_root())
-            status_poller = asyncio.create_task(_poll_status())
 
             try:
                 await self._scan_task
             except asyncio.CancelledError:
-                self._scan_status = "stopped"
-                self._phase = "stopped"
                 self._scan_completed = True
                 self._emit_event("scan_cancelled", "", "Escaneo cancelado")
                 return
             except Exception as e:
-                self._scan_status = "failed"
-                self._phase = "failed"
                 self._scan_completed = True
                 self._last_error = str(e)
                 self._emit_event("scan_error", "", f"Error en escaneo: {e}")
                 return
             finally:
-                status_poller.cancel()
                 discovery.cancel()
                 try:
-                    await asyncio.gather(status_poller, discovery, return_exceptions=True)
+                    await asyncio.gather(discovery, return_exceptions=True)
                 except Exception:
                     pass
 
-            # Scan completed successfully — cleanup before announcing
             current_run = self._run_name or ""
             cleanup_error = None
             if current_run:
@@ -388,33 +360,25 @@ class StrixRuntimeBridge:
                     logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
                     cleanup_error = str(exc)
 
-            self._scan_status = "completed"
-            self._phase = "completed"
             self._scan_completed = True
             self._emit_event("scan_complete", "", "Escaneo finalizado")
 
             if cleanup_error:
-                logger.warning(
-                    "Scan %s completed but sandbox cleanup failed: %s",
-                    current_run, cleanup_error,
-                )
+                logger.warning("Scan %s completed but sandbox cleanup failed: %s",
+                             current_run, cleanup_error)
 
         try:
             loop.run_until_complete(_main())
         except asyncio.CancelledError:
-            self._scan_status = "stopped"
-            self._phase = "stopped"
             self._scan_completed = True
             self._emit_event("scan_cancelled", "", "Escaneo cancelado")
         except Exception as e:
-            if self._scan_status != "completed":
-                self._scan_status = "failed"
-                self._phase = "failed"
+            if not self._scan_completed:
                 self._scan_completed = True
                 self._last_error = str(e)
                 self._emit_event("scan_error", "", f"Error en escaneo: {e}")
             else:
-                logger.warning("Post-scan teardown error (scan was completed): %s", e)
+                logger.warning("Post-scan teardown error: %s", e)
         finally:
             pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
             for t in pending:
@@ -431,7 +395,7 @@ class StrixRuntimeBridge:
             loop.close()
             self._loop = None
 
-    # ── event emission (synthetic bridge events) ───────────────
+    # ── event emission ─────────────────────────────────────────
 
     def _emit_event(self, event_type: str, agent_id: str, content: str) -> None:
         rn = self._run_name or ""
@@ -447,38 +411,35 @@ class StrixRuntimeBridge:
                 "agent_id": agent_id,
                 "timestamp": time.time(),
                 "version": 0,
-                "data": {
-                    "event": event_type,
-                    "content": content,
-                    "run_name": rn,
-                },
+                "data": {"event": event_type, "content": content, "run_name": rn},
             }
             lv._next_event_id += 1
             lv.events.append(event)
 
-    def _notify_agent_waiting(self, agent_id: str) -> None:
-        agent_name = ""
-        with self._lv_lock:
-            lv = self._live_view
-            if lv and agent_id in lv.agents:
-                agent_name = lv.agents[agent_id].get("name", agent_id)
-        self._emit_event(
-            "agent_waiting",
-            agent_id,
-            agent_name or agent_id,
-        )
-
-    # ── bot interface (synchronous, called from drain thread) ──
+    # ── bot interface ──────────────────────────────────────────
 
     def poll_events(self) -> list[dict[str, Any]]:
+        """Return events whose version has changed since last poll.
+
+        Unlike _last_event_index, this tracks event.id:event.version pairs.
+        When TuiLiveView updates a tool from running→completed (bumps version
+        in-place), the updated event is re-delivered.
+        """
         with self._lv_lock:
             lv = self._live_view
             if lv is None:
                 return []
-            events = list(lv.events[self._last_event_index:])
-            if events:
-                self._last_event_index = len(lv.events)
-        return events
+            changed = []
+            for ev in lv.events:
+                eid = ev.get("id", "")
+                version = int(ev.get("version", 0))
+                key = f"{eid}:v{version}"
+                last_key = self._seen_versions.get(eid, f"{eid}:v{-1}")
+                last_v = int(last_key.split(":v")[-1]) if ":v" in last_key else -1
+                if version > last_v:
+                    changed.append(dict(ev))
+                    self._seen_versions[eid] = key
+        return changed
 
     def send_message(self, agent_id: str, text: str) -> bool:
         if not self._coordinator or not self._loop or self._loop.is_closed():
@@ -492,11 +453,8 @@ class StrixRuntimeBridge:
         message = {"from": "user", "content": text, "type": "instruction"}
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self._coordinator.send(agent_id, message),
-                self._loop,
-            )
+                self._coordinator.send(agent_id, message), self._loop)
             result = future.result(timeout=30)
-            logger.debug("send_message(%s): result=%s", agent_id, result)
             return bool(result)
         except Exception as exc:
             logger.warning("send_message(%s) failed: %s", agent_id, exc)
@@ -517,9 +475,7 @@ class StrixRuntimeBridge:
         if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._coordinator.cancel_descendants_graceful(aid),
-                    self._loop,
-                )
+                    self._coordinator.cancel_descendants_graceful(aid), self._loop)
                 future.result(timeout=30)
                 logger.info("stop_scan: agents cancelled gracefully")
             except Exception as exc:
@@ -531,9 +487,7 @@ class StrixRuntimeBridge:
                     if self._scan_task and not self._scan_task.done():
                         self._scan_task.cancel()
                 cancel_future = asyncio.run_coroutine_threadsafe(
-                    _cancel_task(),
-                    self._loop,
-                )
+                    _cancel_task(), self._loop)
                 cancel_future.result(timeout=10)
                 logger.info("stop_scan: scan task cancelled")
             except Exception as exc:
@@ -549,7 +503,78 @@ class StrixRuntimeBridge:
 
         return not cancel_failed
 
-    # ── read-only state (consumed by bot) ──────────────────────
+    def stop_agent(self, agent_id: str) -> bool:
+        if not self._coordinator or not self._loop or self._loop.is_closed():
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._coordinator.cancel_descendants_graceful(agent_id), self._loop)
+            future.result(timeout=30)
+            return True
+        except Exception as exc:
+            logger.warning("stop_agent(%s) failed: %s", agent_id, exc)
+            return False
+
+    def check_waiting_notification(self) -> Optional[dict[str, Any]]:
+        """Return an agent_waiting event if root just transitioned to waiting.
+
+        Returns None if no notification is needed (not waiting, or already notified).
+        The caller should emit the returned dict to TuiLiveView events and
+        clear the tracking by calling ack_waiting_notification().
+        """
+        if not self._coordinator or self._scan_completed:
+            return None
+        root = self._root_agent_id
+        if not root:
+            return None
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            if not statuses or root not in statuses:
+                return None
+            if str(statuses[root]) != "waiting":
+                self._last_waiting_root = None
+                return None
+        except Exception:
+            return None
+
+        if self._last_waiting_root == root:
+            return None  # already notified for this agent in this waiting cycle
+        self._last_waiting_root = root
+
+        agent_name = ""
+        with self._lv_lock:
+            lv = self._live_view
+            if lv and root in lv.agents:
+                agent_name = lv.agents[root].get("name", root)
+
+        return {
+            "id": f"bridge_agent_waiting_{root}",
+            "type": "system",
+            "agent_id": root,
+            "timestamp": time.time(),
+            "version": 0,
+            "data": {
+                "event": "agent_waiting",
+                "content": agent_name or root,
+                "run_name": self._run_name or "",
+            },
+        }
+
+    def ack_waiting_notification(self) -> None:
+        """Reset waiting notification tracking (call when status changes from waiting)."""
+        if not self._coordinator:
+            return
+        root = self._root_agent_id
+        if not root:
+            return
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            if statuses and root in statuses and str(statuses[root]) != "waiting":
+                self._last_waiting_root = None
+        except Exception:
+            pass
+
+    # ── read-only projections ──────────────────────────────────
 
     def get_agent_tree(self) -> Optional[dict[str, Any]]:
         with self._lv_lock:
@@ -561,21 +586,42 @@ class StrixRuntimeBridge:
                 tree["agents"][aid] = dict(info)
         return tree
 
+    def list_agents(self) -> list[dict]:
+        tree = self.get_agent_tree()
+        if not tree:
+            return []
+        return list(tree["agents"].values())
+
+    def agent_timeline(self, agent_id: str) -> list[dict[str, Any]]:
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return []
+            return list(lv.events_for_agent(agent_id))
+
+    def get_root_status(self) -> str:
+        if not self._coordinator:
+            return "unknown"
+        root = self._root_agent_id
+        if not root:
+            return "unknown"
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            if not statuses:
+                return "unknown"
+            return str(statuses.get(root, "unknown"))
+        except Exception:
+            return "unknown"
+
     def get_tool_state(self) -> dict[str, Any]:
         with self._lv_lock:
             lv = self._live_view
             if lv is None:
                 return {
-                    "active_count": 0,
-                    "completed_count": 0,
-                    "failed_count": 0,
-                    "current_tool_name": "",
-                    "current_tool_args": {},
-                    "current_tool_status": "idle",
-                    "active_agent_name": "",
-                    "streaming": False,
-                    "awaiting_input": self._awaiting_input,
-                    "input_prompt": self._input_prompt,
+                    "active_count": 0, "completed_count": 0, "failed_count": 0,
+                    "current_tool_name": "", "current_tool_args": {},
+                    "current_tool_status": "idle", "active_agent_name": "",
+                    "streaming": False, "awaiting_input": False, "input_prompt": "",
                 }
 
             running_tools: list[dict] = []
@@ -606,47 +652,25 @@ class StrixRuntimeBridge:
                 for ev in reversed(lv.events)
             )
 
+            root = self._root_agent_id
+            is_waiting = False
+            if self._coordinator and root:
+                try:
+                    statuses = getattr(self._coordinator, "statuses", None)
+                    if statuses and root in statuses:
+                        is_waiting = str(statuses[root]) == "waiting"
+                except Exception:
+                    pass
+
         return {
             "active_count": len(running_tools),
-            "completed_count": completed,
-            "failed_count": failed,
+            "completed_count": completed, "failed_count": failed,
             "current_tool_name": current_tool["tool_name"] if current_tool else "",
             "current_tool_args": current_tool.get("args", {}) if current_tool else {},
             "current_tool_status": "running" if current_tool else "idle",
-            "active_agent_name": agent_name,
-            "streaming": streaming,
-            "awaiting_input": self._awaiting_input,
-            "input_prompt": self._input_prompt,
+            "active_agent_name": agent_name, "streaming": streaming,
+            "awaiting_input": is_waiting, "input_prompt": "",
         }
-
-    def list_agents(self) -> list[dict]:
-        tree = self.get_agent_tree()
-        if not tree:
-            return []
-        return list(tree["agents"].values())
-
-    def agent_timeline(self, agent_id: str) -> list[dict[str, Any]]:
-        with self._lv_lock:
-            lv = self._live_view
-            if lv is None:
-                return []
-            events = list(lv.events_for_agent(agent_id))
-        return events
-
-    def stop_agent(self, agent_id: str) -> bool:
-        if not self._coordinator or not self._loop or self._loop.is_closed():
-            return False
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._coordinator.cancel_descendants_graceful(agent_id),
-                self._loop,
-            )
-            future.result(timeout=30)
-            logger.info("stop_agent(%s): cancelled gracefully", agent_id)
-            return True
-        except Exception as exc:
-            logger.warning("stop_agent(%s) failed: %s", agent_id, exc)
-            return False
 
     def get_vulnerabilities(self) -> list[dict[str, Any]]:
         from strix.report.state import get_global_report_state
@@ -657,11 +681,8 @@ class StrixRuntimeBridge:
 
     def get_run_status(self) -> dict:
         status: dict[str, Any] = {
-            "run_name": self._run_name,
-            "is_running": self.is_running,
-            "elapsed": self.elapsed,
-            "mode": "unknown",
-            "phase": "running",
+            "run_name": self._run_name, "is_running": self.is_running,
+            "elapsed": self.elapsed, "mode": "unknown", "phase": "running",
             "error": None,
         }
         if self._run_name:
@@ -679,13 +700,10 @@ class StrixRuntimeBridge:
 
     def to_status_dict(self) -> dict[str, Any]:
         status = self.get_run_status()
-
-        phase = self._phase
-        if self._scan_status == "initializing":
-            phase = "initializing"
-        elif not status.get("is_running") and not status.get("is_active"):
-            if not self._last_error and self._phase == "running":
-                phase = "completed"
+        root_status = self.get_root_status()
+        phase = root_status if root_status in ("running", "waiting",
+                                               "completed", "failed",
+                                               "stopped", "initializing") else "running"
 
         state: dict[str, Any] = {
             "run_name": status.get("run_name", "pending"),
@@ -695,11 +713,11 @@ class StrixRuntimeBridge:
             "elapsed": _fmt_duration(status["elapsed"]),
             "error": self._last_error,
             "is_active": self.is_running,
-            "awaiting_input": self._awaiting_input,
-            "input_prompt": self._input_prompt,
+            "awaiting_input": root_status == "waiting",
+            "input_prompt": "",
         }
 
-        if not status.get("is_running") and not status.get("is_active"):
+        if not self.is_running:
             state["is_active"] = False
 
         return state
@@ -710,9 +728,7 @@ class StrixRuntimeBridge:
         if self._coordinator and self._loop and not self._loop.is_closed() and aid:
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._coordinator.cancel_descendants_graceful(aid),
-                    self._loop,
-                )
+                    self._coordinator.cancel_descendants_graceful(aid), self._loop)
                 future.result(timeout=30)
             except Exception:
                 pass
@@ -722,14 +738,11 @@ class StrixRuntimeBridge:
                     if self._scan_task and not self._scan_task.done():
                         self._scan_task.cancel()
                 cancel_future = asyncio.run_coroutine_threadsafe(
-                    _cancel_task(),
-                    self._loop,
-                )
+                    _cancel_task(), self._loop)
                 cancel_future.result(timeout=10)
             except Exception:
                 pass
         self._scan_completed = True
-        self._scan_status = "stopped"
 
 
 def _fmt_duration(seconds: float) -> str:
