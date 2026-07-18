@@ -444,7 +444,7 @@ class StrixBot:
             scan_mode=scan_mode,
             instruction=full_instruction,
             scope_mode="auto",
-            non_interactive=False,
+            non_interactive=True,
             local_sources=local_sources,
         )
 

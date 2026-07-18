@@ -167,7 +167,7 @@ class StrixRuntimeBridge:
         scan_mode: str = "deep",
         scope_mode: str = "auto",
         diff_base: Optional[str] = None,
-        non_interactive: bool = False,
+        non_interactive: bool = True,
         image: Optional[str] = None,
         local_sources: Optional[list[dict[str, str]]] = None,
     ) -> tuple[bool, str]:
