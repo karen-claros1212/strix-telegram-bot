@@ -48,7 +48,14 @@ def _request(
             return None
         except urllib.error.HTTPError as e:
             body = e.read().decode() if e.fp else ""
-            # Don't retry on permanent errors
+            # 400 errors are permanent — never retry
+            if e.code == 400:
+                logger.debug(
+                    "HTTP 400 on %s (not retried): %s",
+                    method, body[:300],
+                )
+                return None
+            # Other permanent errors
             if "message is not modified" in body or "message to edit not found" in body or "message can't be edited" in body:
                 return None
             logger.warning(
@@ -99,7 +106,7 @@ def send_message(
     bot: Any,
     chat_id: int,
     text: str,
-    parse_mode: str = "Markdown",
+    parse_mode: Optional[str] = None,
     reply_markup: Optional[dict] = None,
     disable_web_page_preview: bool = True,
 ) -> Optional[dict]:
@@ -113,12 +120,6 @@ def send_message(
     if reply_markup:
         payload["reply_markup"] = reply_markup
     result = _request("sendMessage", payload)
-    if result:
-        return result
-    # Markdown fallback: retry without parse_mode
-    if parse_mode:
-        payload.pop("parse_mode", None)
-        result = _request("sendMessage", payload)
     return result
 
 
@@ -127,7 +128,7 @@ def edit_message(
     chat_id: int,
     message_id: int,
     text: str,
-    parse_mode: str = "Markdown",
+    parse_mode: Optional[str] = None,
     reply_markup: Optional[dict] = None,
 ) -> Optional[dict]:
     payload: dict[str, Any] = {
@@ -140,12 +141,6 @@ def edit_message(
     if reply_markup:
         payload["reply_markup"] = reply_markup
     result = _request("editMessageText", payload)
-    if result:
-        return result
-    # Markdown fallback: retry without parse_mode
-    if parse_mode:
-        payload.pop("parse_mode", None)
-        result = _request("editMessageText", payload)
     return result
 
 
