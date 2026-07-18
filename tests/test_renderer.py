@@ -158,7 +158,7 @@ class TestToolRenderer:
         assert mock_send.call_count == 1
         text = mock_send.call_args[0][2]
         assert "nuclei_scan" in text
-        assert "ejecutando" in text
+        assert "In progress" in text
         assert bot._tool_message_ids.get("call_1") == 200
 
     def test_tool_completed_edits_same_message(self, bot, mock_telegram):
@@ -172,7 +172,7 @@ class TestToolRenderer:
         assert mock_edit.call_count == 1
         assert mock_edit.call_args[0][2] == 200
         text = mock_edit.call_args[0][3]
-        assert "completada" in text
+        assert "Result:" in text
         assert "CVE-2024-1234" in text
 
     def test_tool_failed_shows_status(self, bot, mock_telegram):
@@ -185,7 +185,7 @@ class TestToolRenderer:
 
         assert mock_edit.call_count == 1
         text = mock_edit.call_args[0][3]
-        assert "fallida" in text
+        assert "Result:" in text
         assert "connection refused" in text
 
     def test_tool_no_duplicate_on_second_call(self, bot, mock_telegram):
@@ -332,3 +332,158 @@ class TestOutputSanitization:
         args = {f"k{i}": f"v{i}" for i in range(20)}
         result = StrixBot._sanitize_tool_args(args)
         assert result.count("\n") < 6
+
+
+# ── Telegram renderer unit tests ────────────────────────────────
+
+class TestTelegramRenderers:
+    """Tests for strix/telegram_renderers.py — TUI-mirroring formatters."""
+
+    def test_shell_running_shows_command(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("execute_command", "running", {"command": "ls -la"})
+        assert "ls -la" in text
+        assert "In progress" in text
+
+    def test_shell_completed_shows_exit_code(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        result = {"exit_code": 0, "output": "file1\nfile2"}
+        text = render_tool_event("execute_command", "completed", {"command": "ls"}, result)
+        assert "exit: 0" in text
+        assert "file1" in text
+
+    def test_shell_truncates_at_50_lines_with_marker(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        output = "\n".join(f"line {i}" for i in range(100))
+        result = {"exit_code": 0, "output": output}
+        text = render_tool_event("execute_command", "completed", {"command": "cat"}, result)
+        assert "51 lines truncated" in text
+        assert "line 0" in text
+        assert "line 99" in text
+
+    def test_shell_truncates_long_line_at_200_chars(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        long_line = "x" * 300
+        result = {"exit_code": 0, "output": long_line}
+        text = render_tool_event("execute_command", "completed", {"command": "cat"}, result)
+        assert "..." in text
+        assert "x" * 197 in text
+
+    def test_shell_head_tail_split(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        output = "\n".join(f"line {i}" for i in range(60))
+        result = {"exit_code": 0, "output": output}
+        text = render_tool_event("execute_command", "completed", {"command": "cat"}, result)
+        assert "line 0" in text
+        assert "line 59" in text
+        assert "lines truncated" in text
+
+    def test_shell_failed_shows_error(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("execute_command", "failed", {"command": "bad"}, "connection refused")
+        assert "Failed" in text
+        assert "connection refused" in text
+
+    def test_fallback_shows_all_args(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        args = {"target": "https://example.com", "method": "GET", "timeout": "30"}
+        text = render_tool_event("custom_tool", "completed", args, "ok")
+        assert "target: https://example.com" in text
+        assert "method: GET" in text
+        assert "timeout: 30" in text
+
+    def test_fallback_shows_result(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("custom_tool", "completed", {"x": "1"}, "result data here")
+        assert "Result: result data here" in text
+
+    def test_fallback_running_shows_status_icon(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("custom_tool", "running", {"x": "1"})
+        assert "In progress" in text
+        assert "Result:" not in text
+
+    def test_no_raw_sdk_event_in_output(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("execute_command", "completed", {"command": "ls"}, {"exit_code": 0, "output": "ok"})
+        assert "tool_id" not in text
+        assert "call_id" not in text
+        assert "streaming" not in text
+
+    def test_technical_chars_safe(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("execute_command", "completed", {"command": "echo <>&\"'" }, "done")
+        assert "echo" in text
+        assert "done" in text
+
+    def test_empty_args_handled(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("custom_tool", "completed", {}, "result")
+        assert "Result: result" in text
+
+    def test_none_result_handled(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("custom_tool", "completed", {"x": "1"}, None)
+        assert "In progress" not in text
+        assert "Result:" not in text
+
+    def test_vuln_report_format(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        args = {"title": "XSS in /login", "severity": "high", "cve": "CVE-2024-1234"}
+        result = {"severity": "high", "cvss_score": 8.5}
+        text = render_tool_event("create_vulnerability_report", "completed", args, result)
+        assert "XSS in /login" in text
+        assert "ALTO" in text
+        assert "CVSS: 8.5" in text
+        assert "CVE-2024-1234" in text
+
+    def test_patch_shows_file_ops(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        patch = "*** Add File: src/app.py\n*** Update File: README.md"
+        text = render_tool_event("apply_patch", "completed", {"patch": patch})
+        assert "create src/app.py" in text
+        assert "edit README.md" in text
+
+
+class TestNonInteractivePreserved:
+    """Verify non_interactive=True remains intact in bridge."""
+
+    def test_bridge_default_non_interactive_true(self):
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        sig = inspect.signature(StrixRuntimeBridge.start_scan)
+        default = sig.parameters["non_interactive"].default
+        assert default is True
+
+    def test_bot_calls_with_non_interactive(self):
+        from strix_telegram_bot.bot import StrixBot
+        import inspect
+        src = inspect.getsource(StrixBot._launch_scan)
+        assert "non_interactive=True" in src
+
+    def test_strix_not_modified(self):
+        import strix
+        from pathlib import Path
+        strix_path = Path(strix.__file__).parent
+        runner = strix_path / "core" / "runner.py"
+        assert runner.exists()
+        text = runner.read_text()
+        assert "interactive" in text
+
+
+class TestNoSdkEventsLeaked:
+    """Ensure no raw SDK metadata leaks into Telegram messages."""
+
+    def test_tool_event_no_sdk_fields(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        text = render_tool_event("nuclei", "completed", {"url": "x"}, "found vuln")
+        for field in ("tool_id", "call_id", "streaming", "event_type", "sdk_version"):
+            assert field not in text.lower()
+
+    def test_chat_event_sanitized(self):
+        from strix_telegram_bot.bot import StrixBot
+        long_b64 = "A" * 90 + "...BBBB"
+        content = f"data:image/png;base64,{long_b64}"
+        sanitized = StrixBot._sanitize_agent_content(content)
+        assert "AAAAAAAAAA" not in sanitized
+        assert "[imagen]" in sanitized

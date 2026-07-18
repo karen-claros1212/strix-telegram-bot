@@ -27,6 +27,7 @@ from .ui.messages import (
 from .ui.panels import get_panel_manager
 from .jobs.job_store import JobStore
 from .strix.runtime_bridge import StrixRuntimeBridge
+from .strix.telegram_renderers import render_tool_event
 
 logger = logging.getLogger("strix_bot")
 
@@ -640,21 +641,15 @@ class StrixBot:
                 result = data.get("result")
                 call_id = data.get("call_id", "")
 
+                text = render_tool_event(tool_name, status, args, result)
+
                 if status == "running":
-                    args_text = self._sanitize_tool_args(args)
-                    text = f"Herramienta: {tool_name}\n" + (f"{args_text}\n" if args_text else "") + "Estado: ejecutando..."
                     resp = send_message(self, chat_id, text, parse_mode=None)
                     if resp and call_id:
                         self._tool_message_ids[call_id] = resp.get("message_id")
                 elif status in ("completed", "failed") and call_id:
                     msg_id = self._tool_message_ids.get(call_id)
                     if msg_id:
-                        status_label = "completada" if status == "completed" else "fallida"
-                        result_text = self._sanitize_tool_result(result)[:500]
-                        args_text = self._sanitize_tool_args(args)
-                        text = f"Herramienta: {tool_name}\n" + (f"{args_text}\n" if args_text else "") + f"Estado: {status_label}"
-                        if result_text:
-                            text += f"\nResultado: {result_text}"
                         edit_message(self, chat_id, msg_id, text, parse_mode=None)
 
             elif ev_type == "system":
