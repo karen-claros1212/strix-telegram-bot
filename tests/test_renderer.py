@@ -61,9 +61,10 @@ def _make_system_event(event_name, content="", run_name="test-run", agent_id="")
 @pytest.fixture
 def mock_telegram():
     with patch("strix_telegram_bot.bot.send_message") as mock_send, \
-         patch("strix_telegram_bot.bot.edit_message") as mock_edit:
+         patch("strix_telegram_bot.bot.edit_message") as mock_edit, \
+         patch("strix_telegram_bot.bot.delete_message") as mock_delete:
         mock_send.return_value = {"message_id": 100}
-        yield mock_send, mock_edit
+        yield mock_send, mock_edit, mock_delete
 
 
 @pytest.fixture
@@ -77,7 +78,7 @@ def bot(mock_telegram):
 
 class TestStreamingRenderer:
     def test_streaming_creates_single_message(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
 
         ev1 = _make_chat_event("chat_1", version=0, content="analyzing", streaming=True)
@@ -86,7 +87,7 @@ class TestStreamingRenderer:
         assert mock_send.call_count == 1
 
     def test_streaming_edits_same_message_on_new_version(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
 
         ev1 = _make_chat_event("chat_1", version=0, content="analyzing", streaming=True)
@@ -100,7 +101,7 @@ class TestStreamingRenderer:
         assert "analyzing target" in mock_edit.call_args[0][3]
 
     def test_streaming_skips_same_version(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
 
         ev1 = _make_chat_event("chat_1", version=0, content="a", streaming=True)
@@ -113,7 +114,7 @@ class TestStreamingRenderer:
         assert mock_edit.call_count == 0
 
     def test_streaming_finalize_no_duplicate(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
 
         ev1 = _make_chat_event("chat_1", version=0, content="partial", streaming=True)
@@ -126,7 +127,7 @@ class TestStreamingRenderer:
         assert mock_edit.call_count == 1
 
     def test_streaming_reset_on_new_stream(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
 
         ev1 = _make_chat_event("chat_1", version=0, content="first", streaming=True)
@@ -139,7 +140,7 @@ class TestStreamingRenderer:
         assert "chat_2" in bot._chat_fragments
 
     def test_non_streaming_sends_direct(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         ev = _make_chat_event("chat_1", version=0, content="direct message", streaming=False)
         bot._process_scan_events([ev])
         assert mock_send.call_count == 1
@@ -147,7 +148,7 @@ class TestStreamingRenderer:
 
 class TestToolRenderer:
     def test_tool_running_creates_message(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 200}
 
         ev = _make_tool_event(call_id="call_1", tool_name="nuclei_scan", status="running",
@@ -161,7 +162,7 @@ class TestToolRenderer:
         assert bot._tool_message_ids.get("call_1") == 200
 
     def test_tool_completed_edits_same_message(self, bot, mock_telegram):
-        _, mock_edit = mock_telegram
+        _, mock_edit, _ = mock_telegram
         bot._tool_message_ids["call_1"] = 200
 
         ev = _make_tool_event(call_id="call_1", tool_name="nuclei_scan", status="completed",
@@ -175,7 +176,7 @@ class TestToolRenderer:
         assert "CVE-2024-1234" in text
 
     def test_tool_failed_shows_status(self, bot, mock_telegram):
-        _, mock_edit = mock_telegram
+        _, mock_edit, _ = mock_telegram
         bot._tool_message_ids["call_2"] = 201
 
         ev = _make_tool_event(call_id="call_2", tool_name="ffuf", status="failed",
@@ -188,7 +189,7 @@ class TestToolRenderer:
         assert "connection refused" in text
 
     def test_tool_no_duplicate_on_second_call(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 300}
 
         ev1 = _make_tool_event(call_id="call_x", tool_name="curl", status="running")
@@ -202,7 +203,7 @@ class TestToolRenderer:
         assert bot._tool_message_ids.get("call_y") is not None
 
     def test_tool_output_without_running_sends_new_message(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 400}
         ev = _make_tool_event(call_id="unknown", tool_name="tool", status="completed",
                               result="orphan")
@@ -213,7 +214,7 @@ class TestToolRenderer:
 
 class TestMessageSplitting:
     def test_long_message_splits_into_fragments(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         long_text = "X" * 5000
         ev = _make_chat_event("chat_1", version=0, content=long_text, streaming=False)
         bot._process_scan_events([ev])
@@ -222,7 +223,7 @@ class TestMessageSplitting:
             assert len(call_args[0][2]) <= 4100
 
     def test_short_message_not_split(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         ev = _make_chat_event("chat_1", version=0, content="short", streaming=False)
         bot._process_scan_events([ev])
         assert mock_send.call_count == 1
@@ -230,7 +231,7 @@ class TestMessageSplitting:
 
 class TestScanCompleteCycle:
     def test_running_to_waiting_notification(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         ev = _make_system_event("agent_waiting", content="strix-agent")
         bot._process_scan_events([ev])
         assert mock_send.call_count == 1
@@ -238,7 +239,7 @@ class TestScanCompleteCycle:
         assert "esperando instrucciones" in text
 
     def test_scan_complete_sends_final_message(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         bot._bridge._start_time = 0
         bot._bridge._scan_status = "completed"
         ev = _make_system_event("scan_complete")
@@ -249,7 +250,7 @@ class TestScanCompleteCycle:
 
 class TestCallHistory:
     def test_streaming_call_sequence(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
 
         events = [
@@ -264,7 +265,7 @@ class TestCallHistory:
         assert mock_edit.call_count == 3  # 2 deltas + 1 final
 
     def test_tool_call_sequence(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 200}
 
         events = [
@@ -494,7 +495,7 @@ class TestChatFragmentation:
     """Defect 1: chat messages must use fragmentation, not raw[:4000]."""
 
     def test_long_content_creates_multiple_fragments(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
         long_text = "X" * 8500
         ev = _make_chat_event("chat_1", version=0, content=long_text, streaming=True)
@@ -503,7 +504,7 @@ class TestChatFragmentation:
         assert bot._chat_fragments["chat_1"] == [100, 100, 100]
 
     def test_finalize_clears_fragments(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
         ev1 = _make_chat_event("chat_1", version=0, content="partial", streaming=True)
         bot._process_scan_events([ev1])
@@ -513,7 +514,7 @@ class TestChatFragmentation:
         assert "chat_1" not in bot._chat_fragments
 
     def test_non_streaming_sends_fragmented(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 200}
         long_text = "A" * 5000
         ev = _make_chat_event("chat_1", version=0, content=long_text, streaming=False)
@@ -521,7 +522,7 @@ class TestChatFragmentation:
         assert mock_send.call_count == 2
 
     def test_chat_view_no_content_truncation(self, bot, mock_telegram):
-        mock_send, _ = mock_telegram
+        mock_send, _, _ = mock_telegram
         mock_send.return_value = {"message_id": 100}
         content = "X" * 500
         ev = _make_chat_event("chat_1", version=0, content=content, streaming=False)
@@ -570,7 +571,7 @@ class TestOrphanToolCompleted:
     """Defect 3: orphan tool completed must send new message, not discard."""
 
     def test_orphan_completed_sends_new_message(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 500}
         ev = _make_tool_event(call_id="orphan", tool_name="nuclei", status="completed",
                               result="found 3 vulns")
@@ -581,7 +582,7 @@ class TestOrphanToolCompleted:
         assert mock_edit.call_count == 0
 
     def test_tracked_completed_still_edits(self, bot, mock_telegram):
-        mock_send, mock_edit = mock_telegram
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 500}
         bot._tool_message_ids["tracked"] = 500
         ev = _make_tool_event(call_id="tracked", tool_name="curl", status="completed",
@@ -615,3 +616,93 @@ class TestFallbackTruncation:
         assert "short" in text
         assert "ok" in text
         assert "..." not in text
+
+
+class TestScanCleanupBetweenScans:
+    """Defect 1: second scan must start clean — no stale fragments from scan 1."""
+
+    def test_scan2_chat1_version0_arrives_clean(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        mock_send.return_value = {"message_id": 100}
+
+        # Simulate scan 1 finishing with chat_1 at version 5
+        bot._chat_fragments["chat_1"] = [10, 11]
+        bot._chat_event_version["chat_1"] = 5
+        bot._tool_message_ids["old_call"] = 20
+
+        # Simulate new scan start (clears state)
+        bot._chat_fragments.clear()
+        bot._chat_event_version.clear()
+        bot._tool_message_ids.clear()
+
+        # Scan 2: chat_1 version 0 arrives
+        ev = _make_chat_event("chat_1", version=0, content="fresh start", streaming=True)
+        bot._process_scan_events([ev])
+
+        # Must be delivered, not discarded
+        assert mock_send.call_count == 1
+        assert "fresh start" in mock_send.call_args[0][2]
+        assert bot._chat_fragments.get("chat_1") == [100]
+        assert bot._chat_event_version.get("chat_1") == 0
+
+
+class TestStaleFragmentDeletion:
+    """Defect 2: final shorter than streaming must delete surplus fragments."""
+
+    def test_shorter_final_deletes_stale_fragments(self, bot, mock_telegram):
+        mock_send, mock_edit, mock_delete = mock_telegram
+        mock_send.return_value = {"message_id": 100}
+
+        # Streaming creates 3 fragments (9000 chars → 3 × 4000)
+        long_text = "X" * 9000
+        ev1 = _make_chat_event("chat_1", version=0, content=long_text, streaming=True)
+        bot._process_scan_events([ev1])
+        assert mock_send.call_count == 3
+        assert bot._chat_fragments["chat_1"] == [100, 100, 100]
+
+        # Final: only 1000 chars → 1 fragment
+        ev2 = _make_chat_event("chat_1", version=1, content="X" * 1000, streaming=False)
+        bot._process_scan_events([ev2])
+
+        # Fragment 0 was edited (existing message reused)
+        assert mock_edit.call_count >= 1
+        # Fragments 1 and 2 were deleted (stale surplus)
+        assert mock_delete.call_count >= 2
+        # Fragments cleaned up
+        assert "chat_1" not in bot._chat_fragments
+
+
+class TestToolCardMaxLimit:
+    """Defect 4: render_tool_event output must never exceed 4000 chars."""
+
+    def test_extreme_shell_output_capped(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        huge_output = "A" * 15000
+        sdk_result = (
+            "Chunk ID: abc\n"
+            "Wall time: 1.0 seconds\n"
+            "Process exited with code 0\n"
+            f"Output:\n{huge_output}"
+        )
+        text = render_tool_event("execute_command", "completed", {"command": "cat huge"}, sdk_result)
+        assert len(text) <= 4000
+
+    def test_many_args_capped(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        big_args = {f"arg{i}": "B" * 500 for i in range(20)}
+        text = render_tool_event("unknown_tool", "completed", big_args, "result")
+        assert len(text) <= 4000
+        assert "truncado" in text
+
+    def test_shell_truncation_marker_present(self):
+        from strix_telegram_bot.strix.telegram_renderers import render_tool_event
+        huge_output = "C" * 20000
+        sdk_result = (
+            "Chunk ID: def\n"
+            "Process exited with code 0\n"
+            f"Output:\n{huge_output}"
+        )
+        text = render_tool_event("execute_command", "completed", {}, sdk_result)
+        assert len(text) <= 4000
+        # Shell renderer truncates internally via _truncate_output (lines + line_len)
+        assert "truncat" in text or len(text) < 1000

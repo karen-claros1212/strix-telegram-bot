@@ -14,6 +14,8 @@ from typing import Any
 
 _TOOL_RENDERERS: dict[str, Any] = {}
 
+_MAX_TOOL_CARD = 4000
+
 _EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _SESSION_RE = re.compile(r"Process running with session ID (\d+)")
 _OUTPUT_HEADER = "\nOutput:\n"
@@ -45,14 +47,21 @@ def render_tool_event(
 
     Returns a formatted string for the tool event.
     Falls back to generic rendering if no specific renderer is registered.
+    Enforces _MAX_TOOL_CARD limit on all output.
     """
     renderer = _TOOL_RENDERERS.get(tool_name)
     if renderer:
         try:
-            return renderer(status, args or {}, result)
+            text = renderer(status, args or {}, result)
         except Exception:
-            pass
-    return _render_default(tool_name, status, args or {}, result)
+            text = _render_default(tool_name, status, args or {}, result)
+    else:
+        text = _render_default(tool_name, status, args or {}, result)
+
+    if len(text) > _MAX_TOOL_CARD:
+        text = text[:_MAX_TOOL_CARD - 20] + "\n... [truncado]"
+
+    return text
 
 
 def _render_default(tool_name: str, status: str, args: dict, result: Any) -> str:

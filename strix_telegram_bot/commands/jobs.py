@@ -289,6 +289,8 @@ def _show_agent_chat(bot: Any, chat_id: str, msg_id: str, bridge, agent_id: str,
             return
     bot._last_chat_signature = signature
 
+    _MAX_CHAT_MSG = 4000
+
     lines = [
         f"Chat — {agent_info.get('name', agent_id)[:30]}",
         f"Estado: {agent_info.get('status', 'unknown')}",
@@ -301,19 +303,20 @@ def _show_agent_chat(bot: Any, chat_id: str, msg_id: str, bridge, agent_id: str,
         for ev in page:
             ev_type = ev.get("type", "")
             data = ev.get("data", {})
+            chunk: list[str] = []
             if ev_type == "chat":
                 role = data.get("role", "")
                 content = data.get("content", "")
                 streaming = data.get("metadata", {}).get("streaming", False)
                 if streaming:
-                    lines.append(f">> STRIX (escribiendo)")
-                    lines.append(f"   {content}")
+                    chunk.append(f">> STRIX (escribiendo)")
+                    chunk.append(f"   {content}")
                 elif role == "user":
-                    lines.append(f">> Tu")
-                    lines.append(f"   {content}")
+                    chunk.append(f">> Tu")
+                    chunk.append(f"   {content}")
                 elif role == "assistant":
-                    lines.append(f">> STRIX")
-                    lines.append(f"   {content}")
+                    chunk.append(f">> STRIX")
+                    chunk.append(f"   {content}")
             elif ev_type == "tool":
                 from strix_telegram_bot.strix.telegram_renderers import render_tool_event
                 name = data.get("tool_name", "tool")
@@ -321,7 +324,12 @@ def _show_agent_chat(bot: Any, chat_id: str, msg_id: str, bridge, agent_id: str,
                 args = data.get("args", {})
                 result = data.get("result")
                 text = render_tool_event(name, status, args, result)
-                lines.append(text)
+                chunk.append(text)
+
+            candidate = "\n".join(lines) + ("\n" if lines[-1] else "") + "\n".join(chunk)
+            if len(candidate) > _MAX_CHAT_MSG:
+                break
+            lines.extend(chunk)
 
     text = "\n".join(lines)
 

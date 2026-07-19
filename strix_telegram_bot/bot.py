@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .telegram import get_updates, send_message, edit_message, answer_callback
+from .telegram import get_updates, send_message, edit_message, delete_message, answer_callback
 from .security import is_authorized
 from .models import JobPhase, JobState, MenuState, ScanMode
 from .ui.keyboards import (
@@ -479,9 +479,8 @@ class StrixBot:
         self._active_job_chat_id = chat_id
         self._active_job_message_id = panel_msg_id
         self._active_job_run_name = run_name
-        self._streaming_message_id = None
-        self._streaming_event_id = None
-        self._streaming_version = 0
+        self._chat_fragments.clear()
+        self._chat_event_version.clear()
         self._tool_message_ids.clear()
 
     def _drain_update_queue(self) -> None:
@@ -717,21 +716,34 @@ class StrixBot:
     def _finalize_chat_fragments(
         self, chat_id: int, ev_id: str, ev_version: int, full_text: str
     ) -> None:
-        """Finalize a streaming event: update all fragments, then clean up."""
+        """Finalize a streaming event: update needed fragments, delete extras, clean up."""
         fragments = self._split_into_fragments(full_text)
         existing_ids = self._chat_fragments.get(ev_id, [])
         existing_count = len(existing_ids)
 
+        # Update or create the fragments that the final text needs
+        kept_ids: list[int] = []
         for i, frag in enumerate(fragments):
             if i < existing_count:
                 try:
                     edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None)
                 except Exception:
                     pass
+                kept_ids.append(existing_ids[i])
             else:
                 resp = send_message(self, chat_id, frag, parse_mode=None)
                 if resp and resp.get("message_id"):
-                    existing_ids.append(resp["message_id"])
+                    kept_ids.append(resp["message_id"])
+
+        # Delete surplus fragments (those beyond what the final text needs)
+        for stale_id in existing_ids[len(fragments):]:
+            try:
+                delete_message(self, chat_id, stale_id)
+            except Exception:
+                try:
+                    edit_message(self, chat_id, stale_id, "[mensaje eliminado]", parse_mode=None)
+                except Exception:
+                    pass
 
         self._chat_fragments.pop(ev_id, None)
         self._chat_event_version.pop(ev_id, None)
