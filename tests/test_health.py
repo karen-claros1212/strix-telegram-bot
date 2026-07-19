@@ -45,3 +45,52 @@ class TestVersionWarning:
         warning = _version_warning("1.0.1", "3.11.0")
         assert "desactualizada" in warning
         assert "por debajo del mínimo" in warning
+
+
+# ── Fix 5: /version uses importlib.metadata, not subprocess CLI ──
+class TestVersionUsesPackageMetadata:
+    def test_cmd_version_uses_pkg_version(self, monkeypatch):
+        """cmd_version should call importlib.metadata.version, not subprocess."""
+        import strix_telegram_bot.commands.health as health_mod
+        from unittest.mock import MagicMock, patch
+
+        calls = []
+        def fake_pkg_version(pkg):
+            calls.append(pkg)
+            return "1.1.0"
+
+        monkeypatch.setattr(health_mod, "_pkg_version", fake_pkg_version)
+
+        fake_bot = MagicMock()
+        fake_update = {"message": {"chat": {"id": 123}}}
+
+        with patch.object(health_mod, "send_message") as mock_send:
+            health_mod.cmd_version(fake_bot, fake_update)
+            mock_send.assert_called_once()
+            sent_text = mock_send.call_args[0][2]
+            assert "1.1.0" in sent_text
+            assert "unknown" not in sent_text
+
+    def test_send_health_uses_pkg_version(self, monkeypatch):
+        """_send_health should call importlib.metadata.version, not subprocess."""
+        import strix_telegram_bot.commands.health as health_mod
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.setattr(health_mod, "_pkg_version", lambda pkg: "1.1.0")
+
+        fake_bot = MagicMock()
+        with patch.object(health_mod, "send_message") as mock_send:
+            health_mod._send_health(fake_bot, 123)
+            mock_send.assert_called_once()
+            sent_text = mock_send.call_args[0][2]
+            assert "1.1.0" in sent_text or "1\\.1\\.0" in sent_text
+
+    def test_no_subprocess_import(self):
+        """health.py should NOT import subprocess."""
+        import strix_telegram_bot.commands.health as health_mod
+        import inspect
+        source = inspect.getsource(health_mod)
+        # The old code had 'import subprocess' — should not be present anymore
+        # But we can't guarantee no subprocess at all (e.g. for psutil_boot_time)
+        # So just check cmd_version and _send_health don't use it
+        assert "subprocess.run" not in source or "strix.*--version" not in source

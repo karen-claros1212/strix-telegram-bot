@@ -8,6 +8,7 @@ from strix_telegram_bot.ui.messages import escape_md, reports_menu_text
 from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
 from strix_telegram_bot.jobs.job_store import JobStore
+from strix_telegram_bot.models import JobPhase
 
 _MAX_MSG = 4000
 
@@ -129,7 +130,8 @@ def _show_reports(bot, chat_id, msg_id=None) -> None:
 
 def _send_latest_report(bot, chat_id, msg_id) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
+    jobs = [j for j in store.list_recent(5)
+            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
@@ -148,7 +150,8 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
 
 def _send_executive_summary(bot, chat_id, msg_id) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
+    jobs = [j for j in store.list_recent(5)
+            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
@@ -175,7 +178,8 @@ def _show_report_history(bot, chat_id, msg_id) -> None:
 
 def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
+    jobs = [j for j in store.list_recent(5)
+            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
@@ -206,7 +210,8 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
 
 def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5) if j.is_terminal and j.run_name != "pending"]
+    jobs = [j for j in store.list_recent(5)
+            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return

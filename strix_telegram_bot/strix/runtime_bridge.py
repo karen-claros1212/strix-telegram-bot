@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -179,34 +180,6 @@ class StrixRuntimeBridge:
         run_name = f"scan-{uuid.uuid4().hex[:8]}"
         targets_info = self._build_targets_info(targets)
 
-        diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
-        if scope_mode == "diff" and diff_base:
-            try:
-                diff_result = resolve_diff_scope_context(targets_info, diff_base)
-                if isinstance(diff_result, DiffScopeResult):
-                    diff_scope = {
-                        "active": True, "diff_base": diff_base,
-                        "changed_files": diff_result.changed_files,
-                        "instruction": diff_result.instruction,
-                    }
-                    if diff_result.instruction:
-                        instruction = (f"{instruction}\n\n{diff_result.instruction}"
-                                       if instruction else diff_result.instruction)
-                elif isinstance(diff_result, RepoDiffScope):
-                    diff_scope = {
-                        "active": True, "diff_base": diff_base,
-                        "changed_files": diff_result.changed_files,
-                        "instruction": diff_result.instruction,
-                    }
-                    if diff_result.instruction:
-                        instruction = (f"{instruction}\n\n{diff_result.instruction}"
-                                       if instruction else diff_result.instruction)
-            except Exception as exc:
-                logger.warning("resolve_diff_scope_context failed: %s", exc)
-                diff_scope = {"active": True, "diff_base": diff_base}
-        elif scope_mode == "auto":
-            diff_scope = {"active": True, "diff_base": diff_base or "auto"}
-
         strix_sources: list[dict] = []
         if collect_local_sources:
             try:
@@ -221,6 +194,33 @@ class StrixRuntimeBridge:
             if sp not in seen_paths:
                 seen_paths.add(sp)
                 merged_sources.append(s)
+
+        # ── diff_scope: compute AFTER merged_sources using official API ──
+        diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
+        has_local_sources = bool(merged_sources and any(
+            s.get("source_path") for s in merged_sources
+        ))
+        if scope_mode == "diff" and diff_base and has_local_sources:
+            try:
+                diff_result = resolve_diff_scope_context(
+                    merged_sources, scope_mode, diff_base, non_interactive,
+                )
+                if isinstance(diff_result, DiffScopeResult) and diff_result.active:
+                    diff_scope = {
+                        "active": True,
+                        "diff_base": diff_base,
+                        "mode": diff_result.mode,
+                        "instruction": diff_result.instruction_block,
+                        "metadata": diff_result.metadata,
+                    }
+                    if diff_result.instruction_block:
+                        instruction = (
+                            f"{instruction}\n\n{diff_result.instruction_block}"
+                            if instruction else diff_result.instruction_block
+                        )
+            except Exception as exc:
+                logger.warning("resolve_diff_scope_context failed: %s", exc)
+                diff_scope = {"active": False, "diff_base": None}
 
         scan_config: dict[str, Any] = {
             "scan_id": run_name, "targets": targets_info,
@@ -275,13 +275,23 @@ class StrixRuntimeBridge:
                 continue
             try:
                 target_type, target_dict = infer_target_type(t)
-                info.append({"type": target_type, "details": target_dict, "original": t})
             except ValueError:
-                info.append({
-                    "type": "web_application",
-                    "details": {"target_url": f"https://{t}"},
-                    "original": t,
-                })
+                target_type = "web_application"
+                target_dict = {"target_url": f"https://{t}"}
+
+            # ── Fix: file-hosting URLs are artifacts, not web apps ──
+            _FILE_HOSTING_RE = re.compile(
+                r"(drive\.google\.com|docs\.google\.com|dropbox\.com"
+                r"|onedrive\.live\.com|mega\.nz|mediafire\.com"
+                r"|www\.dropbox\.com)",
+                re.IGNORECASE,
+            )
+            if target_type == "web_application" and _FILE_HOSTING_RE.search(t):
+                target_type = "artifact"
+
+            info.append({
+                "type": target_type, "details": target_dict, "original": t,
+            })
         assign_workspace_subdirs(info)
         return info
 
@@ -318,6 +328,16 @@ class StrixRuntimeBridge:
                 with self._lv_lock:
                     live_view.ingest_sdk_event(agent_id, event)
 
+            # Lifecycle reinforcement: prevent agent from looping without
+            # calling finish_scan.  This instruction is injected into the
+            # root system prompt so the agent knows it MUST call finish_scan.
+            lifecycle_guard = (
+                "CRITICAL: You MUST call the finish_scan tool exactly once "
+                "when your analysis is complete. Do NOT loop indefinitely. "
+                "Do NOT output empty responses. If you have no more work, "
+                "call finish_scan immediately."
+            )
+
             return await run_strix_scan(
                 scan_config=scan_config, scan_id=current_run,
                 image=self._scan_image,
@@ -325,6 +345,7 @@ class StrixRuntimeBridge:
                 coordinator=self._coordinator,
                 interactive=not non_interactive,
                 event_sink=bound_event_sink,
+                root_instructions_override=lifecycle_guard,
             )
 
         async def _main() -> None:

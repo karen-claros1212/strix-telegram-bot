@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import platform
 import re
-import subprocess
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
@@ -45,10 +45,7 @@ def cmd_health(bot: Any, update: dict) -> None:
 def cmd_version(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     try:
-        ver = subprocess.run(
-            ["strix", "--version"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
+        ver = _pkg_version("strix-agent")
     except Exception:
         ver = "unknown"
     py_ver = platform.python_version()
@@ -95,10 +92,7 @@ def callback_health(bot: Any, update: dict) -> None:
 
 def _send_health(bot, chat_id, msg_id=None) -> None:
     try:
-        ver = subprocess.run(
-            ["strix", "--version"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip() or "unknown"
+        ver = _pkg_version("strix-agent")
     except Exception:
         ver = "unknown"
 

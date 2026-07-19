@@ -37,9 +37,10 @@ _GITHUB_RE = re.compile(r"github\.com[:/][^\s,]+")
 
 class StrixBot:
     _MAX_MSG = 4000
+    _OFFSET_FILE = Path("strix_runs/.updates_offset")
 
     def __init__(self) -> None:
-        self._updates_offset: Optional[int] = None
+        self._updates_offset: Optional[int] = self._load_offset()
         self._running = False
         self._job_store = JobStore()
         self._bridge = StrixRuntimeBridge()
@@ -93,6 +94,26 @@ class StrixBot:
             "health": callback_health,
             "agent": self._callback_agent_select,
         }
+
+    def _load_offset(self) -> Optional[int]:
+        """Load the persisted Telegram updates offset from disk."""
+        try:
+            if self._OFFSET_FILE.exists():
+                raw = self._OFFSET_FILE.read_text().strip()
+                if raw.isdigit():
+                    return int(raw)
+        except Exception:
+            pass
+        return None
+
+    def _save_offset(self) -> None:
+        """Persist the current Telegram updates offset to disk."""
+        try:
+            if self._updates_offset is not None:
+                self._OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+                self._OFFSET_FILE.write_text(str(self._updates_offset))
+        except Exception:
+            pass
 
     def _register_slash_commands(self) -> None:
         from .telegram import _request
@@ -894,6 +915,8 @@ class StrixBot:
                 for upd in updates:
                     self._updates_offset = upd["update_id"] + 1
                     self.process_update(upd)
+                if updates:
+                    self._save_offset()
             except KeyboardInterrupt:
                 logger.info("Shutdown requested.")
                 break
