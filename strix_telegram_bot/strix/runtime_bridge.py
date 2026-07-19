@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import threading
 import time
 import uuid
@@ -196,11 +195,13 @@ class StrixRuntimeBridge:
                 merged_sources.append(s)
 
         # ── diff_scope: compute AFTER merged_sources using official API ──
+        # The official API is the single source of truth for scope determination.
+        # Called for both "auto" and "diff" modes when local sources exist.
         diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
         has_local_sources = bool(merged_sources and any(
             s.get("source_path") for s in merged_sources
         ))
-        if scope_mode == "diff" and diff_base and has_local_sources:
+        if has_local_sources and (scope_mode in ("auto", "diff")):
             try:
                 diff_result = resolve_diff_scope_context(
                     merged_sources, scope_mode, diff_base, non_interactive,
@@ -275,23 +276,13 @@ class StrixRuntimeBridge:
                 continue
             try:
                 target_type, target_dict = infer_target_type(t)
+                info.append({"type": target_type, "details": target_dict, "original": t})
             except ValueError:
-                target_type = "web_application"
-                target_dict = {"target_url": f"https://{t}"}
-
-            # ── Fix: file-hosting URLs are artifacts, not web apps ──
-            _FILE_HOSTING_RE = re.compile(
-                r"(drive\.google\.com|docs\.google\.com|dropbox\.com"
-                r"|onedrive\.live\.com|mega\.nz|mediafire\.com"
-                r"|www\.dropbox\.com)",
-                re.IGNORECASE,
-            )
-            if target_type == "web_application" and _FILE_HOSTING_RE.search(t):
-                target_type = "artifact"
-
-            info.append({
-                "type": target_type, "details": target_dict, "original": t,
-            })
+                info.append({
+                    "type": "web_application",
+                    "details": {"target_url": f"https://{t}"},
+                    "original": t,
+                })
         assign_workspace_subdirs(info)
         return info
 

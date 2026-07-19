@@ -12,6 +12,15 @@ _STRIX_MIN_VERSION = (1, 0, 4)
 _PYTHON_MIN_VERSION = (3, 12)
 
 
+def _get_strix_module_path() -> str:
+    """Return the file path of the imported strix-agent package."""
+    try:
+        import strix
+        return getattr(strix, "__file__", "unknown")
+    except Exception:
+        return "unknown"
+
+
 def _parse_version(ver_str: str) -> tuple[int, ...]:
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", ver_str)
     if match:
@@ -49,8 +58,15 @@ def cmd_version(bot: Any, update: dict) -> None:
     except Exception:
         ver = "unknown"
     py_ver = platform.python_version()
+    module_path = _get_strix_module_path()
+    min_ver = ".".join(str(v) for v in _STRIX_MIN_VERSION)
     warning = _version_warning(ver, py_ver)
-    text = f"Versión STRIX: {ver}\nPython: {py_ver}"
+    text = (
+        f"Versión STRIX: {ver}\n"
+        f"Mínimo: {min_ver}\n"
+        f"Módulo: {module_path}\n"
+        f"Python: {py_ver}"
+    )
     if warning:
         text += "\n\n⚠️ ADVERTENCIA:\n" + warning
     send_message(

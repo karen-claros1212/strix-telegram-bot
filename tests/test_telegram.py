@@ -89,16 +89,16 @@ class TestSanitizeAgentContent:
         assert "data:image/png;base64,abc123" in result  # too short to match
 
 
-# ── Fix 4: _updates_offset persistence ──
+# ── Fix 4: _updates_offset persistence (atomic write, correct path) ──
 class TestUpdatesOffsetPersistence:
     def test_load_offset_from_existing_file(self, tmp_path):
-        """Should load offset from disk file."""
+        """Should load offset from strix_runs/.updates_offset."""
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / ".updates_offset"
+        offset_file = tmp_path / "strix_runs" / ".updates_offset"
+        offset_file.parent.mkdir(parents=True, exist_ok=True)
         offset_file.write_text("42")
 
         bot = StrixBot.__new__(StrixBot)
-        bot._OFFSET_FILE = offset_file
         bot._chat_fragments = {}
         bot._chat_fragment_count = {}
         bot._chat_event_version = {}
@@ -111,65 +111,93 @@ class TestUpdatesOffsetPersistence:
         bot._callback_handlers = {}
         bot._last_panel_text = ""
 
-        offset = bot._load_offset()
-        assert offset == 42
+        # Patch settings to use tmp_path
+        from strix_telegram_bot.config import settings
+        old_dir = settings.strix_runs_dir
+        settings.strix_runs_dir = tmp_path / "strix_runs"
+        try:
+            offset = bot._load_offset()
+            assert offset == 42
+        finally:
+            settings.strix_runs_dir = old_dir
 
     def test_load_offset_returns_none_when_file_missing(self, tmp_path):
         """Should return None when no offset file exists."""
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / "nonexistent" / ".updates_offset"
-
-        bot = StrixBot.__new__(StrixBot)
-        bot._OFFSET_FILE = offset_file
-        offset = bot._load_offset()
-        assert offset is None
+        from strix_telegram_bot.config import settings
+        old_dir = settings.strix_runs_dir
+        settings.strix_runs_dir = tmp_path / "strix_runs"
+        try:
+            bot = StrixBot.__new__(StrixBot)
+            offset = bot._load_offset()
+            assert offset is None
+        finally:
+            settings.strix_runs_dir = old_dir
 
     def test_load_offset_returns_none_for_invalid_content(self, tmp_path):
         """Should return None for non-numeric content."""
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / ".updates_offset"
+        from strix_telegram_bot.config import settings
+        offset_file = tmp_path / "strix_runs" / ".updates_offset"
+        offset_file.parent.mkdir(parents=True, exist_ok=True)
         offset_file.write_text("not-a-number")
 
-        bot = StrixBot.__new__(StrixBot)
-        bot._OFFSET_FILE = offset_file
-        offset = bot._load_offset()
-        assert offset is None
+        old_dir = settings.strix_runs_dir
+        settings.strix_runs_dir = tmp_path / "strix_runs"
+        try:
+            bot = StrixBot.__new__(StrixBot)
+            offset = bot._load_offset()
+            assert offset is None
+        finally:
+            settings.strix_runs_dir = old_dir
 
-    def test_save_offset_creates_file(self, tmp_path):
-        """Should persist offset to disk."""
+    def test_save_offset_creates_atomic_file(self, tmp_path):
+        """Should persist offset atomically via tmp + replace."""
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / "strix_runs" / ".updates_offset"
+        from strix_telegram_bot.config import settings
+        old_dir = settings.strix_runs_dir
+        settings.strix_runs_dir = tmp_path / "strix_runs"
+        try:
+            bot = StrixBot.__new__(StrixBot)
+            bot._updates_offset = 100
+            bot._save_offset()
 
-        bot = StrixBot.__new__(StrixBot)
-        bot._OFFSET_FILE = offset_file
-        bot._updates_offset = 100
-        bot._save_offset()
-
-        assert offset_file.exists()
-        assert offset_file.read_text() == "100"
+            offset_file = tmp_path / "strix_runs" / ".updates_offset"
+            tmp_file = tmp_path / "strix_runs" / ".updates_offset.tmp"
+            assert offset_file.exists()
+            assert not tmp_file.exists()  # tmp should be gone after replace
+            assert offset_file.read_text() == "100"
+        finally:
+            settings.strix_runs_dir = old_dir
 
     def test_save_offset_none_skips_write(self, tmp_path):
         """Should not write when offset is None."""
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / ".updates_offset"
+        from strix_telegram_bot.config import settings
+        old_dir = settings.strix_runs_dir
+        settings.strix_runs_dir = tmp_path / "strix_runs"
+        try:
+            bot = StrixBot.__new__(StrixBot)
+            bot._updates_offset = None
+            bot._save_offset()
 
-        bot = StrixBot.__new__(StrixBot)
-        bot._OFFSET_FILE = offset_file
-        bot._updates_offset = None
-        bot._save_offset()
-
-        assert not offset_file.exists()
+            offset_file = tmp_path / "strix_runs" / ".updates_offset"
+            assert not offset_file.exists()
+        finally:
+            settings.strix_runs_dir = old_dir
 
     def test_offset_roundtrip(self, tmp_path):
-        """Save and load should roundtrip correctly."""
+        """Save and load should roundtrip correctly via settings.strix_runs_dir."""
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / ".updates_offset"
+        from strix_telegram_bot.config import settings
+        old_dir = settings.strix_runs_dir
+        settings.strix_runs_dir = tmp_path / "strix_runs"
+        try:
+            bot = StrixBot.__new__(StrixBot)
+            bot._updates_offset = 999
+            bot._save_offset()
 
-        bot = StrixBot.__new__(StrixBot)
-        bot._OFFSET_FILE = offset_file
-        bot._updates_offset = 999
-        bot._save_offset()
-
-        bot2 = StrixBot.__new__(StrixBot)
-        bot2._OFFSET_FILE = offset_file
-        assert bot2._load_offset() == 999
+            bot2 = StrixBot.__new__(StrixBot)
+            assert bot2._load_offset() == 999
+        finally:
+            settings.strix_runs_dir = old_dir

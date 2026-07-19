@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -37,7 +38,6 @@ _GITHUB_RE = re.compile(r"github\.com[:/][^\s,]+")
 
 class StrixBot:
     _MAX_MSG = 4000
-    _OFFSET_FILE = Path("strix_runs/.updates_offset")
 
     def __init__(self) -> None:
         self._updates_offset: Optional[int] = self._load_offset()
@@ -98,8 +98,10 @@ class StrixBot:
     def _load_offset(self) -> Optional[int]:
         """Load the persisted Telegram updates offset from disk."""
         try:
-            if self._OFFSET_FILE.exists():
-                raw = self._OFFSET_FILE.read_text().strip()
+            from .config import settings
+            offset_file = settings.strix_runs_dir / ".updates_offset"
+            if offset_file.exists():
+                raw = offset_file.read_text().strip()
                 if raw.isdigit():
                     return int(raw)
         except Exception:
@@ -107,11 +109,16 @@ class StrixBot:
         return None
 
     def _save_offset(self) -> None:
-        """Persist the current Telegram updates offset to disk."""
+        """Persist the current Telegram updates offset to disk (atomic write)."""
         try:
             if self._updates_offset is not None:
-                self._OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
-                self._OFFSET_FILE.write_text(str(self._updates_offset))
+                from .config import settings
+                offset_dir = settings.strix_runs_dir
+                offset_dir.mkdir(parents=True, exist_ok=True)
+                offset_file = offset_dir / ".updates_offset"
+                tmp_file = offset_dir / ".updates_offset.tmp"
+                tmp_file.write_text(str(self._updates_offset))
+                os.replace(str(tmp_file), str(offset_file))
         except Exception:
             pass
 
@@ -464,6 +471,22 @@ class StrixBot:
             full_instruction += (
                 "\n\nInstrucción específica del usuario:\n"
                 + instruction.strip()
+            )
+
+        # Artifact-delivery URL context: file-hosting pages are transport, not targets.
+        _ARTIFACT_HOST_RE = re.compile(
+            r"(drive\.google\.com|docs\.google\.com|dropbox\.com"
+            r"|onedrive\.live\.com|mega\.nz|mediafire\.com"
+            r"|www\.dropbox\.com)",
+            re.IGNORECASE,
+        )
+        if any(_ARTIFACT_HOST_RE.search(t) for t in targets):
+            full_instruction += (
+                "\n\nThe authorized URL is an artifact-delivery location. "
+                "Treat the hosting page only as transport. "
+                "Download and validate the artifact inside the official "
+                "Strix sandbox and analyze the downloaded artifact as the "
+                "primary target."
             )
 
         ok, start_msg = self._bridge.start_scan(
@@ -915,7 +938,6 @@ class StrixBot:
                 for upd in updates:
                     self._updates_offset = upd["update_id"] + 1
                     self.process_update(upd)
-                if updates:
                     self._save_offset()
             except KeyboardInterrupt:
                 logger.info("Shutdown requested.")

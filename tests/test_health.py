@@ -47,7 +47,7 @@ class TestVersionWarning:
         assert "por debajo del mínimo" in warning
 
 
-# ── Fix 5: /version uses importlib.metadata, not subprocess CLI ──
+# ── Fix 5: /version uses importlib.metadata, shows module path + min version ──
 class TestVersionUsesPackageMetadata:
     def test_cmd_version_uses_pkg_version(self, monkeypatch):
         """cmd_version should call importlib.metadata.version, not subprocess."""
@@ -71,6 +71,39 @@ class TestVersionUsesPackageMetadata:
             assert "1.1.0" in sent_text
             assert "unknown" not in sent_text
 
+    def test_cmd_version_shows_module_path(self, monkeypatch):
+        """cmd_version output should include the module path."""
+        import strix_telegram_bot.commands.health as health_mod
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.setattr(health_mod, "_pkg_version", lambda pkg: "1.1.0")
+        monkeypatch.setattr(health_mod, "_get_strix_module_path", lambda: "/path/to/strix")
+
+        fake_bot = MagicMock()
+        fake_update = {"message": {"chat": {"id": 123}}}
+
+        with patch.object(health_mod, "send_message") as mock_send:
+            health_mod.cmd_version(fake_bot, fake_update)
+            sent_text = mock_send.call_args[0][2]
+            assert "Módulo:" in sent_text
+            assert "/path/to/strix" in sent_text
+
+    def test_cmd_version_shows_min_version(self, monkeypatch):
+        """cmd_version output should include the minimum required version."""
+        import strix_telegram_bot.commands.health as health_mod
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.setattr(health_mod, "_pkg_version", lambda pkg: "1.1.0")
+
+        fake_bot = MagicMock()
+        fake_update = {"message": {"chat": {"id": 123}}}
+
+        with patch.object(health_mod, "send_message") as mock_send:
+            health_mod.cmd_version(fake_bot, fake_update)
+            sent_text = mock_send.call_args[0][2]
+            assert "Mínimo:" in sent_text
+            assert "1.0.4" in sent_text  # _STRIX_MIN_VERSION
+
     def test_send_health_uses_pkg_version(self, monkeypatch):
         """_send_health should call importlib.metadata.version, not subprocess."""
         import strix_telegram_bot.commands.health as health_mod
@@ -90,7 +123,4 @@ class TestVersionUsesPackageMetadata:
         import strix_telegram_bot.commands.health as health_mod
         import inspect
         source = inspect.getsource(health_mod)
-        # The old code had 'import subprocess' — should not be present anymore
-        # But we can't guarantee no subprocess at all (e.g. for psutil_boot_time)
-        # So just check cmd_version and _send_health don't use it
         assert "subprocess.run" not in source or "strix.*--version" not in source

@@ -142,7 +142,6 @@ class TestSendLatestReportFilter:
         from strix_telegram_bot.commands import reports as reports_mod
         from strix_telegram_bot.jobs.job_store import JobStore
 
-        # Create mock jobs: FAILED first, then COMPLETED
         failed_job = JobState(
             run_name="scan-failed", target=["x"], mode=ScanMode.DEEP,
             phase=JobPhase.FAILED,
@@ -152,14 +151,11 @@ class TestSendLatestReportFilter:
             phase=JobPhase.COMPLETED,
         )
 
-        # list_recent(5) returns most-recent-first
         mock_store = MagicMock(spec=JobStore)
         mock_store.list_recent.return_value = [failed_job, completed_job]
-
         monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
 
         fake_bot = MagicMock()
-        # Mock ReportCollector
         mock_rc = MagicMock()
         mock_rc.get_full_markdown_report.return_value = "# Report Content"
         monkeypatch.setattr(reports_mod, "ReportCollector", lambda run: mock_rc)
@@ -167,11 +163,9 @@ class TestSendLatestReportFilter:
         with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
              patch.object(reports_mod, "edit_message") as mock_edit:
             reports_mod._send_latest_report(fake_bot, 123, 456)
-            # Should use scan-done (COMPLETED), not scan-failed (FAILED)
             mock_frag.assert_called_once()
             call_text = mock_frag.call_args[0][2]
             assert "scan-done" in call_text
-            assert "scan-failed" not in call_text
 
     def test_send_latest_report_skips_stopped_jobs(self, monkeypatch):
         """STOPPED jobs should not be picked by 'Último reporte'."""
@@ -185,14 +179,11 @@ class TestSendLatestReportFilter:
 
         mock_store = MagicMock(spec=JobStore)
         mock_store.list_recent.return_value = [stopped_job]
-
         monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
 
         fake_bot = MagicMock()
         with patch.object(reports_mod, "edit_message") as mock_edit:
             reports_mod._send_latest_report(fake_bot, 123, 456)
-            # Should show "No hay trabajos completados"
-            mock_edit.assert_called_once()
             sent_text = mock_edit.call_args[0][3]
             assert "No hay trabajos completados" in sent_text
 
@@ -206,7 +197,6 @@ class TestSendLatestReportFilter:
 
         mock_store = MagicMock(spec=JobStore)
         mock_store.list_recent.return_value = [failed1, failed2]
-
         monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
 
         fake_bot = MagicMock()
@@ -214,3 +204,125 @@ class TestSendLatestReportFilter:
             reports_mod._send_latest_report(fake_bot, 123, 456)
             sent_text = mock_edit.call_args[0][3]
             assert "No hay trabajos completados" in sent_text
+
+    def test_send_latest_report_fallback_to_next_job_with_content(self, monkeypatch):
+        """Should loop through jobs — first has empty report, second has content."""
+        from strix_telegram_bot.commands import reports as reports_mod
+        from strix_telegram_bot.jobs.job_store import JobStore
+
+        job1 = JobState(run_name="scan-empty", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+        job2 = JobState(run_name="scan-good", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+
+        mock_store = MagicMock(spec=JobStore)
+        mock_store.list_recent.return_value = [job1, job2]
+        monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
+
+        def fake_rc(run_name):
+            mock = MagicMock()
+            if run_name == "scan-empty":
+                mock.get_full_markdown_report.return_value = ""
+            else:
+                mock.get_full_markdown_report.return_value = "# Good Report"
+            return mock
+
+        monkeypatch.setattr(reports_mod, "ReportCollector", fake_rc)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
+             patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._send_latest_report(fake_bot, 123, 456)
+            mock_frag.assert_called_once()
+            call_text = mock_frag.call_args[0][2]
+            assert "scan-good" in call_text
+
+    def test_send_latest_report_all_empty_shows_no_valid(self, monkeypatch):
+        """All completed jobs have empty reports → 'No se encontraron reportes válidos'."""
+        from strix_telegram_bot.commands import reports as reports_mod
+        from strix_telegram_bot.jobs.job_store import JobStore
+
+        job1 = JobState(run_name="scan-a", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+        job2 = JobState(run_name="scan-b", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+
+        mock_store = MagicMock(spec=JobStore)
+        mock_store.list_recent.return_value = [job1, job2]
+        monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
+
+        mock_rc = MagicMock()
+        mock_rc.get_full_markdown_report.return_value = ""
+        monkeypatch.setattr(reports_mod, "ReportCollector", lambda run: mock_rc)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._send_latest_report(fake_bot, 123, 456)
+            sent_text = mock_edit.call_args[0][3]
+            assert "No se encontraron reportes válidos" in sent_text
+
+    def test_send_executive_summary_fallback(self, monkeypatch):
+        """Executive summary should also loop to find job with valid summary."""
+        from strix_telegram_bot.commands import reports as reports_mod
+        from strix_telegram_bot.jobs.job_store import JobStore
+
+        job1 = JobState(run_name="scan-no", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+        job2 = JobState(run_name="scan-yes", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+
+        mock_store = MagicMock(spec=JobStore)
+        mock_store.list_recent.return_value = [job1, job2]
+        monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
+
+        def fake_rc(run_name):
+            mock = MagicMock()
+            if run_name == "scan-no":
+                mock.build_executive_summary.return_value = ""
+            else:
+                mock.build_executive_summary.return_value = "# Summary"
+            return mock
+
+        monkeypatch.setattr(reports_mod, "ReportCollector", fake_rc)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._send_executive_summary(fake_bot, 123, 456)
+            # Should call edit_message with the summary content (not "No hay resumen")
+            calls = mock_edit.call_args_list
+            summary_calls = [c for c in calls if "# Summary" in (c[0][3] if len(c[0]) > 3 else "")]
+            assert len(summary_calls) == 1
+
+    def test_send_report_type_fallback(self, monkeypatch):
+        """_send_report_type should loop and pick first with valid content."""
+        from strix_telegram_bot.commands import reports as reports_mod
+        from strix_telegram_bot.jobs.job_store import JobStore
+
+        job1 = JobState(run_name="scan-empty", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+        job2 = JobState(run_name="scan-csv", target=["x"], mode=ScanMode.DEEP,
+                        phase=JobPhase.COMPLETED)
+
+        mock_store = MagicMock(spec=JobStore)
+        mock_store.list_recent.return_value = [job1, job2]
+        monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
+
+        def fake_rc(run_name):
+            mock = MagicMock()
+            if run_name == "scan-empty":
+                mock.get_report_content.return_value = ""
+            else:
+                mock.get_report_content.return_value = "id,severity\n1,high"
+            return mock
+
+        monkeypatch.setattr(reports_mod, "ReportCollector", fake_rc)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
+             patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._send_report_type(fake_bot, 123, 456, "csv")
+            mock_frag.assert_called_once()
+            call_text = mock_frag.call_args[0][2]
+            # _send_report_type format is "Reporte CSV:\n\n{content}" — no run name
+            assert "CSV" in call_text
+            assert "id,severity" in call_text

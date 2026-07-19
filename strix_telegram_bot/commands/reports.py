@@ -130,39 +130,42 @@ def _show_reports(bot, chat_id, msg_id=None) -> None:
 
 def _send_latest_report(bot, chat_id, msg_id) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5)
+    jobs = [j for j in store.list_recent(10)
             if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
-    job = jobs[0]
-    rc = ReportCollector(job.run_name)
-    content = rc.get_full_markdown_report()
-    if content:
+    for job in jobs:
+        rc = ReportCollector(job.run_name)
+        content = rc.get_full_markdown_report()
+        if not content or not content.strip():
+            continue
         edit_message(bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu())
         ok = _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
         status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
         edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
-    else:
-        edit_message(bot, chat_id, msg_id, "No se puede leer el reporte.", reply_markup=back_to_menu())
+        return
+
+    edit_message(bot, chat_id, msg_id, "No se encontraron reportes válidos.", reply_markup=back_to_menu())
 
 
 def _send_executive_summary(bot, chat_id, msg_id) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5)
+    jobs = [j for j in store.list_recent(10)
             if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
-    job = jobs[0]
-    rc = ReportCollector(job.run_name)
-    summary = rc.build_executive_summary()
-    if summary:
-        edit_message(bot, chat_id, msg_id, summary, reply_markup=back_to_menu())
-    else:
-        edit_message(bot, chat_id, msg_id, "No hay resumen disponible.", reply_markup=back_to_menu())
+    for job in jobs:
+        rc = ReportCollector(job.run_name)
+        summary = rc.build_executive_summary()
+        if summary:
+            edit_message(bot, chat_id, msg_id, summary, reply_markup=back_to_menu())
+            return
+
+    edit_message(bot, chat_id, msg_id, "No hay resumen disponible.", reply_markup=back_to_menu())
 
 
 def _show_report_history(bot, chat_id, msg_id) -> None:
@@ -178,34 +181,34 @@ def _show_report_history(bot, chat_id, msg_id) -> None:
 
 def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5)
+    jobs = [j for j in store.list_recent(10)
             if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
-    job = jobs[0]
-    rc = ReportCollector(job.run_name)
-
-    content = None
     label = rtype.upper()
-    if rtype == "markdown":
-        content = rc.get_full_markdown_report()
-    elif rtype == "csv":
-        content = rc.get_report_content("vulnerabilities.csv", max_chars=None)
-    elif rtype == "json":
-        import json
-        events = rc.get_json_events()
-        if events:
-            content = json.dumps(events[:50], indent=2)
+    for job in jobs:
+        rc = ReportCollector(job.run_name)
+        content = None
+        if rtype == "markdown":
+            content = rc.get_full_markdown_report()
+        elif rtype == "csv":
+            content = rc.get_report_content("vulnerabilities.csv", max_chars=None)
+        elif rtype == "json":
+            import json as _json
+            events = rc.get_json_events()
+            if events:
+                content = _json.dumps(events[:50], indent=2)
 
-    if content:
-        edit_message(bot, chat_id, msg_id, f"Enviando reporte {label}…", reply_markup=back_to_menu())
-        ok = _send_fragmented(bot, chat_id, f"Reporte {label}:\n\n{content}")
-        status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
-        edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
-    else:
-        edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
+        if content and content.strip():
+            edit_message(bot, chat_id, msg_id, f"Enviando reporte {label}…", reply_markup=back_to_menu())
+            ok = _send_fragmented(bot, chat_id, f"Reporte {label}:\n\n{content}")
+            status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
+            edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
+            return
+
+    edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
 
 
 def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:

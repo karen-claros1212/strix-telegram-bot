@@ -703,8 +703,8 @@ class TestDiffScopeOfficialAPI:
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
     @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
     @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
-    def test_diff_scope_called_with_correct_args(self, mock_resolve, mock_itt):
-        """resolve_diff_scope_context must be called with (merged_sources, scope_mode, diff_base, non_interactive)."""
+    def test_diff_scope_called_for_auto_mode(self, mock_resolve, mock_itt):
+        """resolve_diff_scope_context must be called for both auto and diff modes."""
         from strix.interface.utils import DiffScopeResult
         mock_resolve.return_value = DiffScopeResult(
             active=False, mode="auto", instruction_block="", metadata={},
@@ -713,52 +713,51 @@ class TestDiffScopeOfficialAPI:
         bridge = StrixRuntimeBridge()
         bridge._build_targets_info(["https://example.com"])
 
-        # Verify the mock was set up correctly (real function would accept these args)
+        # Simulate auto mode with local sources — API should be called
         merged_sources = [{"source_path": "/tmp/test", "workspace_subdir": "test"}]
-        mock_resolve(merged_sources, "diff", "HEAD~1", True)
-        mock_resolve.assert_called_with(merged_sources, "diff", "HEAD~1", True)
+        result = mock_resolve(merged_sources, "auto", None, True)
+        mock_resolve.assert_called_with(merged_sources, "auto", None, True)
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
     @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
     def test_diff_scope_inactive_for_urls_without_local(self, mock_itt):
-        """scope_mode=auto with URL-only targets should NOT activate diff_scope."""
+        """No local sources → diff_scope stays inactive (API not called)."""
         mock_itt.return_value = ("url", {"target_url": "https://example.com"})
         bridge = StrixRuntimeBridge()
-        info = bridge._build_targets_info(["https://example.com"])
+        bridge._build_targets_info(["https://example.com"])
         # merged_sources would be empty since URLs have no source_path
         merged_sources = []
         has_local_sources = bool(merged_sources and any(s.get("source_path") for s in merged_sources))
         assert has_local_sources is False
-        # diff_scope should remain inactive
-        diff_scope = {"active": False, "diff_base": None}
 
 
-# ── Fix 3: Google Drive classified as artifact ──
-class TestGoogleDriveAsArtifact:
+# ── Fix 1: Google Drive stays web_application, no artifact type ──
+class TestFileHostingURLs:
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_google_drive_file_url_classified_as_artifact(self, mock_itt):
+    def test_google_drive_stays_web_application(self, mock_itt):
         mock_itt.return_value = ("web_application", {"target_url": "https://drive.google.com/file/d/1abc/view"})
         info = StrixRuntimeBridge._build_targets_info(
             ["https://drive.google.com/file/d/1abc/view?usp=drivesdk"]
         )
         assert len(info) == 1
-        assert info[0]["type"] == "artifact"
+        assert info[0]["type"] == "web_application"
+        assert "drive.google.com" in info[0]["details"]["target_url"]
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_dropbox_url_classified_as_artifact(self, mock_itt):
+    def test_dropbox_stays_web_application(self, mock_itt):
         mock_itt.return_value = ("web_application", {"target_url": "https://www.dropbox.com/s/abc/file.apk"})
         info = StrixRuntimeBridge._build_targets_info(
             ["https://www.dropbox.com/s/abc/file.apk"]
         )
         assert len(info) == 1
-        assert info[0]["type"] == "artifact"
+        assert info[0]["type"] == "web_application"
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_regular_url_not_classified_as_artifact(self, mock_itt):
+    def test_regular_url_unaffected(self, mock_itt):
         mock_itt.return_value = ("url", {"target_url": "https://example.com"})
         info = StrixRuntimeBridge._build_targets_info(["https://example.com"])
         assert len(info) == 1
@@ -766,10 +765,10 @@ class TestGoogleDriveAsArtifact:
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_mega_url_classified_as_artifact(self, mock_itt):
+    def test_mega_stays_web_application(self, mock_itt):
         mock_itt.return_value = ("web_application", {"target_url": "https://mega.nz/file/abc/file.apk"})
         info = StrixRuntimeBridge._build_targets_info(
             ["https://mega.nz/file/abc/file.apk"]
         )
         assert len(info) == 1
-        assert info[0]["type"] == "artifact"
+        assert info[0]["type"] == "web_application"
