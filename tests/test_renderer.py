@@ -244,8 +244,10 @@ class TestScanCompleteCycle:
         bot._bridge._scan_status = "completed"
         ev = _make_system_event("scan_complete")
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 1
-        assert "completado" in mock_send.call_args[0][2]
+        # When report is missing, bot sends fallback warning + completion message
+        assert mock_send.call_count == 2
+        last_msg = mock_send.call_args_list[-1][0][2]
+        assert "completado" in last_msg
 
 
 class TestCallHistory:

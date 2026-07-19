@@ -8,6 +8,14 @@ from strix_telegram_bot.ui.messages import escape_md, reports_menu_text
 from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
 from strix_telegram_bot.jobs.job_store import JobStore
+
+_MAX_MSG = 4000
+
+
+def _send_fragmented(bot: Any, chat_id: int, text: str) -> None:
+    """Send text as one or more Telegram-safe fragments."""
+    for i in range(0, len(text), _MAX_MSG):
+        send_message(bot, chat_id, text[i:i + _MAX_MSG], parse_mode=None)
 def cmd_reports(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _show_reports(bot, chat_id)
@@ -62,9 +70,9 @@ def callback_reports(bot: Any, update: dict) -> None:
         report_name = parts[1]
         job_name = parts[2] if len(parts) > 2 else "unknown"
         rc = ReportCollector(job_name)
-        content = rc.get_report_content(report_name)
+        content = rc.get_report_content(report_name, max_chars=None)
         if content:
-            send_message(bot, chat_id, f"Reporte: {report_name}\n\n{content[:4000]}")
+            _send_fragmented(bot, chat_id, f"Reporte: {report_name}\n\n{content}")
         else:
             send_message(bot, chat_id, f"Reporte {report_name} no encontrado.")
 
@@ -103,13 +111,12 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
 
     job = jobs[0]
     rc = ReportCollector(job.run_name)
-    report = rc.get_latest_report()
-    if report:
-        content = rc.get_report_content(report["name"])
-        text = f"Último reporte de {job.run_name}:\n\n{content[:3500]}" if content else "No se puede leer el reporte."
-        edit_message(bot, chat_id, msg_id, text, reply_markup=back_to_menu())
+    content = rc.get_full_markdown_report()
+    if content:
+        edit_message(bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu())
+        _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
     else:
-        edit_message(bot, chat_id, msg_id, "No hay reportes para el último trabajo.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, "No se puede leer el reporte.", reply_markup=back_to_menu())
 
 
 def _send_executive_summary(bot, chat_id, msg_id) -> None:
@@ -152,9 +159,9 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     content = None
     label = rtype.upper()
     if rtype == "markdown":
-        content = rc.get_markdown_report()
+        content = rc.get_full_markdown_report()
     elif rtype == "csv":
-        content = rc.get_csv_report()
+        content = rc.get_report_content("vulnerabilities.csv", max_chars=None)
     elif rtype == "json":
         import json
         events = rc.get_json_events()
@@ -162,8 +169,8 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
             content = json.dumps(events[:50], indent=2)
 
     if content:
-        send_message(bot, chat_id, f"Reporte {label}:\n\n{content[:4000]}")
-        edit_message(bot, chat_id, msg_id, "Reporte enviado.", reply_markup=back_to_menu())
+        edit_message(bot, chat_id, msg_id, f"Enviando reporte {label}…", reply_markup=back_to_menu())
+        _send_fragmented(bot, chat_id, f"Reporte {label}:\n\n{content}")
     else:
         edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
 

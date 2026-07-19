@@ -52,7 +52,7 @@ class ReportCollector:
         return found
 
     def get_report_content(
-        self, report_name: str, max_chars: int = 4000
+        self, report_name: str, max_chars: int | None = 4000
     ) -> Optional[str]:
         if self._run_dir is None:
             self._run_dir = self._resolve_dir()
@@ -64,7 +64,7 @@ class ReportCollector:
             fpath = base / report_name
             if fpath.exists() and fpath.is_file():
                 content = fpath.read_text(encoding="utf-8", errors="replace")
-                if len(content) > max_chars:
+                if max_chars is not None and len(content) > max_chars:
                     content = content[:max_chars] + "\n\n... (truncated)"
                 return content
         return None
@@ -78,6 +78,9 @@ class ReportCollector:
 
     def get_markdown_report(self) -> Optional[str]:
         return self.get_report_content("penetration_test_report.md")
+
+    def get_full_markdown_report(self) -> Optional[str]:
+        return self.get_report_content("penetration_test_report.md", max_chars=None)
 
     def get_csv_report(self) -> Optional[str]:
         return self.get_report_content("vulnerabilities.csv")

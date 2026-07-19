@@ -57,6 +57,8 @@ class StrixBot:
         self._active_chat_message_id: Optional[int] = None
         self._active_chat_chat_id: Optional[int] = None
 
+        self._final_reports_delivered: set[str] = set()
+
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
         self._drain_thread: Optional[threading.Thread] = None
@@ -482,6 +484,7 @@ class StrixBot:
         self._chat_fragments.clear()
         self._chat_event_version.clear()
         self._tool_message_ids.clear()
+        self._final_reports_delivered.clear()
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
@@ -652,7 +655,21 @@ class StrixBot:
                         parse_mode=None,
                     )
                 elif event_name == "scan_complete":
+                    run_name = data.get("run_name", current_run or "")
                     delta = self._bridge.to_status_dict().get("elapsed", "0s")
+
+                    if run_name and run_name not in self._final_reports_delivered:
+                        delivered = self._deliver_final_report(chat_id, run_name)
+                        if not delivered:
+                            send_message(
+                                self, chat_id,
+                                "El escaneo terminó y el informe fue generado, "
+                                "pero Telegram no pudo entregarlo completo. "
+                                "Está disponible en Reportes.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+
                     send_message(
                         self, chat_id,
                         f"Escaneo completado.\n"
@@ -760,6 +777,44 @@ class StrixBot:
                 ids.append(resp["message_id"])
         self._chat_fragments[ev_id] = ids
         self._chat_event_version[ev_id] = ev_version
+
+    def _deliver_final_report(self, chat_id: int, run_name: str) -> bool:
+        """Deliver the official penetration test report via Telegram.
+
+        Reads the full report from strix_runs/<run_name>/penetration_test_report.md,
+        fragments it into Telegram-safe messages, and sends all fragments in order.
+
+        Returns True only if every fragment was delivered successfully.
+        """
+        from .strix.report_collector import ReportCollector
+
+        rc = ReportCollector(run_name)
+        content = rc.get_full_markdown_report()
+
+        if not content or not content.strip():
+            logger.warning("Final report empty or missing for %s", run_name)
+            return False
+
+        header = f"Reporte final — {run_name}\n\n"
+        fragments = self._split_into_fragments(header + content)
+
+        all_ok = True
+        for frag in fragments:
+            resp = send_message(self, chat_id, frag, parse_mode=None)
+            if not resp or not resp.get("message_id"):
+                all_ok = False
+                logger.error(
+                    "Failed to deliver report fragment for %s: %s",
+                    run_name,
+                    resp,
+                )
+                break
+
+        if all_ok:
+            self._final_reports_delivered.add(run_name)
+            logger.info("Final report delivered for %s (%d fragments)", run_name, len(fragments))
+
+        return all_ok
 
     @staticmethod
     def _sanitize_tool_args(args: dict) -> str:
