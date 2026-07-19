@@ -659,24 +659,41 @@ class StrixBot:
                     delta = self._bridge.to_status_dict().get("elapsed", "0s")
 
                     if run_name and run_name not in self._final_reports_delivered:
-                        delivered = self._deliver_final_report(chat_id, run_name)
-                        if not delivered:
+                        result = self._deliver_final_report(chat_id, run_name)
+                        if result == "missing":
                             send_message(
                                 self, chat_id,
-                                "El escaneo terminó y el informe fue generado, "
-                                "pero Telegram no pudo entregarlo completo. "
-                                "Está disponible en Reportes.",
+                                "Escaneo completado.\n"
+                                "El informe final no fue generado por Strix.",
                                 reply_markup=main_menu(),
                                 parse_mode=None,
                             )
-
-                    send_message(
-                        self, chat_id,
-                        f"Escaneo completado.\n"
-                        f"Duracion: {delta}",
-                        reply_markup=main_menu(),
-                        parse_mode=None,
-                    )
+                        elif result == "send_failed":
+                            send_message(
+                                self, chat_id,
+                                "Escaneo completado.\n"
+                                "El informe fue generado pero no pudo enviarse. "
+                                "Disponible en Reportes.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+                        else:
+                            send_message(
+                                self, chat_id,
+                                f"Escaneo completado.\n"
+                                f"Duracion: {delta}",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+                    else:
+                        if run_name not in self._final_reports_delivered:
+                            send_message(
+                                self, chat_id,
+                                f"Escaneo completado.\n"
+                                f"Duracion: {delta}",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
                 elif event_name == "scan_error":
                     content = data.get("content", "")
                     send_message(self, chat_id, f"Error: {escape_md(content)}", reply_markup=main_menu())
@@ -778,13 +795,13 @@ class StrixBot:
         self._chat_fragments[ev_id] = ids
         self._chat_event_version[ev_id] = ev_version
 
-    def _deliver_final_report(self, chat_id: int, run_name: str) -> bool:
+    def _deliver_final_report(self, chat_id: int, run_name: str) -> str:
         """Deliver the official penetration test report via Telegram.
 
-        Reads the full report from strix_runs/<run_name>/penetration_test_report.md,
-        fragments it into Telegram-safe messages, and sends all fragments in order.
-
-        Returns True only if every fragment was delivered successfully.
+        Returns:
+            "delivered" if all fragments sent successfully.
+            "missing" if the report file does not exist or is empty.
+            "send_failed" if the file exists but a fragment failed to send.
         """
         from .strix.report_collector import ReportCollector
 
@@ -793,28 +810,25 @@ class StrixBot:
 
         if not content or not content.strip():
             logger.warning("Final report empty or missing for %s", run_name)
-            return False
+            return "missing"
 
         header = f"Reporte final — {run_name}\n\n"
-        fragments = self._split_into_fragments(header + content)
+        full_text = header + content
+        fragments = self._split_into_fragments(full_text)
 
-        all_ok = True
         for frag in fragments:
             resp = send_message(self, chat_id, frag, parse_mode=None)
             if not resp or not resp.get("message_id"):
-                all_ok = False
                 logger.error(
                     "Failed to deliver report fragment for %s: %s",
                     run_name,
                     resp,
                 )
-                break
+                return "send_failed"
 
-        if all_ok:
-            self._final_reports_delivered.add(run_name)
-            logger.info("Final report delivered for %s (%d fragments)", run_name, len(fragments))
-
-        return all_ok
+        self._final_reports_delivered.add(run_name)
+        logger.info("Final report delivered for %s (%d fragments)", run_name, len(fragments))
+        return "delivered"
 
     @staticmethod
     def _sanitize_tool_args(args: dict) -> str:

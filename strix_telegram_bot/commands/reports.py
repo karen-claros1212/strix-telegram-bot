@@ -12,10 +12,35 @@ from strix_telegram_bot.jobs.job_store import JobStore
 _MAX_MSG = 4000
 
 
-def _send_fragmented(bot: Any, chat_id: int, text: str) -> None:
-    """Send text as one or more Telegram-safe fragments."""
-    for i in range(0, len(text), _MAX_MSG):
-        send_message(bot, chat_id, text[i:i + _MAX_MSG], parse_mode=None)
+def _split_smart(text: str, max_len: int = _MAX_MSG) -> list[str]:
+    """Split text into chunks that prefer breaking at newlines."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = max_len
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return chunks
+
+
+def _send_fragmented(bot: Any, chat_id: int, text: str) -> bool:
+    """Send text as one or more Telegram-safe fragments.
+
+    Returns True if all fragments were delivered successfully.
+    """
+    for chunk in _split_smart(text):
+        resp = send_message(bot, chat_id, chunk, parse_mode=None)
+        if not resp or not resp.get("message_id"):
+            return False
+    return True
 def cmd_reports(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _show_reports(bot, chat_id)
@@ -114,7 +139,9 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
     content = rc.get_full_markdown_report()
     if content:
         edit_message(bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu())
-        _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
+        ok = _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
+        status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
+        edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
     else:
         edit_message(bot, chat_id, msg_id, "No se puede leer el reporte.", reply_markup=back_to_menu())
 
@@ -170,7 +197,9 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
 
     if content:
         edit_message(bot, chat_id, msg_id, f"Enviando reporte {label}…", reply_markup=back_to_menu())
-        _send_fragmented(bot, chat_id, f"Reporte {label}:\n\n{content}")
+        ok = _send_fragmented(bot, chat_id, f"Reporte {label}:\n\n{content}")
+        status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
+        edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
     else:
         edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
 
