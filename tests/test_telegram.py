@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 from strix_telegram_bot.telegram import (
     _api_url,
     _request,
@@ -89,14 +91,15 @@ class TestSanitizeAgentContent:
         assert "data:image/png;base64,abc123" in result  # too short to match
 
 
-# ── Fix 4: _updates_offset persistence (atomic write, correct path) ──
+# ── Fix 2/4: _updates_offset persistence (atomic write, .bot-state, JSON, fsync) ──
 class TestUpdatesOffsetPersistence:
     def test_load_offset_from_existing_file(self, tmp_path):
-        """Should load offset from strix_runs/.updates_offset."""
+        """Should load offset from strix_runs/.bot-state/telegram_offset.json."""
+        import json as _json
         from strix_telegram_bot.bot import StrixBot
-        offset_file = tmp_path / "strix_runs" / ".updates_offset"
-        offset_file.parent.mkdir(parents=True, exist_ok=True)
-        offset_file.write_text("42")
+        state_dir = tmp_path / "strix_runs" / ".bot-state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "telegram_offset.json").write_text(_json.dumps({"offset": 42}))
 
         bot = StrixBot.__new__(StrixBot)
         bot._chat_fragments = {}
@@ -111,7 +114,6 @@ class TestUpdatesOffsetPersistence:
         bot._callback_handlers = {}
         bot._last_panel_text = ""
 
-        # Patch settings to use tmp_path
         from strix_telegram_bot.config import settings
         old_dir = settings.strix_runs_dir
         settings.strix_runs_dir = tmp_path / "strix_runs"
@@ -135,12 +137,13 @@ class TestUpdatesOffsetPersistence:
             settings.strix_runs_dir = old_dir
 
     def test_load_offset_returns_none_for_invalid_content(self, tmp_path):
-        """Should return None for non-numeric content."""
+        """Should return None for non-JSON or missing offset key."""
+        import json as _json
         from strix_telegram_bot.bot import StrixBot
         from strix_telegram_bot.config import settings
-        offset_file = tmp_path / "strix_runs" / ".updates_offset"
-        offset_file.parent.mkdir(parents=True, exist_ok=True)
-        offset_file.write_text("not-a-number")
+        state_dir = tmp_path / "strix_runs" / ".bot-state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "telegram_offset.json").write_text(_json.dumps({"no_offset": 1}))
 
         old_dir = settings.strix_runs_dir
         settings.strix_runs_dir = tmp_path / "strix_runs"
@@ -151,8 +154,9 @@ class TestUpdatesOffsetPersistence:
         finally:
             settings.strix_runs_dir = old_dir
 
-    def test_save_offset_creates_atomic_file(self, tmp_path):
-        """Should persist offset atomically via tmp + replace."""
+    def test_save_offset_creates_atomic_file_with_fsync(self, tmp_path):
+        """Should persist offset atomically via tmp + fsync + replace."""
+        import json as _json
         from strix_telegram_bot.bot import StrixBot
         from strix_telegram_bot.config import settings
         old_dir = settings.strix_runs_dir
@@ -162,11 +166,13 @@ class TestUpdatesOffsetPersistence:
             bot._updates_offset = 100
             bot._save_offset()
 
-            offset_file = tmp_path / "strix_runs" / ".updates_offset"
-            tmp_file = tmp_path / "strix_runs" / ".updates_offset.tmp"
+            state_dir = tmp_path / "strix_runs" / ".bot-state"
+            offset_file = state_dir / "telegram_offset.json"
+            tmp_file = state_dir / ".telegram_offset.json.tmp"
             assert offset_file.exists()
             assert not tmp_file.exists()  # tmp should be gone after replace
-            assert offset_file.read_text() == "100"
+            data = _json.loads(offset_file.read_text())
+            assert data["offset"] == 100
         finally:
             settings.strix_runs_dir = old_dir
 
@@ -181,7 +187,8 @@ class TestUpdatesOffsetPersistence:
             bot._updates_offset = None
             bot._save_offset()
 
-            offset_file = tmp_path / "strix_runs" / ".updates_offset"
+            state_dir = tmp_path / "strix_runs" / ".bot-state"
+            offset_file = state_dir / "telegram_offset.json"
             assert not offset_file.exists()
         finally:
             settings.strix_runs_dir = old_dir
@@ -201,3 +208,115 @@ class TestUpdatesOffsetPersistence:
             assert bot2._load_offset() == 999
         finally:
             settings.strix_runs_dir = old_dir
+
+
+# ── Fix 1: Target deduplication — same URL during active scan ──
+class TestTargetDeduplication:
+    def _make_bot_with_active_scan(self, targets):
+        from strix_telegram_bot.bot import StrixBot
+        from unittest.mock import MagicMock
+        bot = StrixBot.__new__(StrixBot)
+        bridge = MagicMock()
+        bridge.is_running = True
+        bridge._current_targets = targets
+        bridge._run_name = "scan-abc12345"
+        bridge._preferred_agent_id = None
+        bridge.root_agent_id = "agent-1"
+        bot._bridge = bridge
+        bot._chat_fragments = {}
+        bot._chat_fragment_count = {}
+        bot._chat_event_version = {}
+        bot._tool_message_ids = {}
+        bot._active_chat_agent_id = None
+        bot._active_chat_message_id = None
+        bot._active_chat_chat_id = None
+        bot._final_reports_delivered = set()
+        bot._command_handlers = {}
+        bot._callback_handlers = {}
+        bot._last_panel_text = ""
+        return bot, bridge
+
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_same_target_no_instruction_deduplicates(self, mock_send, mock_sca):
+        """Same target + no instruction → 'Ese objetivo ya está siendo analizado'."""
+        bot, bridge = self._make_bot_with_active_scan(
+            ["https://drive.google.com/file/d/1abc/view?usp=drivesdk"]
+        )
+        update = {"message": {
+            "chat": {"id": 123},
+            "text": "https://drive.google.com/file/d/1abc/view?usp=drivesdk",
+        }}
+        bot._handle_text_message(update)
+
+        bridge.send_message_to_agent.assert_not_called()
+        mock_send.assert_called_once()
+        sent_text = mock_send.call_args[0][2]
+        assert "ya está siendo analizado" in sent_text
+        assert "scan-abc12345" in sent_text
+
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_same_target_with_instruction_forwarded(self, mock_send, mock_sca):
+        """Same target + instruction → forwarded to agent."""
+        bot, bridge = self._make_bot_with_active_scan(
+            ["https://drive.google.com/file/d/1abc/view"]
+        )
+        update = {"message": {
+            "chat": {"id": 123},
+            "text": "https://drive.google.com/file/d/1abc/view prioriza el manifiesto",
+        }}
+        bot._handle_text_message(update)
+
+        bridge.send_message_to_agent.assert_called_once()
+        mock_send.assert_not_called()
+
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_different_target_forwarded(self, mock_send, mock_sca):
+        """Different target during scan → forwarded to agent."""
+        bot, bridge = self._make_bot_with_active_scan(
+            ["https://drive.google.com/file/d/1abc/view"]
+        )
+        update = {"message": {
+            "chat": {"id": 123},
+            "text": "https://example.com",
+        }}
+        bot._handle_text_message(update)
+
+        bridge.send_message_to_agent.assert_called_once()
+        mock_send.assert_not_called()
+
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_url_with_trailing_punctuation_deduplicates(self, mock_send, mock_sca):
+        """URL ending in period/comma is recognized as duplicate."""
+        bot, bridge = self._make_bot_with_active_scan(
+            ["https://drive.google.com/file/d/1abc/view"]
+        )
+        update = {"message": {
+            "chat": {"id": 123},
+            "text": "https://drive.google.com/file/d/1abc/view.",
+        }}
+        bot._handle_text_message(update)
+
+        bridge.send_message_to_agent.assert_not_called()
+        mock_send.assert_called_once()
+        sent_text = mock_send.call_args[0][2]
+        assert "ya está siendo analizado" in sent_text
+
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_natural_language_forwarded(self, mock_send, mock_sca):
+        """Natural language without targets → forwarded to agent."""
+        bot, bridge = self._make_bot_with_active_scan(
+            ["https://drive.google.com/file/d/1abc/view"]
+        )
+        update = {"message": {
+            "chat": {"id": 123},
+            "text": "Continúa con el análisis",
+        }}
+        bot._handle_text_message(update)
+
+        bridge.send_message_to_agent.assert_called_once()
+        mock_send.assert_not_called()

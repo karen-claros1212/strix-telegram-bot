@@ -96,28 +96,36 @@ class StrixBot:
         }
 
     def _load_offset(self) -> Optional[int]:
-        """Load the persisted Telegram updates offset from disk."""
+        """Load the persisted Telegram updates offset from .bot-state/telegram_offset.json."""
         try:
             from .config import settings
-            offset_file = settings.strix_runs_dir / ".updates_offset"
+            state_dir = settings.strix_runs_dir / ".bot-state"
+            offset_file = state_dir / "telegram_offset.json"
             if offset_file.exists():
-                raw = offset_file.read_text().strip()
-                if raw.isdigit():
-                    return int(raw)
+                import json as _json
+                data = _json.loads(offset_file.read_text())
+                offset = data.get("offset")
+                if isinstance(offset, int):
+                    return offset
         except Exception:
             pass
         return None
 
     def _save_offset(self) -> None:
-        """Persist the current Telegram updates offset to disk (atomic write)."""
+        """Persist the current Telegram updates offset atomically with fsync."""
         try:
             if self._updates_offset is not None:
+                import json as _json
                 from .config import settings
-                offset_dir = settings.strix_runs_dir
-                offset_dir.mkdir(parents=True, exist_ok=True)
-                offset_file = offset_dir / ".updates_offset"
-                tmp_file = offset_dir / ".updates_offset.tmp"
-                tmp_file.write_text(str(self._updates_offset))
+                state_dir = settings.strix_runs_dir / ".bot-state"
+                state_dir.mkdir(parents=True, exist_ok=True)
+                offset_file = state_dir / "telegram_offset.json"
+                tmp_file = state_dir / ".telegram_offset.json.tmp"
+                payload = _json.dumps({"offset": self._updates_offset})
+                with open(tmp_file, "w") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(str(tmp_file), str(offset_file))
         except Exception:
             pass
@@ -167,6 +175,16 @@ class StrixBot:
         send_chat_action(self, chat_id)
 
         if self._bridge.is_running:
+            targets, instruction = self._extract_targets(text)
+            current = getattr(self._bridge, "_current_targets", [])
+            if targets and not instruction and current:
+                normalised = [self._clean_url(t) for t in targets]
+                active = [self._clean_url(t) for t in current]
+                if sorted(normalised) == sorted(active):
+                    run_name = getattr(self._bridge, "_run_name", None) or "el escaneo activo"
+                    send_message(self, chat_id, f"Ese objetivo ya está siendo analizado en {run_name}.", parse_mode=None)
+                    return
+
             agent_id = (
                 getattr(self._bridge, "_preferred_agent_id", None)
                 or self._bridge.root_agent_id
@@ -936,8 +954,9 @@ class StrixBot:
             try:
                 updates = get_updates(offset=self._updates_offset, timeout=30)
                 for upd in updates:
-                    self._updates_offset = upd["update_id"] + 1
+                    next_offset = upd["update_id"] + 1
                     self.process_update(upd)
+                    self._updates_offset = next_offset
                     self._save_offset()
             except KeyboardInterrupt:
                 logger.info("Shutdown requested.")

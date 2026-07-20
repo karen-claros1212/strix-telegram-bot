@@ -701,22 +701,38 @@ class TestDiffScopeOfficialAPI:
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
+    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources")
     @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
-    def test_diff_scope_called_for_auto_mode(self, mock_resolve, mock_itt):
-        """resolve_diff_scope_context must be called for both auto and diff modes."""
+    def test_diff_scope_called_for_auto_mode_via_start_scan(self, mock_resolve, mock_cls, mock_itt):
+        """start_scan() must call resolve_diff_scope_context for auto mode with local sources."""
         from strix.interface.utils import DiffScopeResult
         mock_resolve.return_value = DiffScopeResult(
-            active=False, mode="auto", instruction_block="", metadata={},
+            active=True, mode="auto",
+            instruction_block="diff instruction", metadata={"key": "val"},
         )
-        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
-        bridge = StrixRuntimeBridge()
-        bridge._build_targets_info(["https://example.com"])
+        mock_cls.return_value = [{"source_path": "/tmp/repo", "workspace_subdir": "repo"}]
+        mock_itt.return_value = ("local_code", {"source_path": "/tmp/repo"})
 
-        # Simulate auto mode with local sources — API should be called
-        merged_sources = [{"source_path": "/tmp/test", "workspace_subdir": "test"}]
-        result = mock_resolve(merged_sources, "auto", None, True)
-        mock_resolve.assert_called_with(merged_sources, "auto", None, True)
+        bridge = StrixRuntimeBridge()
+        ok, msg = bridge.start_scan(
+            targets=["/tmp/repo"],
+            instruction="test",
+            scan_mode="deep",
+            scope_mode="auto",
+            non_interactive=True,
+        )
+        assert ok is True
+
+        # resolve_diff_scope_context must have been called with auto mode
+        mock_resolve.assert_called_once()
+        call_args = mock_resolve.call_args
+        assert call_args[0][1] == "auto"  # scope_mode
+        assert call_args[0][3] is True    # non_interactive
+
+        # Bridge should be in running state with correct targets
+        assert bridge._current_targets == ["/tmp/repo"]
+        assert bridge._run_name is not None
+        assert bridge._run_name.startswith("scan-")
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
@@ -725,11 +741,8 @@ class TestDiffScopeOfficialAPI:
         """No local sources → diff_scope stays inactive (API not called)."""
         mock_itt.return_value = ("url", {"target_url": "https://example.com"})
         bridge = StrixRuntimeBridge()
-        bridge._build_targets_info(["https://example.com"])
-        # merged_sources would be empty since URLs have no source_path
-        merged_sources = []
-        has_local_sources = bool(merged_sources and any(s.get("source_path") for s in merged_sources))
-        assert has_local_sources is False
+        info = bridge._build_targets_info(["https://example.com"])
+        assert info[0]["type"] == "url"
 
 
 # ── Fix 1: Google Drive stays web_application, no artifact type ──

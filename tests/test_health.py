@@ -23,7 +23,7 @@ class TestVersionParsing:
 
 class TestVersionWarning:
     def test_no_warning_when_current(self):
-        warning = _version_warning("1.0.4", "3.12.0")
+        warning = _version_warning("1.1.0", "3.12.0")
         assert warning == ""
 
     def test_no_warning_when_newer(self):
@@ -34,10 +34,10 @@ class TestVersionWarning:
         warning = _version_warning("1.0.2", "3.12.0")
         assert "desactualizada" in warning
         assert "1.0.2" in warning
-        assert "1.0.4" in warning
+        assert "1.1.0" in warning
 
     def test_warning_python_outdated(self):
-        warning = _version_warning("1.0.5", "3.10.0")
+        warning = _version_warning("1.1.0", "3.10.0")
         assert "por debajo del mínimo" in warning
         assert "3.10" in warning
 
@@ -102,7 +102,7 @@ class TestVersionUsesPackageMetadata:
             health_mod.cmd_version(fake_bot, fake_update)
             sent_text = mock_send.call_args[0][2]
             assert "Mínimo:" in sent_text
-            assert "1.0.4" in sent_text  # _STRIX_MIN_VERSION
+            assert "1.1.0" in sent_text  # _STRIX_MIN_VERSION
 
     def test_send_health_uses_pkg_version(self, monkeypatch):
         """_send_health should call importlib.metadata.version, not subprocess."""

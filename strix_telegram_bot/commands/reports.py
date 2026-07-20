@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json as _json
+from pathlib import Path
 from typing import Any
 
+from strix_telegram_bot.config import settings
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
 from strix_telegram_bot.ui.keyboards import reports_list, back_to_menu, parse_callback, report_detail_menu
 from strix_telegram_bot.ui.messages import escape_md, reports_menu_text
@@ -11,6 +14,19 @@ from strix_telegram_bot.jobs.job_store import JobStore
 from strix_telegram_bot.models import JobPhase
 
 _MAX_MSG = 4000
+
+
+def _is_run_json_completed(run_name: str) -> bool:
+    """Check that run.json exists and has status == 'completed'."""
+    try:
+        run_dir = settings.strix_runs_dir / run_name
+        run_json = run_dir / "run.json"
+        if run_json.exists():
+            data = _json.loads(run_json.read_text())
+            return data.get("status") == "completed"
+    except Exception:
+        pass
+    return False
 
 
 def _split_smart(text: str, max_len: int = _MAX_MSG) -> list[str]:
@@ -131,7 +147,9 @@ def _show_reports(bot, chat_id, msg_id=None) -> None:
 def _send_latest_report(bot, chat_id, msg_id) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(10)
-            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
+            if j.phase == JobPhase.COMPLETED
+            and j.run_name != "pending"
+            and _is_run_json_completed(j.run_name)]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
@@ -153,7 +171,9 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
 def _send_executive_summary(bot, chat_id, msg_id) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(10)
-            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
+            if j.phase == JobPhase.COMPLETED
+            and j.run_name != "pending"
+            and _is_run_json_completed(j.run_name)]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
@@ -182,7 +202,9 @@ def _show_report_history(bot, chat_id, msg_id) -> None:
 def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     store = JobStore()
     jobs = [j for j in store.list_recent(10)
-            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
+            if j.phase == JobPhase.COMPLETED
+            and j.run_name != "pending"
+            and _is_run_json_completed(j.run_name)]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
@@ -196,7 +218,6 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
         elif rtype == "csv":
             content = rc.get_report_content("vulnerabilities.csv", max_chars=None)
         elif rtype == "json":
-            import json as _json
             events = rc.get_json_events()
             if events:
                 content = _json.dumps(events[:50], indent=2)
@@ -213,16 +234,22 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
 
 def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:
     store = JobStore()
-    jobs = [j for j in store.list_recent(5)
-            if j.phase == JobPhase.COMPLETED and j.run_name != "pending"]
+    jobs = [j for j in store.list_recent(10)
+            if j.phase == JobPhase.COMPLETED
+            and j.run_name != "pending"
+            and _is_run_json_completed(j.run_name)]
     if not jobs:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
-    job = jobs[0]
-    vault = EvidenceVault(job.run_name)
-    ev_summary = vault.summary()
-    edit_message(bot, chat_id, msg_id, ev_summary, reply_markup=back_to_menu())
+    for job in jobs:
+        vault = EvidenceVault(job.run_name)
+        ev_summary = vault.summary()
+        if ev_summary and ev_summary.strip() and "No hay" not in ev_summary:
+            edit_message(bot, chat_id, msg_id, ev_summary, reply_markup=back_to_menu())
+            return
+
+    edit_message(bot, chat_id, msg_id, "No se encontró evidencia válida.", reply_markup=back_to_menu())
 
 
 def _chat_id(update: dict) -> int:
