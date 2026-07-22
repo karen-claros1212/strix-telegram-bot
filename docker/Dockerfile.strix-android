@@ -1,0 +1,12 @@
+FROM ghcr.io/usestrix/strix-sandbox:1.0.0
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    file \
+    xxd \
+    apktool \
+    jadx \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+USER pentester
