@@ -209,6 +209,7 @@ class TestStrixRuntimeBridge:
 
     def test_get_tool_state_with_awaiting_from_coordinator(self):
         bridge = StrixRuntimeBridge()
+        bridge._non_interactive = False
         from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
         bridge._live_view = TuiLiveView()
         bridge._coordinator = MagicMock()
@@ -252,6 +253,7 @@ class TestStrixRuntimeBridge:
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
     def test_to_status_dict_with_waiting_from_coordinator(self, *_):
         bridge = StrixRuntimeBridge()
+        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
@@ -292,6 +294,7 @@ class TestStrixRuntimeBridge:
     def test_check_waiting_notification(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
+        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
@@ -804,7 +807,7 @@ class TestFileHostingURLs:
             "child2": "root",
             "child3": "root",
         }
-        summary = bridge.get_child_status_summary()
+        summary = bridge.get_descendant_status_summary()
         assert summary["running"] == 1
         assert summary["completed"] == 1
         assert summary["failed"] == 1
@@ -815,12 +818,13 @@ class TestFileHostingURLs:
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._coordinator.parent_of = {"root": None}
-        summary = bridge.get_child_status_summary()
+        summary = bridge.get_descendant_status_summary()
         assert summary == {}
 
     def test_waiting_notification_suppressed_when_children_running(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
+        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
@@ -836,11 +840,12 @@ class TestFileHostingURLs:
         bridge._live_view.upsert_agent("root", name="strix-agent")
 
         ev = bridge.check_waiting_notification()
-        assert ev is None  # suppressed: children still running
+        assert ev is None  # suppressed: descendants still running
 
     def test_waiting_notification_suppressed_when_children_waiting(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
+        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
@@ -856,11 +861,12 @@ class TestFileHostingURLs:
         bridge._live_view.upsert_agent("root", name="strix-agent")
 
         ev = bridge.check_waiting_notification()
-        assert ev is None  # suppressed: children still waiting
+        assert ev is None  # suppressed: descendants still waiting
 
     def test_waiting_notification_fires_when_children_all_done(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
+        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
@@ -878,66 +884,81 @@ class TestFileHostingURLs:
         bridge._live_view.upsert_agent("root", name="strix-agent")
 
         ev = bridge.check_waiting_notification()
-        assert ev is not None  # fires: children all done, root waiting for user
+        assert ev is not None  # fires: all descendants done, interactive mode
         assert ev["data"]["event"] == "agent_waiting"
 
-    # ── DEFECTO B: force completion fallback ─────────────────────
-
-    def test_force_completion_when_stale_root(self):
+    def test_waiting_notification_never_fires_in_non_interactive(self):
         bridge = StrixRuntimeBridge()
+        bridge._run_name = "test-run"
+        bridge._non_interactive = True
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
             "root": "waiting",
             "child1": "completed",
-            "child2": "completed",
         }
         bridge._coordinator.parent_of = {
             "root": None,
             "child1": "root",
-            "child2": "root",
         }
-        assert bridge.check_force_completion() is True
+        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
+        bridge._live_view = TuiLiveView()
+        bridge._live_view.upsert_agent("root", name="strix-agent")
 
-    def test_no_force_completion_when_children_running(self):
+        ev = bridge.check_waiting_notification()
+        assert ev is None  # never request user input in non_interactive
+
+    # ── descendant counting (recursive) ─────────────────────────
+
+    def test_get_descendant_status_summary_direct_children(self):
         bridge = StrixRuntimeBridge()
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
             "root": "waiting",
             "child1": "running",
+            "child2": "completed",
+            "child3": "failed",
         }
         bridge._coordinator.parent_of = {
             "root": None,
             "child1": "root",
+            "child2": "root",
+            "child3": "root",
         }
-        assert bridge.check_force_completion() is False
+        summary = bridge.get_descendant_status_summary()
+        assert summary["running"] == 1
+        assert summary["completed"] == 1
+        assert summary["failed"] == 1
 
-    def test_no_force_completion_when_root_running(self):
+    def test_get_descendant_status_summary_nested_descendants(self):
         bridge = StrixRuntimeBridge()
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
-            "root": "running",
-            "child1": "completed",
+            "root": "waiting",
+            "child1": "running",
+            "grandchild1": "completed",
+            "grandchild2": "running",
+            "unrelated": "running",
         }
         bridge._coordinator.parent_of = {
             "root": None,
             "child1": "root",
+            "grandchild1": "child1",
+            "grandchild2": "child1",
+            "unrelated": "other_root",
         }
-        assert bridge.check_force_completion() is False
+        summary = bridge.get_descendant_status_summary()
+        assert summary["running"] == 2  # child1 + grandchild2
+        assert summary["completed"] == 1  # grandchild1
+        assert "unrelated" not in str(summary)  # excluded
 
-    def test_no_force_completion_when_no_children(self):
+    def test_get_descendant_status_summary_no_descendants(self):
         bridge = StrixRuntimeBridge()
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._coordinator.parent_of = {"root": None}
-        assert bridge.check_force_completion() is False
-
-    def test_no_force_completion_when_scan_completed(self):
-        bridge = StrixRuntimeBridge()
-        bridge._scan_completed = True
-        bridge._coordinator = MagicMock()
-        bridge._root_agent_id = "root"
-        assert bridge.check_force_completion() is False
+        summary = bridge.get_descendant_status_summary()
+        assert summary == {}

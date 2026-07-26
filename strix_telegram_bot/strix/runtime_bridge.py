@@ -95,6 +95,8 @@ class StrixRuntimeBridge:
         self._closed_runs: set[str] = set()
         self._current_targets: list[str] = []
         self._last_error: Optional[str] = None
+        self._non_interactive: bool = True
+        self._scan_result: Optional[Any] = None
 
         self._live_view: Any = None
         self._lv_lock: threading.Lock = threading.Lock()
@@ -242,6 +244,8 @@ class StrixRuntimeBridge:
         self._scan_completed = False
         self._scan_task = None
         self._last_error = None
+        self._non_interactive = non_interactive
+        self._scan_result = None
         self._preferred_agent_id = None
         self._last_waiting_root = None
 
@@ -344,7 +348,7 @@ class StrixRuntimeBridge:
             discovery = asyncio.create_task(_poll_root())
 
             try:
-                await self._scan_task
+                self._scan_result = await self._scan_task
             except asyncio.CancelledError:
                 self._scan_completed = True
                 self._emit_event("scan_cancelled", "", "Escaneo cancelado")
@@ -526,20 +530,36 @@ class StrixRuntimeBridge:
             logger.warning("stop_agent(%s) failed: %s", agent_id, exc)
             return False
 
-    def get_child_status_summary(self) -> dict[str, int]:
-        """Count child agent statuses (excluding root)."""
+    def get_descendant_status_summary(self) -> dict[str, int]:
+        """Count ALL descendant agent statuses (recursive, excluding root).
+
+        Walks the parent_of graph to find every non-root agent, not just
+        direct children.  This is critical because Strix nests sub-sub-agents.
+        """
         if not self._coordinator:
             return {}
         try:
             statuses = getattr(self._coordinator, "statuses", None)
             parent_of = getattr(self._coordinator, "parent_of", None)
-            if not statuses:
+            if not statuses or not parent_of:
                 return {}
+            root = self._root_agent_id
             counts: dict[str, int] = {}
             for aid, s in statuses.items():
-                if aid == self._root_agent_id:
+                if aid == root:
                     continue
-                if parent_of and parent_of.get(aid) != self._root_agent_id:
+                # Walk parent chain to confirm this agent descends from root
+                current = aid
+                is_descendant = False
+                for _ in range(20):
+                    p = parent_of.get(current)
+                    if p == root:
+                        is_descendant = True
+                        break
+                    if p is None or p not in parent_of:
+                        break
+                    current = p
+                if not is_descendant:
                     continue
                 key = str(s)
                 counts[key] = counts.get(key, 0) + 1
@@ -547,56 +567,22 @@ class StrixRuntimeBridge:
         except Exception:
             return {}
 
-    def check_force_completion(self) -> bool:
-        """Detect stale root: waiting with all children completed.
-
-        When all children are completed/failed and root is waiting but has
-        never called finish_scan, the scan is stuck.  Returns True if we
-        should force-complete.
-        """
-        if not self._coordinator or self._scan_completed:
-            return False
-        root = self._root_agent_id
-        if not root:
-            return False
-        try:
-            statuses = getattr(self._coordinator, "statuses", None)
-            if not statuses or root not in statuses:
-                return False
-            root_status = str(statuses[root])
-            if root_status != "waiting":
-                return False
-        except Exception:
-            return False
-
-        child_summary = self.get_child_status_summary()
-        children_running = child_summary.get("running", 0)
-        children_waiting = child_summary.get("waiting", 0)
-        children_active = children_running + children_waiting
-
-        if children_active > 0:
-            return False
-
-        total_children = sum(child_summary.values())
-        if total_children == 0:
-            return False
-
-        return True
-
     def check_waiting_notification(self) -> Optional[dict[str, Any]]:
-        """Return an agent_waiting event if root just transitioned to waiting.
+        """Return an agent_waiting event ONLY in interactive mode when root
+        is truly waiting for user input (no descendants active).
 
-        Distinguishes WAITING_FOR_CHILDREN from WAITING_FOR_USER:
-        - If children are still running/completed, root is waiting for children
-          → return None (no notification to user needed).
-        - If no children are running and no children are waiting, root is idle
-          waiting for user input → return the agent_waiting event.
-
-        Returns None if no notification is needed (not waiting, already notified,
-        or children still active).
+        In non_interactive mode (autonomous scans), root == waiting means
+        the agent is waiting for subagent results — NOT for user text.
+        Never emit agent_waiting in that case.
         """
         if not self._coordinator or self._scan_completed:
             return None
+
+        # In non_interactive mode, root waiting is internal — never request
+        # user input.  The panel already shows "esperando" via phase label.
+        if self._non_interactive:
+            return None
+
         root = self._root_agent_id
         if not root:
             return None
@@ -610,17 +596,13 @@ class StrixRuntimeBridge:
         except Exception:
             return None
 
-        # Distinguish WAITING_FOR_CHILDREN vs WAITING_FOR_USER
-        child_summary = self.get_child_status_summary()
-        children_running = child_summary.get("running", 0) > 0
-        children_waiting = child_summary.get("waiting", 0) > 0
-
-        if children_running or children_waiting:
-            # Root is waiting for its children to finish — not for user input
+        # In interactive mode: check if any descendants are still active
+        desc_summary = self.get_descendant_status_summary()
+        if desc_summary.get("running", 0) > 0 or desc_summary.get("waiting", 0) > 0:
             return None
 
         if self._last_waiting_root == root:
-            return None  # already notified for this agent in this waiting cycle
+            return None
         self._last_waiting_root = root
 
         agent_name = ""
@@ -736,7 +718,7 @@ class StrixRuntimeBridge:
 
             root = self._root_agent_id
             is_waiting = False
-            if self._coordinator and root:
+            if self._coordinator and root and not self._non_interactive:
                 try:
                     statuses = getattr(self._coordinator, "statuses", None)
                     if statuses and root in statuses:
@@ -795,7 +777,7 @@ class StrixRuntimeBridge:
             "elapsed": _fmt_duration(status["elapsed"]),
             "error": self._last_error,
             "is_active": self.is_running,
-            "awaiting_input": root_status == "waiting",
+            "awaiting_input": (root_status == "waiting" and not self._non_interactive),
             "input_prompt": "",
         }
 
