@@ -962,3 +962,100 @@ class TestFileHostingURLs:
         bridge._coordinator.parent_of = {"root": None}
         summary = bridge.get_descendant_status_summary()
         assert summary == {}
+
+    # ── lifecycle classification ────────────────────────────────
+
+    def test_parse_scan_completed_dict_true(self):
+        assert StrixRuntimeBridge._parse_scan_completed({"scan_completed": True}) is True
+
+    def test_parse_scan_completed_dict_false(self):
+        assert StrixRuntimeBridge._parse_scan_completed({"scan_completed": False}) is False
+
+    def test_parse_scan_completed_json_string(self):
+        assert StrixRuntimeBridge._parse_scan_completed('{"scan_completed": true}') is True
+
+    def test_parse_scan_completed_json_string_false(self):
+        assert StrixRuntimeBridge._parse_scan_completed('{"scan_completed": false}') is False
+
+    def test_parse_scan_completed_none(self):
+        assert StrixRuntimeBridge._parse_scan_completed(None) is False
+
+    def test_parse_scan_completed_random_string(self):
+        assert StrixRuntimeBridge._parse_scan_completed("just text") is False
+
+    def test_classify_success_real(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "completed"}
+        result = MagicMock()
+        result.final_output = {"scan_completed": True}
+        bridge._scan_result = result
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_complete"
+        assert error is None
+
+    def test_classify_success_json_string(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "completed"}
+        result = MagicMock()
+        result.final_output = '{"scan_completed": true}'
+        bridge._scan_result = result
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_complete"
+        assert error is None
+
+    def test_classify_completed_but_no_scan_completed(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "completed"}
+        result = MagicMock()
+        result.final_output = {"vulnerabilities": []}
+        bridge._scan_result = result
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_error"
+        assert "finish_scan" in error
+
+    def test_classify_stopped(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "stopped"}
+        bridge._scan_result = None
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_error"
+        assert "detuvo" in error
+
+    def test_classify_failed(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "failed"}
+        bridge._scan_result = None
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_error"
+        assert "failed" in error
+
+    def test_classify_inconsistent(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "waiting"}
+        bridge._scan_result = MagicMock(final_output=None)
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_error"
+        assert "finish_scan" in error
+
+    def test_classify_uses_existing_last_error(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "failed"}
+        bridge._last_error = "Budget exceeded"
+        bridge._scan_result = None
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_error"
+        assert error == "Budget exceeded"

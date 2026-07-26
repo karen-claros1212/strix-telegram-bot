@@ -365,6 +365,12 @@ class StrixRuntimeBridge:
                 except Exception:
                     pass
 
+            # ── lifecycle classification ──────────────────────────
+            # Only emit scan_complete when the real Strix lifecycle
+            # succeeded: root status == "completed" AND final_output
+            # contains {"scan_completed": true} from finish_scan.
+            event_type, error_msg = self._classify_scan_result()
+
             current_run = self._run_name or ""
             cleanup_error = None
             if current_run:
@@ -376,10 +382,15 @@ class StrixRuntimeBridge:
                     cleanup_error = str(exc)
 
             self._scan_completed = True
-            self._emit_event("scan_complete", "", "Escaneo finalizado")
+            if event_type == "scan_complete":
+                self._emit_event("scan_complete", "", "Escaneo finalizado")
+            else:
+                if error_msg:
+                    self._last_error = error_msg
+                self._emit_event(event_type, "", error_msg or "Escaneo terminó con error")
 
             if cleanup_error:
-                logger.warning("Scan %s completed but sandbox cleanup failed: %s",
+                logger.warning("Scan %s sandbox cleanup failed: %s",
                              current_run, cleanup_error)
 
         try:
@@ -637,6 +648,56 @@ class StrixRuntimeBridge:
                 self._last_waiting_root = None
         except Exception:
             pass
+
+    # ── lifecycle classification ────────────────────────────────
+
+    @staticmethod
+    def _parse_scan_completed(final_output: Any) -> bool:
+        """Return True only if final_output contains scan_completed=true.
+
+        This is the canonical signal that Strix's finish_scan tool was called.
+        """
+        if isinstance(final_output, dict):
+            return bool(final_output.get("scan_completed"))
+        if isinstance(final_output, str):
+            try:
+                parsed = json.loads(final_output)
+                return bool(isinstance(parsed, dict) and parsed.get("scan_completed"))
+            except (ValueError, TypeError):
+                pass
+        return False
+
+    def _classify_scan_result(self) -> tuple[str, Optional[str]]:
+        """Classify the scan result into (event_type, error_message).
+
+        Returns one of:
+          ("scan_complete", None)       — real success
+          ("scan_error", msg)           — failure / inconsistent
+          ("scan_cancelled", None)      — user/system cancel
+
+        The caller emits the event.  Never fabricates scan_complete.
+        """
+        root_status = self.get_root_status()
+        scan_completed_ok = self._parse_scan_completed(
+            getattr(self._scan_result, "final_output", None)
+        )
+
+        if root_status == "completed" and scan_completed_ok:
+            return "scan_complete", None
+
+        if root_status == "stopped":
+            msg = self._last_error or f"Strix detuvo el escaneo (root={root_status})"
+            return "scan_error", msg
+
+        if root_status in ("failed", "crashed"):
+            msg = self._last_error or (
+                f"Strix terminó con estado {root_status} sin completar finish_scan."
+            )
+            return "scan_error", msg
+
+        return "scan_error", (
+            "Strix terminó sin completar el lifecycle mediante finish_scan."
+        )
 
     # ── read-only projections ──────────────────────────────────
 
