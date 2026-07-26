@@ -526,12 +526,74 @@ class StrixRuntimeBridge:
             logger.warning("stop_agent(%s) failed: %s", agent_id, exc)
             return False
 
+    def get_child_status_summary(self) -> dict[str, int]:
+        """Count child agent statuses (excluding root)."""
+        if not self._coordinator:
+            return {}
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            parent_of = getattr(self._coordinator, "parent_of", None)
+            if not statuses:
+                return {}
+            counts: dict[str, int] = {}
+            for aid, s in statuses.items():
+                if aid == self._root_agent_id:
+                    continue
+                if parent_of and parent_of.get(aid) != self._root_agent_id:
+                    continue
+                key = str(s)
+                counts[key] = counts.get(key, 0) + 1
+            return counts
+        except Exception:
+            return {}
+
+    def check_force_completion(self) -> bool:
+        """Detect stale root: waiting with all children completed.
+
+        When all children are completed/failed and root is waiting but has
+        never called finish_scan, the scan is stuck.  Returns True if we
+        should force-complete.
+        """
+        if not self._coordinator or self._scan_completed:
+            return False
+        root = self._root_agent_id
+        if not root:
+            return False
+        try:
+            statuses = getattr(self._coordinator, "statuses", None)
+            if not statuses or root not in statuses:
+                return False
+            root_status = str(statuses[root])
+            if root_status != "waiting":
+                return False
+        except Exception:
+            return False
+
+        child_summary = self.get_child_status_summary()
+        children_running = child_summary.get("running", 0)
+        children_waiting = child_summary.get("waiting", 0)
+        children_active = children_running + children_waiting
+
+        if children_active > 0:
+            return False
+
+        total_children = sum(child_summary.values())
+        if total_children == 0:
+            return False
+
+        return True
+
     def check_waiting_notification(self) -> Optional[dict[str, Any]]:
         """Return an agent_waiting event if root just transitioned to waiting.
 
-        Returns None if no notification is needed (not waiting, or already notified).
-        The caller should emit the returned dict to TuiLiveView events and
-        clear the tracking by calling ack_waiting_notification().
+        Distinguishes WAITING_FOR_CHILDREN from WAITING_FOR_USER:
+        - If children are still running/completed, root is waiting for children
+          → return None (no notification to user needed).
+        - If no children are running and no children are waiting, root is idle
+          waiting for user input → return the agent_waiting event.
+
+        Returns None if no notification is needed (not waiting, already notified,
+        or children still active).
         """
         if not self._coordinator or self._scan_completed:
             return None
@@ -546,6 +608,15 @@ class StrixRuntimeBridge:
                 self._last_waiting_root = None
                 return None
         except Exception:
+            return None
+
+        # Distinguish WAITING_FOR_CHILDREN vs WAITING_FOR_USER
+        child_summary = self.get_child_status_summary()
+        children_running = child_summary.get("running", 0) > 0
+        children_waiting = child_summary.get("waiting", 0) > 0
+
+        if children_running or children_waiting:
+            # Root is waiting for its children to finish — not for user input
             return None
 
         if self._last_waiting_root == root:

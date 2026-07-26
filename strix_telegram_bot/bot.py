@@ -638,6 +638,24 @@ class StrixBot:
             if waiting_ev:
                 self._process_scan_events([waiting_ev])
 
+            # DEFECTO B fallback: force-complete if root is stuck waiting
+            # with all children finished but finish_scan never called.
+            if self._bridge.check_force_completion():
+                run_name = self._active_job_run_name or self._bridge.run_name or ""
+                force_ev = {
+                    "id": f"bridge_force_complete_{run_name}",
+                    "type": "system",
+                    "agent_id": self._bridge.root_agent_id or "",
+                    "timestamp": time.time(),
+                    "version": 0,
+                    "data": {
+                        "event": "scan_complete",
+                        "content": "Escaneo finalizado (auto-complete).",
+                        "run_name": run_name,
+                    },
+                }
+                self._process_scan_events([force_ev])
+
     @staticmethod
     def _sanitize_agent_content(content: str) -> str:
         """Strip base64, data URLs, internal paths, and raw tool output from agent messages."""
