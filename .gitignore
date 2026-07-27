@@ -42,3 +42,7 @@ htmlcov/
 
 # Local runtime artifacts
 scripts/
+
+# Python venvs
+.venv-strix/
+.venv-strix-*/

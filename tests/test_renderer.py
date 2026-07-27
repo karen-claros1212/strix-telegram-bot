@@ -459,11 +459,11 @@ class TestNonInteractivePreserved:
         default = sig.parameters["non_interactive"].default
         assert default is True
 
-    def test_bot_calls_with_non_interactive(self):
+    def test_bot_calls_with_interactive_mode(self):
         from strix_telegram_bot.bot import StrixBot
         import inspect
         src = inspect.getsource(StrixBot._launch_scan)
-        assert "non_interactive=True" in src
+        assert "non_interactive=False" in src
 
     def test_strix_not_modified(self):
         import strix

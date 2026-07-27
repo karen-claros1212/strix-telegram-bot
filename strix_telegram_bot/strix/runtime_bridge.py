@@ -60,6 +60,8 @@ try:
         RepoDiffScope,
     )
     from strix.report.state import ReportState as _RS, set_global_report_state as _sgrs
+    from strix.report.state import get_global_report_state as _ggrs
+    from strix.interface.tui.messages import send_user_message_to_agent as _send_umta
 
     AgentCoordinator = _AC
     run_strix_scan = _rss
@@ -77,6 +79,9 @@ try:
     _STRIX_AVAILABLE = True
 except ImportError:
     pass
+
+
+_get_report_state = _ggrs if _STRIX_AVAILABLE else (lambda: None)
 
 
 class StrixRuntimeBridge:
@@ -97,6 +102,7 @@ class StrixRuntimeBridge:
         self._last_error: Optional[str] = None
         self._non_interactive: bool = True
         self._scan_result: Optional[Any] = None
+        self._completion_detected: bool = False
 
         self._live_view: Any = None
         self._lv_lock: threading.Lock = threading.Lock()
@@ -196,34 +202,22 @@ class StrixRuntimeBridge:
                 seen_paths.add(sp)
                 merged_sources.append(s)
 
-        # ── diff_scope: compute AFTER merged_sources using official API ──
-        # The official API is the single source of truth for scope determination.
-        # Called for both "auto" and "diff" modes when local sources exist.
+        # ── diff_scope: mirror TUI — always call official API ──
         diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
-        has_local_sources = bool(merged_sources and any(
-            s.get("source_path") for s in merged_sources
-        ))
-        if has_local_sources and (scope_mode in ("auto", "diff")):
-            try:
-                diff_result = resolve_diff_scope_context(
-                    merged_sources, scope_mode, diff_base, non_interactive,
-                )
-                if isinstance(diff_result, DiffScopeResult) and diff_result.active:
-                    diff_scope = {
-                        "active": True,
-                        "diff_base": diff_base,
-                        "mode": diff_result.mode,
-                        "instruction": diff_result.instruction_block,
-                        "metadata": diff_result.metadata,
-                    }
-                    if diff_result.instruction_block:
-                        instruction = (
-                            f"{instruction}\n\n{diff_result.instruction_block}"
-                            if instruction else diff_result.instruction_block
-                        )
-            except Exception as exc:
-                logger.warning("resolve_diff_scope_context failed: %s", exc)
-                diff_scope = {"active": False, "diff_base": None}
+        try:
+            diff_result = resolve_diff_scope_context(
+                merged_sources, scope_mode, diff_base, False,
+            )
+            if isinstance(diff_result, DiffScopeResult):
+                diff_scope = dict(diff_result.metadata) if diff_result.metadata else {"active": False}
+                diff_scope["diff_base"] = diff_base
+                if diff_result.instruction_block:
+                    instruction = (
+                        f"{diff_result.instruction_block}\n\n{instruction}"
+                        if instruction else diff_result.instruction_block
+                    )
+        except Exception as exc:
+            logger.warning("resolve_diff_scope_context failed: %s", exc)
 
         scan_config: dict[str, Any] = {
             "scan_id": run_name, "targets": targets_info,
@@ -323,16 +317,6 @@ class StrixRuntimeBridge:
                 with self._lv_lock:
                     live_view.ingest_sdk_event(agent_id, event)
 
-            # Lifecycle reinforcement: prevent agent from looping without
-            # calling finish_scan.  This instruction is injected into the
-            # root system prompt so the agent knows it MUST call finish_scan.
-            lifecycle_guard = (
-                "CRITICAL: You MUST call the finish_scan tool exactly once "
-                "when your analysis is complete. Do NOT loop indefinitely. "
-                "Do NOT output empty responses. If you have no more work, "
-                "call finish_scan immediately."
-            )
-
             return await run_strix_scan(
                 scan_config=scan_config, scan_id=current_run,
                 image=self._scan_image,
@@ -340,19 +324,45 @@ class StrixRuntimeBridge:
                 coordinator=self._coordinator,
                 interactive=not non_interactive,
                 event_sink=bound_event_sink,
-                root_instructions_override=lifecycle_guard,
             )
+
+        async def _watch_completion(scan_task: asyncio.Task) -> None:
+            """Cancel scan_task ONLY when finish_scan completed officially.
+
+            In interactive mode, ``run_agent_loop`` parks inside
+            ``wait_for_message`` after ``finish_scan`` sets root to
+            completed.  The TUI tolerates a hung daemon thread;
+            Radamanthys cannot.
+
+            For failed/crashed/stopped: the runner propagates the real
+            exception — we must NOT cancel the task and risk masking it.
+            """
+            while not scan_task.done():
+                status = self.get_root_status()
+                if status == "completed":
+                    rs = _get_report_state()
+                    rr_status = (rs.run_record or {}).get("status") if rs else None
+                    if rr_status == "completed":
+                        self._completion_detected = True
+                        if not scan_task.done():
+                            scan_task.cancel()
+                        return
+                await asyncio.sleep(1.0)
 
         async def _main() -> None:
             self._scan_task = asyncio.create_task(_run_scan())
             discovery = asyncio.create_task(_poll_root())
+            watcher = asyncio.create_task(_watch_completion(self._scan_task))
 
             try:
                 self._scan_result = await self._scan_task
             except asyncio.CancelledError:
-                self._scan_completed = True
-                self._emit_event("scan_cancelled", "", "Escaneo cancelado")
-                return
+                if self._completion_detected:
+                    pass  # watcher triggered — fall through to classification
+                else:
+                    self._scan_completed = True
+                    self._emit_event("scan_cancelled", "", "Escaneo cancelado")
+                    return
             except Exception as e:
                 self._scan_completed = True
                 self._last_error = str(e)
@@ -360,8 +370,9 @@ class StrixRuntimeBridge:
                 return
             finally:
                 discovery.cancel()
+                watcher.cancel()
                 try:
-                    await asyncio.gather(discovery, return_exceptions=True)
+                    await asyncio.gather(discovery, watcher, return_exceptions=True)
                 except Exception:
                     pass
 
@@ -470,18 +481,14 @@ class StrixRuntimeBridge:
     def send_message(self, agent_id: str, text: str) -> bool:
         if not self._coordinator or not self._loop or self._loop.is_closed():
             return False
-
-        with self._lv_lock:
-            lv = self._live_view
-            if lv:
-                lv.record_user_message(agent_id, text)
-
-        message = {"from": "user", "content": text, "type": "instruction"}
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._coordinator.send(agent_id, message), self._loop)
-            result = future.result(timeout=30)
-            return bool(result)
+            return _send_umta(
+                coordinator=self._coordinator,
+                loop=self._loop,
+                live_view=self._live_view,
+                target_agent_id=agent_id,
+                message=text,
+            )
         except Exception as exc:
             logger.warning("send_message(%s) failed: %s", agent_id, exc)
             return False
@@ -676,12 +683,26 @@ class StrixRuntimeBridge:
           ("scan_cancelled", None)      — user/system cancel
 
         The caller emits the event.  Never fabricates scan_complete.
+
+        In interactive mode, the authoritative success signal is:
+          root_status == "completed" AND run_record["status"] == "completed"
+        (finish_scan persists the report before marking root completed).
+        final_output["scan_completed"] is secondary evidence.
         """
         root_status = self.get_root_status()
+
+        # ── primary: ReportState (authoritative for interactive mode) ──
+        rs = _get_report_state()
+        rr_status = (rs.run_record or {}).get("status") if rs else None
+        report_persisted = rr_status == "completed"
+
+        if root_status == "completed" and report_persisted:
+            return "scan_complete", None
+
+        # ── secondary: final_output (non-interactive legacy path) ─────
         scan_completed_ok = self._parse_scan_completed(
             getattr(self._scan_result, "final_output", None)
         )
-
         if root_status == "completed" and scan_completed_ok:
             return "scan_complete", None
 

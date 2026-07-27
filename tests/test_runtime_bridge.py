@@ -730,7 +730,7 @@ class TestDiffScopeOfficialAPI:
         mock_resolve.assert_called_once()
         call_args = mock_resolve.call_args
         assert call_args[0][1] == "auto"  # scope_mode
-        assert call_args[0][3] is True    # non_interactive
+        assert call_args[0][3] is False    # non_interactive — TUI mirror always False
 
         # Bridge should be in running state with correct targets
         assert bridge._current_targets == ["/tmp/repo"]
@@ -1059,3 +1059,139 @@ class TestFileHostingURLs:
         event, error = bridge._classify_scan_result()
         assert event == "scan_error"
         assert error == "Budget exceeded"
+
+
+# ── Strix 1.3.1 migration: TUI alignment ────────────────────────
+
+
+class TestTuiAlignment:
+    """Verify the 4 corrections that bring Radamanthys into parity with Strix 1.3.1 TUI."""
+
+    def test_no_root_instructions_override(self):
+        """Fix 1: lifecycle_guard must not be injected into run_strix_scan."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "lifecycle_guard" not in src
+        assert "root_instructions_override" not in src
+
+    def test_send_message_uses_official_helper(self):
+        """Fix 2: send_message delegates to send_user_message_to_agent."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.send_message)
+        assert "_send_umta(" in src
+        assert "record_user_message" not in src
+        assert "coordinator.send(" not in src
+
+    def test_diff_scope_always_called(self):
+        """Fix 3: resolve_diff_scope_context is called unconditionally (no has_local_sources guard)."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.start_scan)
+        assert "has_local_sources" not in src
+
+    def test_diff_scope_non_interactive_false(self):
+        """Fix 3: resolve_diff_scope_context always receives non_interactive=False."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.start_scan)
+        # The call to resolve_diff_scope_context must pass False as the 4th arg
+        assert "resolve_diff_scope_context(" in src
+        assert "False," in src  # non_interactive=False
+
+    def test_diff_scope_instruction_prepend(self):
+        """Fix 3: diff instruction is prepended (not appended) to user instruction."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.start_scan)
+        # Should be: diff_block + newline + instruction (prepending)
+        assert "diff_result.instruction_block" in src
+        # The TUI pattern: f"{diff_result.instruction_block}\\n\\n{instruction}"
+        assert "instruction_block}" in src
+
+    def test_completion_detected_flag_exists(self):
+        """Fix 4: _completion_detected flag exists on bridge."""
+        bridge = StrixRuntimeBridge()
+        assert hasattr(bridge, "_completion_detected")
+        assert bridge._completion_detected is False
+
+    def test_watcher_in_main(self):
+        """Fix 4: _watch_completion is created and awaited in _main."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "_watch_completion" in src
+
+    def test_watcher_only_cancels_on_completed(self):
+        """Fix 5: _watch_completion source only checks 'completed', not terminal set."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "terminal" not in src
+        assert 'status == "completed"' in src
+
+    def test_watcher_checks_report_state(self):
+        """Fix 5: _watch_completion verifies ReportState.run_record['status']."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert 'rr_status' in src
+        assert 'report_persisted' in src or 'rr_status' in src
+
+
+class TestWatcherBehavior:
+    """Tests that the completion watcher only fires for completed+persisted."""
+
+    def test_watcher_cancels_when_completed_and_persisted(self):
+        """root completed + run_record completed → watcher cancels → scan_complete."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "completed"}
+        bridge._last_error = None
+        mock_rs = MagicMock()
+        mock_rs.run_record = {"status": "completed"}
+        with patch("strix_telegram_bot.strix.runtime_bridge._get_report_state", return_value=mock_rs):
+            bridge._scan_result = MagicMock(final_output='{"scan_completed": true}')
+            event, error = bridge._classify_scan_result()
+        assert event == "scan_complete"
+        assert error is None
+
+    def test_watcher_does_not_cancel_on_failed(self):
+        """root failed → watcher does NOT cancel → exception propagates naturally."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        # watcher must NOT have 'stopped' or 'failed' or 'crashed' in terminal check
+        assert '"stopped"' not in src
+        assert '"failed"' not in src
+        assert '"crashed"' not in src
+
+    def test_stopped_not_watcher_cancelled(self):
+        """root stopped → scan_error, not a watcher cancellation."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "stopped"}
+        bridge._scan_result = None
+        event, error = bridge._classify_scan_result()
+        assert event == "scan_error"
+        assert "detuvo" in error
+
+    def test_completed_no_final_output_still_success(self):
+        """completed + run_record completed + final_output None → success (interactive mode)."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        bridge._coordinator.statuses = {"root": "completed"}
+        bridge._scan_result = MagicMock(final_output=None)
+        mock_rs = MagicMock()
+        mock_rs.run_record = {"status": "completed"}
+        with patch("strix_telegram_bot.strix.runtime_bridge._get_report_state", return_value=mock_rs):
+            event, error = bridge._classify_scan_result()
+        assert event == "scan_complete"
+        assert error is None

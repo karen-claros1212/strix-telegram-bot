@@ -8,7 +8,7 @@ from typing import Any
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
 from strix_telegram_bot.ui.keyboards import back_to_menu
 from strix_telegram_bot.ui.messages import health_text
-_STRIX_MIN_VERSION = (1, 1, 0)
+_STRIX_MIN_VERSION = (1, 3, 1)
 _PYTHON_MIN_VERSION = (3, 12)
 
 
