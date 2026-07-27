@@ -491,22 +491,6 @@ class StrixBot:
                 + instruction.strip()
             )
 
-        # Artifact-delivery URL context: file-hosting pages are transport, not targets.
-        _ARTIFACT_HOST_RE = re.compile(
-            r"(drive\.google\.com|docs\.google\.com|dropbox\.com"
-            r"|onedrive\.live\.com|mega\.nz|mediafire\.com"
-            r"|www\.dropbox\.com)",
-            re.IGNORECASE,
-        )
-        if any(_ARTIFACT_HOST_RE.search(t) for t in targets):
-            full_instruction += (
-                "\n\nThe authorized URL is an artifact-delivery location. "
-                "Treat the hosting page only as transport. "
-                "Download and validate the artifact inside the official "
-                "Strix sandbox and analyze the downloaded artifact as the "
-                "primary target."
-            )
-
         ok, start_msg = self._bridge.start_scan(
             targets=prepared_targets,
             scan_mode=scan_mode,

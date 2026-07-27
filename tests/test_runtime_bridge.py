@@ -1195,3 +1195,81 @@ class TestWatcherBehavior:
             event, error = bridge._classify_scan_result()
         assert event == "scan_complete"
         assert error is None
+
+
+class TestArtifactHintRemoved:
+    """Verify no Google Drive / file-hosting artifact instruction is injected."""
+
+    def test_no_artifact_host_regex_in_bot(self):
+        import inspect
+        from strix_telegram_bot.bot import StrixBot
+        src = inspect.getsource(StrixBot)
+        assert "_ARTIFACT_HOST_RE" not in src
+        assert "artifact-delivery" not in src
+        assert "Treat the hosting page" not in src
+        assert "Download and validate" not in src
+
+    def test_drive_url_passthrough(self):
+        """Drive URL arrives at start_scan intact — no extra instruction appended."""
+        from strix_telegram_bot.bot import StrixBot
+        import inspect
+        src = inspect.getsource(StrixBot)
+        assert "artifact-delivery" not in src
+        assert "Download and validate" not in src
+
+
+class TestDiffScopeExactMetadata:
+    """diff_scope in scan_config must equal diff_result.metadata exactly — no manual diff_base injection."""
+
+    def test_no_diff_base_injection(self):
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.start_scan)
+        assert 'diff_scope["diff_base"]' not in src
+        assert "diff_scope[\"diff_base\"]" not in src
+
+    def test_metadata_used_directly(self):
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.start_scan)
+        assert "dict(diff_result.metadata)" in src
+
+
+class TestDiffScopeFailFast:
+    """ValueError from resolver must fail start_scan before thread creation."""
+
+    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
+    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
+    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
+    @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
+    def test_valueerror_returns_false_no_thread(self, mock_resolve, mock_itt):
+        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
+        mock_resolve.side_effect = ValueError("invalid scope: bad repo state")
+        bridge = StrixRuntimeBridge()
+        ok, msg = bridge.start_scan(
+            targets=["https://example.com"],
+            instruction="test",
+            scan_mode="deep",
+            scope_mode="auto",
+        )
+        assert ok is False
+        assert "scope" in msg.lower() or "invalid" in msg.lower()
+        assert bridge._thread is None
+        assert bridge.is_running is False
+
+    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
+    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
+    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
+    @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
+    def test_generic_exception_returns_false(self, mock_resolve, mock_itt):
+        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
+        mock_resolve.side_effect = RuntimeError("unexpected failure")
+        bridge = StrixRuntimeBridge()
+        ok, msg = bridge.start_scan(
+            targets=["https://example.com"],
+            instruction="test",
+            scan_mode="deep",
+            scope_mode="auto",
+        )
+        assert ok is False
+        assert bridge._thread is None

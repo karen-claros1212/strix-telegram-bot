@@ -202,22 +202,22 @@ class StrixRuntimeBridge:
                 seen_paths.add(sp)
                 merged_sources.append(s)
 
-        # ── diff_scope: mirror TUI — always call official API ──
-        diff_scope: dict[str, Any] = {"active": False, "diff_base": None}
+        # ── diff_scope: mirror TUI exactly ──
+        diff_scope: dict[str, Any] = {"active": False}
         try:
             diff_result = resolve_diff_scope_context(
                 merged_sources, scope_mode, diff_base, False,
             )
-            if isinstance(diff_result, DiffScopeResult):
-                diff_scope = dict(diff_result.metadata) if diff_result.metadata else {"active": False}
-                diff_scope["diff_base"] = diff_base
-                if diff_result.instruction_block:
-                    instruction = (
-                        f"{diff_result.instruction_block}\n\n{instruction}"
-                        if instruction else diff_result.instruction_block
-                    )
         except Exception as exc:
-            logger.warning("resolve_diff_scope_context failed: %s", exc)
+            logger.error("resolve_diff_scope_context failed: %s", exc)
+            return False, f"Error de scope: {exc}"
+        if isinstance(diff_result, DiffScopeResult):
+            diff_scope = dict(diff_result.metadata) if diff_result.metadata else {"active": False}
+            if diff_result.instruction_block:
+                instruction = (
+                    f"{diff_result.instruction_block}\n\n{instruction}"
+                    if instruction else diff_result.instruction_block
+                )
 
         scan_config: dict[str, Any] = {
             "scan_id": run_name, "targets": targets_info,
