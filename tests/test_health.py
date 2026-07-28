@@ -23,21 +23,21 @@ class TestVersionParsing:
 
 class TestVersionWarning:
     def test_no_warning_when_current(self):
-        warning = _version_warning("1.3.1", "3.12.0")
+        warning = _version_warning("1.4.1", "3.12.0")
         assert warning == ""
 
     def test_no_warning_when_newer(self):
-        warning = _version_warning("1.4.0", "3.13.0")
+        warning = _version_warning("1.5.0", "3.13.0")
         assert warning == ""
 
     def test_warning_strix_outdated(self):
         warning = _version_warning("1.0.2", "3.12.0")
         assert "desactualizada" in warning
         assert "1.0.2" in warning
-        assert "1.3.1" in warning
+        assert "1.4.1" in warning
 
     def test_warning_python_outdated(self):
-        warning = _version_warning("1.3.1", "3.10.0")
+        warning = _version_warning("1.4.1", "3.10.0")
         assert "por debajo del mínimo" in warning
         assert "3.10" in warning
 

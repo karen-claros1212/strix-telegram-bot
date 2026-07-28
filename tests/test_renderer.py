@@ -147,68 +147,46 @@ class TestStreamingRenderer:
 
 
 class TestToolRenderer:
-    def test_tool_running_creates_message(self, bot, mock_telegram):
-        mock_send, _, _ = mock_telegram
-        mock_send.return_value = {"message_id": 200}
-
+    def test_tool_event_ignored_in_main_chat(self, bot, mock_telegram):
+        mock_send, mock_edit, _ = mock_telegram
         ev = _make_tool_event(call_id="call_1", tool_name="nuclei_scan", status="running",
                               args={"url": "https://example.com"})
         bot._process_scan_events([ev])
+        assert mock_send.call_count == 0
+        assert mock_edit.call_count == 0
 
-        assert mock_send.call_count == 1
-        text = mock_send.call_args[0][2]
-        assert "nuclei_scan" in text
-        assert "In progress" in text
-        assert bot._tool_message_ids.get("call_1") == 200
-
-    def test_tool_completed_edits_same_message(self, bot, mock_telegram):
+    def test_tool_completed_ignored(self, bot, mock_telegram):
         _, mock_edit, _ = mock_telegram
         bot._tool_message_ids["call_1"] = 200
-
         ev = _make_tool_event(call_id="call_1", tool_name="nuclei_scan", status="completed",
                               result="Found CVE-2024-1234")
         bot._process_scan_events([ev])
+        assert mock_edit.call_count == 0
 
-        assert mock_edit.call_count == 1
-        assert mock_edit.call_args[0][2] == 200
-        text = mock_edit.call_args[0][3]
-        assert "Result:" in text
-        assert "CVE-2024-1234" in text
-
-    def test_tool_failed_shows_status(self, bot, mock_telegram):
+    def test_tool_failed_ignored(self, bot, mock_telegram):
         _, mock_edit, _ = mock_telegram
         bot._tool_message_ids["call_2"] = 201
-
         ev = _make_tool_event(call_id="call_2", tool_name="ffuf", status="failed",
                               result="connection refused")
         bot._process_scan_events([ev])
+        assert mock_edit.call_count == 0
 
-        assert mock_edit.call_count == 1
-        text = mock_edit.call_args[0][3]
-        assert "Result:" in text
-        assert "connection refused" in text
-
-    def test_tool_no_duplicate_on_second_call(self, bot, mock_telegram):
-        mock_send, _, _ = mock_telegram
+    def test_tool_no_messages_sent_for_any_status(self, bot, mock_telegram):
+        mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 300}
-
         ev1 = _make_tool_event(call_id="call_x", tool_name="curl", status="running")
         bot._process_scan_events([ev1])
-
         ev2 = _make_tool_event(call_id="call_y", tool_name="subfinder", status="running")
         bot._process_scan_events([ev2])
+        assert mock_send.call_count == 0
 
-        assert mock_send.call_count == 2
-        assert bot._tool_message_ids["call_x"] == 300
-        assert bot._tool_message_ids.get("call_y") is not None
-
-    def test_tool_output_without_running_sends_new_message(self, bot, mock_telegram):
+    def test_tool_orphan_completed_ignored(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 400}
         ev = _make_tool_event(call_id="unknown", tool_name="tool", status="completed",
                               result="orphan")
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 1
+        assert mock_send.call_count == 0
         assert mock_edit.call_count == 0
 
 
@@ -230,13 +208,11 @@ class TestMessageSplitting:
 
 
 class TestScanCompleteCycle:
-    def test_running_to_waiting_notification(self, bot, mock_telegram):
+    def test_agent_waiting_ignored(self, bot, mock_telegram):
         mock_send, _, _ = mock_telegram
         ev = _make_system_event("agent_waiting", content="strix-agent")
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 1
-        text = mock_send.call_args[0][2]
-        assert "esperando instrucciones" in text
+        assert mock_send.call_count == 0
 
     def test_scan_complete_sends_final_message(self, bot, mock_telegram):
         mock_send, _, _ = mock_telegram
@@ -266,7 +242,7 @@ class TestCallHistory:
         assert mock_send.call_count == 1  # first delta creates
         assert mock_edit.call_count == 3  # 2 deltas + 1 final
 
-    def test_tool_call_sequence(self, bot, mock_telegram):
+    def test_tool_call_sequence_ignored(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 200}
 
@@ -278,9 +254,8 @@ class TestCallHistory:
         ]
         bot._process_scan_events(events)
 
-        assert mock_send.call_count == 1
-        assert mock_edit.call_count == 1
-        assert bot._tool_message_ids["c1"] == 200
+        assert mock_send.call_count == 0
+        assert mock_edit.call_count == 0
 
 
 class TestOutputSanitization:
@@ -459,11 +434,11 @@ class TestNonInteractivePreserved:
         default = sig.parameters["non_interactive"].default
         assert default is True
 
-    def test_bot_calls_with_interactive_mode(self):
+    def test_bot_calls_with_autonomous_mode(self):
         from strix_telegram_bot.bot import StrixBot
         import inspect
         src = inspect.getsource(StrixBot._launch_scan)
-        assert "non_interactive=False" in src
+        assert "non_interactive=True" in src
 
     def test_strix_not_modified(self):
         import strix
@@ -570,27 +545,25 @@ class TestShellRendererSDKString:
 
 
 class TestOrphanToolCompleted:
-    """Defect 3: orphan tool completed must send new message, not discard."""
+    """Tool events are now ignored in main chat — rendered in menu tree instead."""
 
-    def test_orphan_completed_sends_new_message(self, bot, mock_telegram):
+    def test_orphan_completed_ignored(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 500}
         ev = _make_tool_event(call_id="orphan", tool_name="nuclei", status="completed",
                               result="found 3 vulns")
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 1
-        text = mock_send.call_args[0][2]
-        assert "found 3 vulns" in text
+        assert mock_send.call_count == 0
         assert mock_edit.call_count == 0
 
-    def test_tracked_completed_still_edits(self, bot, mock_telegram):
+    def test_tracked_completed_ignored(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 500}
         bot._tool_message_ids["tracked"] = 500
         ev = _make_tool_event(call_id="tracked", tool_name="curl", status="completed",
                               result="ok")
         bot._process_scan_events([ev])
-        assert mock_edit.call_count == 1
+        assert mock_edit.call_count == 0
         assert mock_send.call_count == 0
 
 

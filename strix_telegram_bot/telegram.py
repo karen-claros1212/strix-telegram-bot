@@ -130,11 +130,13 @@ def edit_message(
     text: str,
     parse_mode: Optional[str] = None,
     reply_markup: Optional[dict] = None,
+    disable_web_page_preview: bool = False,
 ) -> Optional[dict]:
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
+        "disable_web_page_preview": disable_web_page_preview,
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode

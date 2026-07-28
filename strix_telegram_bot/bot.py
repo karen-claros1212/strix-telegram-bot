@@ -32,8 +32,8 @@ from .strix.telegram_renderers import render_tool_event
 
 logger = logging.getLogger("strix_bot")
 
-_URL_RE = re.compile(r"https?://[^\s,]+")
-_GITHUB_RE = re.compile(r"github\.com[:/][^\s,]+")
+_URL_RE = re.compile(r"https?://[^\s,>\]\)]+")
+_GITHUB_RE = re.compile(r"github\.com[:/][^\s,>\]\)]+")
 
 
 class StrixBot:
@@ -217,14 +217,27 @@ class StrixBot:
 
     @staticmethod
     def _clean_url(url: str) -> str:
-        return url.rstrip(".,;:!?)]}")
+        url = url.rstrip(".,;:!?)]}")
+        if "]" in url or "[" in url or "(" in url:
+            return ""
+        from urllib.parse import urlparse
+        if "://" in url:
+            try:
+                parsed = urlparse(url)
+                if parsed.scheme not in ("http", "https"):
+                    return ""
+                if url.count("://") > 1:
+                    return ""
+            except Exception:
+                return ""
+        return url
 
     def _extract_targets(self, text: str) -> tuple[list[str], str]:
         raw_urls = _URL_RE.findall(text)
-        urls = [self._clean_url(u) for u in raw_urls]
+        urls = [u for u in (self._clean_url(u) for u in raw_urls) if u]
         remaining = _URL_RE.sub("", text).strip()
         raw_repos = _GITHUB_RE.findall(remaining)
-        repos = [self._clean_url(r) for r in raw_repos]
+        repos = [r for r in (self._clean_url(r) for r in raw_repos) if r]
         remaining = _GITHUB_RE.sub("", remaining).strip()
 
         candidates = [
@@ -496,7 +509,7 @@ class StrixBot:
             scan_mode=scan_mode,
             instruction=full_instruction,
             scope_mode="auto",
-            non_interactive=False,
+            non_interactive=True,
             local_sources=local_sources,
         )
 
@@ -581,6 +594,7 @@ class StrixBot:
                         text,
                         reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
                         parse_mode=None,
+                        disable_web_page_preview=True,
                     )
                     self._last_panel_text = text
                     self._last_panel_edit = now
@@ -671,35 +685,17 @@ class StrixBot:
                         self._send_fragmented(chat_id, ev_id, ev_version, full_text)
 
             elif ev_type == "tool":
-                status = data.get("status", "")
-                tool_name = data.get("tool_name", "tool")
-                args = data.get("args", {})
-                result = data.get("result")
-                call_id = data.get("call_id", "")
-
-                text = render_tool_event(tool_name, status, args, result)
-
-                if status == "running":
-                    resp = send_message(self, chat_id, text, parse_mode=None)
-                    if resp and call_id:
-                        self._tool_message_ids[call_id] = resp.get("message_id")
-                elif status in ("completed", "failed"):
-                    if call_id and call_id in self._tool_message_ids:
-                        edit_message(self, chat_id, self._tool_message_ids[call_id], text, parse_mode=None)
-                    else:
-                        send_message(self, chat_id, text, parse_mode=None)
+                # Tool events are only visible in the menu tree/agent views,
+                # not in the main chat.  Skip silently.
+                pass
 
             elif ev_type == "system":
                 event_name = data.get("event", "")
                 if event_name == "agent_waiting":
-                    agent_name = data.get("content", "strix")
-                    send_message(
-                        self, chat_id,
-                        f"STRIX esta esperando instrucciones.\n\n"
-                        f"Agente: {agent_name}\n\n"
-                        f"Escribe un mensaje para continuar.",
-                        parse_mode=None,
-                    )
+                    # In non_interactive mode, check_waiting_notification
+                    # already returns None.  In interactive mode, the status
+                    # panel shows "esperando" — no chat bubble needed.
+                    pass
                 elif event_name == "scan_complete":
                     run_name = data.get("run_name", current_run or "")
                     delta = self._bridge.to_status_dict().get("elapsed", "0s")
@@ -782,7 +778,8 @@ class StrixBot:
         for i, frag in enumerate(fragments):
             if i < existing_count:
                 try:
-                    edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None)
+                    edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None,
+                                 disable_web_page_preview=True)
                 except Exception:
                     pass
             else:
@@ -806,7 +803,8 @@ class StrixBot:
         for i, frag in enumerate(fragments):
             if i < existing_count:
                 try:
-                    edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None)
+                    edit_message(self, chat_id, existing_ids[i], frag, parse_mode=None,
+                                 disable_web_page_preview=True)
                 except Exception:
                     pass
                 kept_ids.append(existing_ids[i])

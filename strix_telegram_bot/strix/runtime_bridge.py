@@ -362,12 +362,10 @@ class StrixRuntimeBridge:
                 else:
                     self._scan_completed = True
                     self._emit_event("scan_cancelled", "", "Escaneo cancelado")
-                    return
             except Exception as e:
                 self._scan_completed = True
                 self._last_error = str(e)
                 self._emit_event("scan_error", "", f"Error en escaneo: {e}")
-                return
             finally:
                 discovery.cancel()
                 watcher.cancel()
@@ -376,33 +374,30 @@ class StrixRuntimeBridge:
                 except Exception:
                     pass
 
-            # ── lifecycle classification ──────────────────────────
-            # Only emit scan_complete when the real Strix lifecycle
-            # succeeded: root status == "completed" AND final_output
-            # contains {"scan_completed": true} from finish_scan.
-            event_type, error_msg = self._classify_scan_result()
+                # ── lifecycle classification + cleanup (always) ──
+                event_type, error_msg = self._classify_scan_result()
 
-            current_run = self._run_name or ""
-            cleanup_error = None
-            if current_run:
-                try:
-                    await session_manager.cleanup(current_run)
-                    logger.info("Sandbox cleaned up for run %s", current_run)
-                except Exception as exc:
-                    logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
-                    cleanup_error = str(exc)
+                current_run = self._run_name or ""
+                cleanup_error = None
+                if current_run:
+                    try:
+                        await session_manager.cleanup(current_run)
+                        logger.info("Sandbox cleaned up for run %s", current_run)
+                    except Exception as exc:
+                        logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
+                        cleanup_error = str(exc)
 
-            self._scan_completed = True
-            if event_type == "scan_complete":
-                self._emit_event("scan_complete", "", "Escaneo finalizado")
-            else:
-                if error_msg:
-                    self._last_error = error_msg
-                self._emit_event(event_type, "", error_msg or "Escaneo terminó con error")
+                self._scan_completed = True
+                if event_type == "scan_complete":
+                    self._emit_event("scan_complete", "", "Escaneo finalizado")
+                else:
+                    if error_msg:
+                        self._last_error = error_msg
+                    self._emit_event(event_type, "", error_msg or "Escaneo terminó con error")
 
-            if cleanup_error:
-                logger.warning("Scan %s sandbox cleanup failed: %s",
-                             current_run, cleanup_error)
+                if cleanup_error:
+                    logger.warning("Scan %s sandbox cleanup failed: %s",
+                                 current_run, cleanup_error)
 
         try:
             loop.run_until_complete(_main())

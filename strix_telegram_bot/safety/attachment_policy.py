@@ -35,6 +35,10 @@ def sanitize_target(target: str) -> tuple[bool, str]:
         return False, "Target too long or empty"
     if re.search(r"[;\x00-\x1f]", target):
         return False, "Target contains invalid characters"
+    if re.search(r"https?://https://", target):
+        return False, "Target contains duplicate protocol"
+    if re.search(r"[\[\]\(\)]", target):
+        return False, "Target contains markdown syntax characters"
     return True, "OK"
 
 
