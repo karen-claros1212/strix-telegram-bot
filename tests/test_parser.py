@@ -31,7 +31,7 @@ class TestExtractTargets:
         targets, instr = bot._extract_targets(
             "Check github.com/user/repo for bugs"
         )
-        assert "github.com/user/repo" in targets
+        assert any("github.com/user/repo" in t for t in targets)
         assert "Check" in instr
 
     def test_ip_address(self, bot):
@@ -54,7 +54,7 @@ class TestExtractTargets:
             "Escanea https://example.com con nmap y github.com/user/repo con nuclei"
         )
         assert "https://example.com" in targets
-        assert "github.com/user/repo" in targets
+        assert any("github.com/user/repo" in t for t in targets)
         assert "con nmap" in instr.lower() or "nmap" in instr
         assert "con nuclei" in instr.lower() or "nuclei" in instr
 

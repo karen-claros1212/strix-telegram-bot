@@ -175,11 +175,11 @@ class StrixBot:
         send_chat_action(self, chat_id)
 
         if self._bridge.is_running:
-            targets, instruction = self._extract_targets(text)
+            targets, instruction = self._extract_targets_from_message(msg, text)
             current = getattr(self._bridge, "_current_targets", [])
             if targets and not instruction and current:
-                normalised = [self._clean_url(t) for t in targets]
-                active = [self._clean_url(t) for t in current]
+                normalised = [self._validate_url(t) for t in targets]
+                active = [self._validate_url(t) for t in current]
                 if sorted(normalised) == sorted(active):
                     run_name = getattr(self._bridge, "_run_name", None) or "el escaneo activo"
                     send_message(self, chat_id, f"Ese objetivo ya está siendo analizado en {run_name}.", parse_mode=None)
@@ -197,10 +197,10 @@ class StrixBot:
         pm = get_panel_manager(chat_id)
 
         if pm.current == MenuState.WAITING_FOR_TARGETS:
-            self._parse_and_launch(chat_id, text)
+            self._parse_and_launch(chat_id, msg, text)
             return
 
-        targets, instruction = self._extract_targets(text)
+        targets, instruction = self._extract_targets_from_message(msg, text)
 
         if targets:
             scan_mode = getattr(pm, "_selected_scan_mode", "deep")
@@ -215,33 +215,138 @@ class StrixBot:
                 reply_markup=main_menu(),
             )
 
+    def _extract_targets_from_message(self, msg: dict, text: str) -> tuple[list[str], str]:
+        """Extract targets from a Telegram message.
+
+        Processing order:
+        1. Telegram entities (text_link, url)
+        2. Markdown links [text](url)
+        3. Raw URLs
+        4. GitHub repos
+        5. Domains, IPs, paths
+        """
+        # Phase 1: Telegram entities
+        entity_urls, remaining = self._extract_entities(msg, text)
+
+        # Phase 2: Markdown links
+        md_urls, remaining = self._extract_markdown_links(remaining)
+
+        # Phase 3-5: Standard extraction on remaining text
+        raw_targets, instruction = self._extract_targets(remaining)
+
+        all_targets = list(dict.fromkeys(entity_urls + md_urls + raw_targets))
+        return all_targets, instruction
+
     @staticmethod
-    def _clean_url(url: str) -> str:
-        url = url.rstrip(".,;:!?)]}")
-        if "]" in url or "[" in url or "(" in url:
+    def _validate_url(url: str) -> str:
+        """Validate a URL using urllib.parse.urlsplit.
+
+        Returns the cleaned URL if valid, empty string if rejected.
+        """
+        from urllib.parse import urlparse, urlsplit
+
+        url = url.rstrip(".,;:!?)]}>")
+
+        # Reject residual markdown or control characters
+        if re.search(r"[\[\]\(\)]", url):
             return ""
-        from urllib.parse import urlparse
+        if re.search(r"[\x00-\x1f]", url):
+            return ""
+
         if "://" in url:
+            if url.count("://") > 1:
+                return ""
             try:
-                parsed = urlparse(url)
+                parsed = urlsplit(url)
                 if parsed.scheme not in ("http", "https"):
                     return ""
-                if url.count("://") > 1:
+                if not parsed.hostname:
+                    return ""
+                if " " in parsed.hostname or re.search(r"[\x00-\x1f]", parsed.hostname):
+                    return ""
+                if parsed.port is not None and not (1 <= parsed.port <= 65535):
+                    return ""
+                if parsed.username or parsed.password:
+                    # Credentials embedded — reject unless the project policy allows
+                    # For general use, reject.
                     return ""
             except Exception:
                 return ""
+            return url
+
+        # Bare github.com/user/repo — normalize
+        if re.match(r"github\.com[:/]", url):
+            return f"https://{url}"
+
+        # Bare domain, IP, or path — leave as-is for later routing
         return url
+
+    def _extract_entities(self, msg: dict, text: str) -> tuple[list[str], str]:
+        """Extract targets from Telegram message entities (text_link, url).
+
+        Returns (extracted_urls, remaining_text).
+        """
+        entities = msg.get("entities") or msg.get("caption_entities") or []
+        if not entities:
+            return [], text
+
+        extracted: list[str] = []
+        # Process in reverse offset order to avoid index shifting
+        sorted_ents = sorted(entities, key=lambda e: e.get("offset", 0), reverse=True)
+
+        chars = list(text)
+        for ent in sorted_ents:
+            etype = ent.get("type", "")
+            offset = ent.get("offset", 0)
+            length = ent.get("length", 0)
+            if etype == "text_link":
+                url = ent.get("url", "")
+                cleaned = self._validate_url(url)
+                if cleaned:
+                    extracted.append(cleaned)
+                # Blank out the entity range
+                for i in range(offset, min(offset + length, len(chars))):
+                    chars[i] = " "
+            elif etype == "url" and length > 0:
+                raw = "".join(chars[offset:offset + length])
+                cleaned = self._validate_url(raw)
+                if cleaned:
+                    extracted.append(cleaned)
+                for i in range(offset, min(offset + length, len(chars))):
+                    chars[i] = " "
+
+        remaining = "".join(chars).strip()
+        return extracted, remaining
+
+    @staticmethod
+    def _extract_markdown_links(text: str) -> tuple[list[str], str]:
+        """Extract markdown links [text](url) from text.
+
+        Returns (urls, remaining_text).
+        """
+        _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+        urls: list[str] = []
+        remaining = text
+
+        for match in _MD_LINK_RE.finditer(text):
+            url = match.group(2).strip()
+            cleaned = StrixBot._validate_url(url)
+            if cleaned:
+                urls.append(cleaned)
+
+        remaining = _MD_LINK_RE.sub("", text).strip()
+        return urls, remaining
 
     def _extract_targets(self, text: str) -> tuple[list[str], str]:
         raw_urls = _URL_RE.findall(text)
-        urls = [u for u in (self._clean_url(u) for u in raw_urls) if u]
+        urls = [u for u in (self._validate_url(u) for u in raw_urls) if u]
         remaining = _URL_RE.sub("", text).strip()
         raw_repos = _GITHUB_RE.findall(remaining)
-        repos = [r for r in (self._clean_url(r) for r in raw_repos) if r]
+        repos = [r for r in (self._validate_url(r) for r in raw_repos) if r]
         remaining = _GITHUB_RE.sub("", remaining).strip()
 
         candidates = [
-            t.strip().rstrip(".,;:!?)]}")
+            t.strip().rstrip(".,;:!?)]}>")
             for t in remaining.replace("\n", ",").split(",")
             if t.strip()
         ]
@@ -265,8 +370,8 @@ class StrixBot:
         targets = list(dict.fromkeys(urls + repos + extra_targets))
         return targets, ", ".join(instruction_parts)
 
-    def _parse_and_launch(self, chat_id: int, text: str) -> None:
-        targets, instruction = self._extract_targets(text)
+    def _parse_and_launch(self, chat_id: int, msg: dict, text: str) -> None:
+        targets, instruction = self._extract_targets_from_message(msg, text)
         if not targets:
             send_message(self, chat_id, "No encontre ningun objetivo (URL, ruta, repo).")
             return
@@ -630,12 +735,6 @@ class StrixBot:
                 except Exception:
                     pass
 
-        # Check for waiting transition (from coordinator, not inferred)
-        if self._active_job_chat_id is not None and self._bridge.is_running:
-            waiting_ev = self._bridge.check_waiting_notification()
-            if waiting_ev:
-                self._process_scan_events([waiting_ev])
-
     @staticmethod
     def _sanitize_agent_content(content: str) -> str:
         """Strip base64, data URLs, internal paths, and raw tool output from agent messages."""
@@ -666,6 +765,11 @@ class StrixBot:
             if ev_type == "chat":
                 role = data.get("role", "")
                 if role != "assistant":
+                    continue
+                # Section 8.3: Only root agent messages in main chat
+                agent_id = ev.get("agent_id", "")
+                root_id = self._bridge.root_agent_id
+                if root_id and agent_id and agent_id != root_id:
                     continue
                 streaming = data.get("metadata", {}).get("streaming", False)
                 content = data.get("content", "")
