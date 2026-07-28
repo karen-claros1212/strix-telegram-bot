@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .telegram import get_updates, send_message, edit_message, delete_message, answer_callback
+from .telegram import get_updates, send_message, send_document, edit_message, delete_message, answer_callback
 from .security import is_authorized
 from .models import JobPhase, JobState, MenuState, ScanMode
 from .ui.keyboards import (
@@ -814,6 +814,14 @@ class StrixBot:
                                 reply_markup=main_menu(),
                                 parse_mode=None,
                             )
+                        elif result == "not_completed":
+                            send_message(
+                                self, chat_id,
+                                "Escaneo completado.\n"
+                                "El run aun no marca estado completed.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
                         elif result == "send_failed":
                             send_message(
                                 self, chat_id,
@@ -826,8 +834,7 @@ class StrixBot:
                         else:
                             send_message(
                                 self, chat_id,
-                                f"Escaneo completado.\n"
-                                f"Duracion: {delta}",
+                                "Informe completo enviado como archivo Markdown.",
                                 reply_markup=main_menu(),
                                 parse_mode=None,
                             )
@@ -946,36 +953,69 @@ class StrixBot:
     def _deliver_final_report(self, chat_id: int, run_name: str) -> str:
         """Deliver the official penetration test report via Telegram.
 
+        Validation: run.json status == "completed", penetration_test_report.md
+        exists and is non-empty.  Sends the file as a single document via
+        sendDocument (multipart/form-data).
+
         Returns:
-            "delivered" if all fragments sent successfully.
-            "missing" if the report file does not exist or is empty.
-            "send_failed" if the file exists but a fragment failed to send.
+            "delivered"   — file sent successfully.
+            "missing"     — penetration_test_report.md does not exist or is empty.
+            "not_completed" — run.json status is not "completed".
+            "send_failed"  — sendDocument call failed or returned no message_id.
         """
-        from .strix.report_collector import ReportCollector
+        from .config import settings
+        import json
 
-        rc = ReportCollector(run_name)
-        content = rc.get_full_markdown_report()
+        run_dir = settings.strix_runs_dir / run_name
+        run_json_path = run_dir / "run.json"
+        report_path = run_dir / "penetration_test_report.md"
 
-        if not content or not content.strip():
-            logger.warning("Final report empty or missing for %s", run_name)
+        # 1. Verify run.json exists and status == completed
+        if not run_json_path.is_file():
+            logger.warning("Final report: run.json not found for %s", run_name)
             return "missing"
 
-        header = f"Reporte final — {run_name}\n\n"
-        full_text = header + content
-        fragments = self._split_into_fragments(full_text)
+        try:
+            with open(run_json_path) as f:
+                run_data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Final report: cannot parse run.json for %s — %s", run_name, e)
+            return "missing"
 
-        for frag in fragments:
-            resp = send_message(self, chat_id, frag, parse_mode=None)
-            if not resp or not resp.get("message_id"):
-                logger.error(
-                    "Failed to deliver report fragment for %s: %s",
-                    run_name,
-                    resp,
-                )
-                return "send_failed"
+        if run_data.get("status") != "completed":
+            logger.info(
+                "Final report: run %s status is %s (not completed)",
+                run_name, run_data.get("status"),
+            )
+            return "not_completed"
 
+        # 2. Verify penetration_test_report.md exists and is non-empty
+        if not report_path.is_file() or report_path.stat().st_size == 0:
+            logger.warning("Final report: penetration_test_report.md missing or empty for %s", run_name)
+            return "missing"
+
+        # 3. Send via sendDocument
+        display_name = f"STRIX_{run_name}_INFORME_COMPLETO.md"
+        caption = f"Informe completo oficial de Strix\nRun: {run_name}"
+
+        resp = send_document(
+            self,
+            chat_id,
+            str(report_path),
+            filename=display_name,
+            caption=caption,
+        )
+
+        if not resp or not resp.get("message_id"):
+            logger.error(
+                "Final report: send_document failed for %s — %s",
+                run_name, resp,
+            )
+            return "send_failed"
+
+        # 4. Mark delivered only after success
         self._final_reports_delivered.add(run_name)
-        logger.info("Final report delivered for %s (%d fragments)", run_name, len(fragments))
+        logger.info("Final report delivered for %s via sendDocument", run_name)
         return "delivered"
 
     @staticmethod

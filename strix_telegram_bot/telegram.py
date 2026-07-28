@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -181,3 +182,116 @@ def send_chat_action(bot: Any, chat_id: int, action: str = "typing") -> Optional
         "chat_id": chat_id,
         "action": action,
     })
+
+
+def _build_multipart_form(fields: dict, files: dict) -> tuple[bytes, str]:
+    """Build a multipart/form-data body and return (body, content_type)."""
+    boundary = f"----strixFormBoundary{int(time.time() * 1_000_000)}"
+    lines: list[bytes] = []
+
+    for key, value in fields.items():
+        lines.append(f"--{boundary}\r\n".encode())
+        lines.append(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
+        lines.append(f"{value}\r\n".encode())
+
+    for key, (filename, file_bytes, mime_type) in files.items():
+        safe_name = os.path.basename(filename)
+        lines.append(f"--{boundary}\r\n".encode())
+        lines.append(
+            f'Content-Disposition: form-data; name="{key}"; filename="{safe_name}"\r\n'.encode()
+        )
+        lines.append(f"Content-Type: {mime_type}\r\n\r\n".encode())
+        lines.append(file_bytes)
+        lines.append(b"\r\n")
+
+    lines.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(lines)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
+
+
+def send_document(
+    bot: Any,
+    chat_id: int,
+    file_path: str,
+    filename: Optional[str] = None,
+    caption: Optional[str] = None,
+    reply_markup: Optional[dict] = None,
+) -> Optional[dict]:
+    """Send a file as a document using Telegram's sendDocument API.
+
+    Uses multipart/form-data. Only text/markdown files are supported.
+    """
+    url = _api_url("sendDocument")
+
+    if not os.path.isfile(file_path):
+        logger.warning("send_document: file not found — %s", file_path)
+        return None
+
+    display_name = filename or os.path.basename(file_path)
+    display_name = os.path.basename(display_name)
+
+    try:
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+    except OSError as e:
+        logger.error("send_document: cannot read %s — %s", file_path, e)
+        return None
+
+    if not file_bytes:
+        logger.warning("send_document: empty file — %s", file_path)
+        return None
+
+    fields: dict[str, str] = {"chat_id": str(chat_id)}
+    if caption:
+        fields["caption"] = caption
+
+    files: dict = {
+        "document": (display_name, file_bytes, "text/markdown"),
+    }
+
+    body, content_type = _build_multipart_form(fields, files)
+
+    headers = {"Content-Type": content_type}
+    req = urllib.request.Request(url, data=body, headers=headers)
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result_body = resp.read().decode()
+                result = json.loads(result_body)
+                if result.get("ok"):
+                    return result.get("result")
+                logger.warning(
+                    "Telegram API error [sendDocument]: %s — %s",
+                    result.get("error_code", "?"),
+                    result.get("description", "?"),
+                )
+                return None
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode() if e.fp else ""
+            if e.code == 400:
+                logger.debug("HTTP 400 on sendDocument (not retried): %s", err_body[:300])
+                return None
+            logger.warning(
+                "HTTP %d on sendDocument (attempt %d/%d): %s — %s",
+                e.code, attempt + 1, _MAX_RETRIES, e.reason, err_body[:200],
+            )
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_DELAY * (2 ** attempt))
+                continue
+            return None
+        except (urllib.error.URLError, OSError) as e:
+            reason = str(e.reason) if hasattr(e, "reason") else str(e)
+            if "Network is unreachable" in reason or "Name or service not known" in reason:
+                return None
+            logger.warning(
+                "Connection error on sendDocument (attempt %d/%d): %s",
+                attempt + 1, _MAX_RETRIES, reason,
+            )
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_DELAY * (2 ** attempt))
+                continue
+            return None
+
+    return None

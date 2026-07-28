@@ -68,6 +68,13 @@ def mock_telegram():
 
 
 @pytest.fixture
+def mock_send_doc():
+    with patch("strix_telegram_bot.bot.send_document") as mock_doc:
+        mock_doc.return_value = {"message_id": 200}
+        yield mock_doc
+
+
+@pytest.fixture
 def bot(mock_telegram):
     from strix_telegram_bot.bot import StrixBot
     b = StrixBot()
@@ -686,114 +693,123 @@ class TestToolCardMaxLimit:
 class TestDeliverFinalReport:
     """Tests for _deliver_final_report and scan_complete handler."""
 
-    def test_report_longer_than_4000_delivered_complete(self, bot, mock_telegram, tmp_path):
-        """A report >4000 chars must be split into multiple fragments, all delivered."""
-        mock_send, _, _ = mock_telegram
-        run_dir = tmp_path / "scan-report-long"
+    def _setup_run_dir(self, tmp_path, run_name, status="completed", report_body="# Report\n\nBody"):
+        run_dir = tmp_path / run_name
         run_dir.mkdir()
-        long_body = "x" * 6000
-        (run_dir / "penetration_test_report.md").write_text(f"# Report\n\n{long_body}")
+        with open(run_dir / "run.json", "w") as f:
+            json.dump({"status": status, "run_name": run_name}, f)
+        (run_dir / "penetration_test_report.md").write_text(report_body)
+        return run_dir
 
-        with patch("strix_telegram_bot.strix.report_collector.settings") as mock_settings:
+    def test_delivered_sends_document(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """A completed run with report must be sent via send_document."""
+        mock_send, _, _ = mock_telegram
+        self._setup_run_dir(tmp_path, "scan-doc-test")
+
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            result = bot._deliver_final_report(12345, "scan-report-long")
+            result = bot._deliver_final_report(12345, "scan-doc-test")
 
         assert result == "delivered"
-        assert mock_send.call_count == 2
-        total_sent = sum(len(c.args[2]) for c in mock_send.call_args_list)
-        assert total_sent >= 6000
+        mock_send_doc.assert_called_once()
+        args, kwargs = mock_send_doc.call_args
+        assert "STRIX_scan-doc-test_INFORME_COMPLETO" in kwargs.get("filename", "")
+        assert mock_send.call_count == 0
 
-    def test_order_fragments_before_confirmation(self, bot, mock_telegram, tmp_path):
-        """Fragments must be sent before the 'Escaneo completado' confirmation."""
+    def test_sends_confirmation_after_document(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """Confirmation message must appear after send_document."""
         mock_send, _, _ = mock_telegram
-        bot._active_job_run_name = "scan-order-test"
-        run_dir = tmp_path / "scan-order-test"
-        run_dir.mkdir()
-        (run_dir / "penetration_test_report.md").write_text("# Report\n\nShort body")
+        bot._active_job_run_name = "scan-confirm"
+        self._setup_run_dir(tmp_path, "scan-confirm")
 
-        with patch("strix_telegram_bot.strix.report_collector.settings") as mock_settings:
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            ev = _make_system_event("scan_complete", run_name="scan-order-test")
+            ev = _make_system_event("scan_complete", run_name="scan-confirm")
             bot._process_scan_events([ev])
 
-        calls = [c.args[2] for c in mock_send.call_args_list]
-        report_idx = next(i for i, t in enumerate(calls) if "Reporte final" in t)
-        confirm_idx = next(i for i, t in enumerate(calls) if "completado" in t)
-        assert report_idx < confirm_idx
+        mock_send_doc.assert_called_once()
+        confirm_texts = [c.args[2] for c in mock_send.call_args_list]
+        assert any("Informe completo enviado" in t for t in confirm_texts)
 
-    def test_two_scan_complete_only_one_delivery(self, bot, mock_telegram, tmp_path):
+    def test_two_scan_complete_only_one_delivery(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Two scan_complete events for the same run must only deliver once."""
         mock_send, _, _ = mock_telegram
         bot._active_job_run_name = "scan-idempotent"
-        run_dir = tmp_path / "scan-idempotent"
-        run_dir.mkdir()
-        (run_dir / "penetration_test_report.md").write_text("# Report\n\nBody")
+        self._setup_run_dir(tmp_path, "scan-idempotent")
 
-        with patch("strix_telegram_bot.strix.report_collector.settings") as mock_settings:
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
             ev = _make_system_event("scan_complete", run_name="scan-idempotent")
             bot._process_scan_events([ev])
-            count_first = mock_send.call_count
+            count_first = mock_send_doc.call_count
             bot._process_scan_events([ev])
-            count_second = mock_send.call_count
+            count_second = mock_send_doc.call_count
 
-        assert count_first == count_second
+        assert count_first == 1
+        assert count_second == 1
 
-    def test_second_fragment_failure(self, bot, mock_telegram, tmp_path):
-        """If the second fragment fails to send, result is send_failed."""
-        mock_send, _, _ = mock_telegram
-        run_dir = tmp_path / "scan-frag-fail"
-        run_dir.mkdir()
-        body = "A" * 5000
-        (run_dir / "penetration_test_report.md").write_text(f"# Report\n\n{body}")
+    def test_send_document_failure(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """If send_document returns None, result is send_failed."""
+        mock_send_doc.return_value = None
+        self._setup_run_dir(tmp_path, "scan-doc-fail")
 
-        call_count = [0]
-        def side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 2:
-                return None
-            return {"message_id": 100}
-        mock_send.side_effect = side_effect
-
-        with patch("strix_telegram_bot.strix.report_collector.settings") as mock_settings:
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            result = bot._deliver_final_report(12345, "scan-frag-fail")
+            result = bot._deliver_final_report(12345, "scan-doc-fail")
 
         assert result == "send_failed"
+        assert "scan-doc-fail" not in bot._final_reports_delivered
 
-    def test_missing_report_returns_missing(self, bot, mock_telegram):
+    def test_missing_report_returns_missing(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """When no report file exists, result is 'missing'."""
         mock_send, _, _ = mock_telegram
-        result = bot._deliver_final_report(12345, "nonexistent-run")
+        run_dir = tmp_path / "scan-noreport"
+        run_dir.mkdir()
+        with open(run_dir / "run.json", "w") as f:
+            json.dump({"status": "completed"}, f)
+
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
+            mock_settings.strix_runs_dir = tmp_path
+            result = bot._deliver_final_report(12345, "scan-noreport")
+
         assert result == "missing"
+        mock_send_doc.assert_not_called()
         assert mock_send.call_count == 0
 
-    def test_scan_complete_with_delivered_report(self, bot, mock_telegram, tmp_path):
-        """Successful delivery sends fragments, then 'completado'."""
+    def test_not_completed_returns_not_completed(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """When run.json status is not 'completed', result is 'not_completed'."""
+        mock_send, _, _ = mock_telegram
+        self._setup_run_dir(tmp_path, "scan-running", status="running")
+
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
+            mock_settings.strix_runs_dir = tmp_path
+            result = bot._deliver_final_report(12345, "scan-running")
+
+        assert result == "not_completed"
+        mock_send_doc.assert_not_called()
+
+    def test_scan_complete_with_delivered_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """Successful delivery sends document, then confirmation text."""
         mock_send, _, _ = mock_telegram
         bot._active_job_run_name = "scan-delivered"
-        run_dir = tmp_path / "scan-delivered"
-        run_dir.mkdir()
-        (run_dir / "penetration_test_report.md").write_text("# Report\n\nBody")
+        self._setup_run_dir(tmp_path, "scan-delivered")
 
-        with patch("strix_telegram_bot.strix.report_collector.settings") as mock_settings:
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
             ev = _make_system_event("scan_complete", run_name="scan-delivered")
             bot._process_scan_events([ev])
 
+        mock_send_doc.assert_called_once()
         calls = [c.args[2] for c in mock_send.call_args_list]
-        assert any("Reporte final" in t for t in calls)
-        assert any("completado" in t for t in calls)
+        assert any("Informe completo enviado" in t for t in calls)
 
-    def test_all_messages_use_parse_mode_none(self, bot, mock_telegram, tmp_path):
-        """Every send_message call must use parse_mode=None."""
+    def test_all_messages_use_parse_mode_none(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """Every send_message call (from scan_complete handler) must use parse_mode=None."""
         mock_send, _, _ = mock_telegram
         bot._active_job_run_name = "scan-parse"
-        run_dir = tmp_path / "scan-parse"
-        run_dir.mkdir()
-        (run_dir / "penetration_test_report.md").write_text("# Report\n\nBody")
+        self._setup_run_dir(tmp_path, "scan-parse")
 
-        with patch("strix_telegram_bot.strix.report_collector.settings") as mock_settings:
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
             ev = _make_system_event("scan_complete", run_name="scan-parse")
             bot._process_scan_events([ev])
