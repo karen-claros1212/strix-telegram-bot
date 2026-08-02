@@ -817,8 +817,9 @@ class StrixBot:
                         elif result == "not_completed":
                             send_message(
                                 self, chat_id,
-                                "Escaneo completado.\n"
-                                "El run aun no marca estado completed.",
+                                "Strix emitió una señal de finalización, "
+                                "pero el run todavía no está marcado como "
+                                "completed. No se envió ningún informe.",
                                 reply_markup=main_menu(),
                                 parse_mode=None,
                             )
@@ -951,72 +952,13 @@ class StrixBot:
         self._chat_event_version[ev_id] = ev_version
 
     def _deliver_final_report(self, chat_id: int, run_name: str) -> str:
-        """Deliver the official penetration test report via Telegram.
+        """Delegate to deliver_report_document and track delivered runs."""
+        from .strix.report_delivery import deliver_report_document
 
-        Validation: run.json status == "completed", penetration_test_report.md
-        exists and is non-empty.  Sends the file as a single document via
-        sendDocument (multipart/form-data).
-
-        Returns:
-            "delivered"   — file sent successfully.
-            "missing"     — penetration_test_report.md does not exist or is empty.
-            "not_completed" — run.json status is not "completed".
-            "send_failed"  — sendDocument call failed or returned no message_id.
-        """
-        from .config import settings
-        import json
-
-        run_dir = settings.strix_runs_dir / run_name
-        run_json_path = run_dir / "run.json"
-        report_path = run_dir / "penetration_test_report.md"
-
-        # 1. Verify run.json exists and status == completed
-        if not run_json_path.is_file():
-            logger.warning("Final report: run.json not found for %s", run_name)
-            return "missing"
-
-        try:
-            with open(run_json_path) as f:
-                run_data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error("Final report: cannot parse run.json for %s — %s", run_name, e)
-            return "missing"
-
-        if run_data.get("status") != "completed":
-            logger.info(
-                "Final report: run %s status is %s (not completed)",
-                run_name, run_data.get("status"),
-            )
-            return "not_completed"
-
-        # 2. Verify penetration_test_report.md exists and is non-empty
-        if not report_path.is_file() or report_path.stat().st_size == 0:
-            logger.warning("Final report: penetration_test_report.md missing or empty for %s", run_name)
-            return "missing"
-
-        # 3. Send via sendDocument
-        display_name = f"STRIX_{run_name}_INFORME_COMPLETO.md"
-        caption = f"Informe completo oficial de Strix\nRun: {run_name}"
-
-        resp = send_document(
-            self,
-            chat_id,
-            str(report_path),
-            filename=display_name,
-            caption=caption,
-        )
-
-        if not resp or not resp.get("message_id"):
-            logger.error(
-                "Final report: send_document failed for %s — %s",
-                run_name, resp,
-            )
-            return "send_failed"
-
-        # 4. Mark delivered only after success
-        self._final_reports_delivered.add(run_name)
-        logger.info("Final report delivered for %s via sendDocument", run_name)
-        return "delivered"
+        result = deliver_report_document(self, chat_id, run_name)
+        if result == "delivered":
+            self._final_reports_delivered.add(run_name)
+        return result
 
     @staticmethod
     def _sanitize_tool_args(args: dict) -> str:

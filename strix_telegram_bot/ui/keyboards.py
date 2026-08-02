@@ -109,6 +109,9 @@ def report_detail_menu() -> dict:
     return build_inline_keyboard([
         [
             _btn("Markdown", _cb("report", "markdown")),
+            _btn("Descargar MD", _cb("report", "download_md")),
+        ],
+        [
             _btn("CSV", _cb("report", "csv")),
         ],
         [

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -184,6 +185,19 @@ def send_chat_action(bot: Any, chat_id: int, action: str = "typing") -> Optional
     })
 
 
+def _sanitize_filename(name: str) -> str:
+    name = os.path.basename(name)
+    name = name.replace("\r", "").replace("\n", "")
+    name = name.replace('"', "").replace("'", "")
+    safe = re.sub(r"[^\w.\- ]", "", name)
+    safe = safe.strip()
+    if not safe:
+        safe = "report.md"
+    if not safe.lower().endswith(".md"):
+        safe += ".md"
+    return safe
+
+
 def _build_multipart_form(fields: dict, files: dict) -> tuple[bytes, str]:
     """Build a multipart/form-data body and return (body, content_type)."""
     boundary = f"----strixFormBoundary{int(time.time() * 1_000_000)}"
@@ -192,10 +206,12 @@ def _build_multipart_form(fields: dict, files: dict) -> tuple[bytes, str]:
     for key, value in fields.items():
         lines.append(f"--{boundary}\r\n".encode())
         lines.append(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
-        lines.append(f"{value}\r\n".encode())
+        encoded = str(value).encode("utf-8")
+        lines.append(encoded)
+        lines.append(b"\r\n")
 
     for key, (filename, file_bytes, mime_type) in files.items():
-        safe_name = os.path.basename(filename)
+        safe_name = _sanitize_filename(filename)
         lines.append(f"--{boundary}\r\n".encode())
         lines.append(
             f'Content-Disposition: form-data; name="{key}"; filename="{safe_name}"\r\n'.encode()
@@ -210,6 +226,10 @@ def _build_multipart_form(fields: dict, files: dict) -> tuple[bytes, str]:
     return body, content_type
 
 
+def _is_permanent_client_error(code: int) -> bool:
+    return code in (400, 401, 403, 404, 405, 409, 413, 422)
+
+
 def send_document(
     bot: Any,
     chat_id: int,
@@ -218,9 +238,10 @@ def send_document(
     caption: Optional[str] = None,
     reply_markup: Optional[dict] = None,
 ) -> Optional[dict]:
-    """Send a file as a document using Telegram's sendDocument API.
+    """Send a file as a document using Telegram's sendDocument API (multipart/form-data).
 
-    Uses multipart/form-data. Only text/markdown files are supported.
+    Returns the API result dict (with message_id) on success, or None on failure.
+    Never raises.
     """
     url = _api_url("sendDocument")
 
@@ -228,8 +249,7 @@ def send_document(
         logger.warning("send_document: file not found — %s", file_path)
         return None
 
-    display_name = filename or os.path.basename(file_path)
-    display_name = os.path.basename(display_name)
+    display_name = _sanitize_filename(filename or os.path.basename(file_path))
 
     try:
         with open(file_path, "rb") as f:
@@ -245,21 +265,22 @@ def send_document(
     fields: dict[str, str] = {"chat_id": str(chat_id)}
     if caption:
         fields["caption"] = caption
+    if reply_markup:
+        fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
     files: dict = {
         "document": (display_name, file_bytes, "text/markdown"),
     }
 
     body, content_type = _build_multipart_form(fields, files)
-
     headers = {"Content-Type": content_type}
     req = urllib.request.Request(url, data=body, headers=headers)
 
     for attempt in range(_MAX_RETRIES):
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
-                result_body = resp.read().decode()
-                result = json.loads(result_body)
+                raw = resp.read().decode("utf-8", errors="replace")
+                result = json.loads(raw)
                 if result.get("ok"):
                     return result.get("result")
                 logger.warning(
@@ -269,17 +290,29 @@ def send_document(
                 )
                 return None
         except urllib.error.HTTPError as e:
-            err_body = e.read().decode() if e.fp else ""
-            if e.code == 400:
-                logger.debug("HTTP 400 on sendDocument (not retried): %s", err_body[:300])
+            err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+            if _is_permanent_client_error(e.code):
+                logger.debug("HTTP %d on sendDocument (not retried): %s", e.code, err_body[:300])
                 return None
-            logger.warning(
-                "HTTP %d on sendDocument (attempt %d/%d): %s — %s",
-                e.code, attempt + 1, _MAX_RETRIES, e.reason, err_body[:200],
-            )
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_RETRY_DELAY * (2 ** attempt))
-                continue
+            if e.code == 429:
+                delay = _RETRY_DELAY * (2 ** attempt)
+                try:
+                    parsed = json.loads(err_body)
+                    retry_after = int(parsed.get("parameters", {}).get("retry_after", delay))
+                    delay = max(delay, retry_after)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+                logger.warning("HTTP 429 on sendDocument, retrying in %.1fs", delay)
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(delay)
+                    continue
+                return None
+            if e.code == 408 or e.code >= 500:
+                logger.warning("HTTP %d on sendDocument (attempt %d/%d): retrying", e.code, attempt + 1, _MAX_RETRIES)
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_DELAY * (2 ** attempt))
+                    continue
+                return None
             return None
         except (urllib.error.URLError, OSError) as e:
             reason = str(e.reason) if hasattr(e, "reason") else str(e)
@@ -292,6 +325,9 @@ def send_document(
             if attempt < _MAX_RETRIES - 1:
                 time.sleep(_RETRY_DELAY * (2 ** attempt))
                 continue
+            return None
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+            logger.error("send_document: invalid response — %s", e)
             return None
 
     return None

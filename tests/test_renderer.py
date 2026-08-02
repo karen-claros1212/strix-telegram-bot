@@ -69,7 +69,7 @@ def mock_telegram():
 
 @pytest.fixture
 def mock_send_doc():
-    with patch("strix_telegram_bot.bot.send_document") as mock_doc:
+    with patch("strix_telegram_bot.telegram.send_document") as mock_doc:
         mock_doc.return_value = {"message_id": 200}
         yield mock_doc
 
