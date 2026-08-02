@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -1123,6 +1124,13 @@ class TestTuiAlignment:
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
         assert "_watch_completion" in src
 
+    def test_watcher_only_created_when_interactive(self):
+        """Fix 7: the completion watcher must be gated on real interactive mode."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "if interactive:" in src
+
     def test_watcher_only_cancels_on_completed(self):
         """Fix 5: _watch_completion source only checks 'completed', not terminal set."""
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
@@ -1195,6 +1203,125 @@ class TestWatcherBehavior:
             event, error = bridge._classify_scan_result()
         assert event == "scan_complete"
         assert error is None
+
+
+class TestReportMdPresent:
+    def test_true_for_non_empty_file(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix.runtime_bridge import _report_md_present
+        run_dir = tmp_path / "scan-report"
+        run_dir.mkdir()
+        (run_dir / "penetration_test_report.md").write_text("# Informe\n")
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        assert _report_md_present("scan-report") is True
+
+    def test_false_for_missing_file(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix.runtime_bridge import _report_md_present
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        assert _report_md_present("scan-missing") is False
+
+    def test_false_for_empty_file(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix.runtime_bridge import _report_md_present
+        run_dir = tmp_path / "scan-empty"
+        run_dir.mkdir()
+        (run_dir / "penetration_test_report.md").write_text("")
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        assert _report_md_present("scan-empty") is False
+
+    def test_false_for_blank_run_name(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix.runtime_bridge import _report_md_present
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        assert _report_md_present("") is False
+
+
+class TestFinalizerSingleEvent:
+    """Fix 6: _main's finalizer emits exactly ONE final event and persists run state."""
+
+    def _make_bridge(self, monkeypatch, tmp_path, run_name, root_status):
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+
+        bridge = rb.StrixRuntimeBridge()
+        bridge._run_name = run_name
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.parent_of = None
+        bridge._coordinator.statuses = {"root": root_status}
+        bridge._root_agent_id = "root"
+        bridge._emit_event = MagicMock()
+        return bridge
+
+    def test_success_emits_single_complete(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        run_name = "scan-ok"
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        (run_dir / "penetration_test_report.md").write_text("# Informe\n")
+        bridge = self._make_bridge(monkeypatch, tmp_path, run_name, "completed")
+
+        rs = MagicMock()
+        rs.run_record = {"status": "completed"}
+
+        async def fake_scan(**kwargs):
+            return MagicMock(final_output={"scan_completed": True})
+
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb, "ReportState", return_value=rs), \
+             patch.object(rb, "session_manager") as mock_sm:
+            bridge._scan_thread({"non_interactive": True}, [])
+
+        assert bridge._final_state == "completed"
+        assert bridge._scan_completed is True
+        rs.save_run_data.assert_not_called()
+        assert bridge._emit_event.call_count == 1
+        assert bridge._emit_event.call_args[0][0] == "scan_complete"
+        mock_sm.cleanup.assert_called_once_with(run_name)
+
+    def test_exception_persists_failed_and_emits_single_error(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        run_name = "scan-fail"
+        bridge = self._make_bridge(monkeypatch, tmp_path, run_name, "running")
+
+        rs = MagicMock()
+        rs.run_record = {"status": "running"}
+
+        async def fake_scan(**kwargs):
+            raise RuntimeError("provider boom")
+
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb, "ReportState", return_value=rs), \
+             patch.object(rb, "session_manager") as mock_sm:
+            bridge._scan_thread({"non_interactive": True}, [])
+
+        assert bridge._final_state == "failed"
+        assert bridge._last_error == "provider boom"
+        assert bridge._scan_completed is True
+        rs.save_run_data.assert_called_once_with(status="failed")
+        assert bridge._emit_event.call_count == 1
+        assert bridge._emit_event.call_args[0][0] == "scan_error"
+        mock_sm.cleanup.assert_called_once_with(run_name)
+
+    def test_cancel_persists_stopped_and_emits_single_cancelled(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        run_name = "scan-stop"
+        bridge = self._make_bridge(monkeypatch, tmp_path, run_name, "running")
+
+        rs = MagicMock()
+        rs.run_record = {"status": "running"}
+
+        async def fake_scan(**kwargs):
+            raise asyncio.CancelledError
+
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb, "ReportState", return_value=rs), \
+             patch.object(rb, "session_manager") as mock_sm:
+            bridge._scan_thread({"non_interactive": True}, [])
+
+        assert bridge._user_cancelled is True
+        assert bridge._final_state == "stopped"
+        assert bridge._scan_completed is True
+        rs.save_run_data.assert_called_once_with(status="stopped")
+        assert bridge._emit_event.call_count == 1
+        assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
+        mock_sm.cleanup.assert_called_once_with(run_name)
 
 
 class TestArtifactHintRemoved:

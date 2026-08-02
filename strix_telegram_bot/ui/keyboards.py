@@ -105,11 +105,27 @@ def reports_list(report_names: list[str]) -> dict:
     return build_inline_keyboard(rows)
 
 
-def report_detail_menu() -> dict:
+def reports_main_menu() -> dict:
+    return build_inline_keyboard([
+        [_btn("Último reporte", _cb("report", "latest"))],
+        [_btn("Historial", _cb("report", "history"))],
+        [_btn("Resumen ejecutivo", _cb("report", "summary"))],
+        [_btn("Evidencia", _cb("report", "evidence"))],
+        [
+            _btn("Markdown", _cb("report", "markdown")),
+            _btn("CSV", _cb("report", "csv")),
+            _btn("JSON", _cb("report", "json")),
+        ],
+        [_btn("Limpiar viejos", _cb("report", "cleanup"))],
+        [_btn("Volver", _cb("menu", "main"))],
+    ])
+
+
+def report_detail_menu(run_name: str) -> dict:
     return build_inline_keyboard([
         [
             _btn("Markdown", _cb("report", "markdown")),
-            _btn("Descargar MD", _cb("report", "download_md")),
+            _btn("Descargar MD", _cb("report", "download_md", run_name)),
         ],
         [
             _btn("CSV", _cb("report", "csv")),

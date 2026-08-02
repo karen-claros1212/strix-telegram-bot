@@ -365,3 +365,56 @@ class TestSendLatestReportFilter:
             call_text = mock_frag.call_args[0][2]
             assert "CSV" in call_text
             assert "id,severity" in call_text
+
+
+class TestDeliverReportDocument:
+    def test_deliver_uses_selected_run_name(self, monkeypatch):
+        """download_md must deliver the exact run_name passed in the callback."""
+        from strix_telegram_bot.commands import reports as reports_mod
+
+        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: run == "scan-picked")
+        mock_deliver = MagicMock(return_value="delivered")
+        monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._deliver_report_document(fake_bot, 123, 456, "scan-picked")
+            mock_deliver.assert_called_once_with(fake_bot, 123, "scan-picked")
+        delivered_calls = [c for c in mock_edit.call_args_list if "enviado como archivo" in c[0][3]]
+        assert len(delivered_calls) == 1
+
+    def test_deliver_rejects_unknown_run(self, monkeypatch):
+        """A run_name that is not completed must be rejected without falling back."""
+        from strix_telegram_bot.commands import reports as reports_mod
+
+        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: False)
+        mock_deliver = MagicMock()
+        monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._deliver_report_document(fake_bot, 123, 456, "scan-unknown")
+            mock_deliver.assert_not_called()
+        sent_text = mock_edit.call_args[0][3]
+        assert "no está disponible" in sent_text
+
+    def test_deliver_falls_back_to_latest_when_no_run_name(self, monkeypatch):
+        """Without a run_name, fall back to the latest completed job."""
+        from strix_telegram_bot.commands import reports as reports_mod
+        from strix_telegram_bot.jobs.job_store import JobStore
+
+        job = JobState(run_name="scan-latest", target=["x"], mode=ScanMode.DEEP,
+                       phase=JobPhase.COMPLETED)
+        mock_store = MagicMock(spec=JobStore)
+        mock_store.list_recent.return_value = [job]
+        monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
+        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: True)
+        mock_deliver = MagicMock(return_value="delivered")
+        monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._deliver_report_document(fake_bot, 123, 456)
+            mock_deliver.assert_called_once_with(fake_bot, 123, "scan-latest")
+        delivered_calls = [c for c in mock_edit.call_args_list if "enviado como archivo" in c[0][3]]
+        assert len(delivered_calls) == 1

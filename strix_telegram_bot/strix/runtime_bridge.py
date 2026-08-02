@@ -25,6 +25,10 @@ from strix_telegram_bot.config import settings
 
 logger = logging.getLogger(__name__)
 
+_FINAL_COMPLETED = "completed"
+_FINAL_FAILED = "failed"
+_FINAL_STOPPED = "stopped"
+
 _STRIX_AVAILABLE = False
 AgentCoordinator: Any = None
 run_strix_scan: Any = None
@@ -84,6 +88,16 @@ except ImportError:
 _get_report_state = _ggrs if _STRIX_AVAILABLE else (lambda: None)
 
 
+def _report_md_present(run_name: str) -> bool:
+    if not run_name:
+        return False
+    try:
+        md = settings.strix_runs_dir / run_name / "penetration_test_report.md"
+        return md.is_file() and md.stat().st_size > 0
+    except Exception:
+        return False
+
+
 class StrixRuntimeBridge:
 
     def __init__(self) -> None:
@@ -103,6 +117,9 @@ class StrixRuntimeBridge:
         self._non_interactive: bool = True
         self._scan_result: Optional[Any] = None
         self._completion_detected: bool = False
+        self._user_cancelled: bool = False
+        self._final_state: Optional[str] = None
+        self._original_exception: Optional[BaseException] = None
 
         self._live_view: Any = None
         self._lv_lock: threading.Lock = threading.Lock()
@@ -240,6 +257,10 @@ class StrixRuntimeBridge:
         self._last_error = None
         self._non_interactive = non_interactive
         self._scan_result = None
+        self._completion_detected = False
+        self._user_cancelled = False
+        self._final_state = None
+        self._original_exception = None
         self._preferred_agent_id = None
         self._last_waiting_root = None
 
@@ -305,6 +326,7 @@ class StrixRuntimeBridge:
             logger.warning("Root agent not discovered within 60s")
 
         non_interactive = bool(scan_config.get("non_interactive", False))
+        interactive = not non_interactive
 
         async def _run_scan() -> Any:
             rs = ReportState(run_name=self._run_name)
@@ -322,7 +344,7 @@ class StrixRuntimeBridge:
                 image=self._scan_image,
                 local_sources=scan_config.get("local_sources"),
                 coordinator=self._coordinator,
-                interactive=not non_interactive,
+                interactive=interactive,
                 event_sink=bound_event_sink,
             )
 
@@ -352,63 +374,85 @@ class StrixRuntimeBridge:
         async def _main() -> None:
             self._scan_task = asyncio.create_task(_run_scan())
             discovery = asyncio.create_task(_poll_root())
-            watcher = asyncio.create_task(_watch_completion(self._scan_task))
+            watcher: Optional[asyncio.Task] = None
+            if interactive:
+                watcher = asyncio.create_task(_watch_completion(self._scan_task))
 
             try:
                 self._scan_result = await self._scan_task
             except asyncio.CancelledError:
-                if self._completion_detected:
-                    pass  # watcher triggered — fall through to classification
-                else:
-                    self._scan_completed = True
-                    self._emit_event("scan_cancelled", "", "Escaneo cancelado")
+                if not self._completion_detected:
+                    self._user_cancelled = True
+                    self._final_state = _FINAL_STOPPED
             except Exception as e:
-                self._scan_completed = True
+                self._final_state = _FINAL_FAILED
+                self._original_exception = e
                 self._last_error = str(e)
-                self._emit_event("scan_error", "", f"Error en escaneo: {e}")
-            finally:
-                discovery.cancel()
-                watcher.cancel()
-                try:
-                    await asyncio.gather(discovery, watcher, return_exceptions=True)
-                except Exception:
-                    pass
 
-                # ── lifecycle classification + cleanup (always) ──
+            # ── single finalizer: exactly one final event ──
+            self._scan_completed = True
+
+            to_cancel: list[asyncio.Task] = [discovery]
+            if watcher is not None:
+                to_cancel.append(watcher)
+            for task in to_cancel:
+                task.cancel()
+            try:
+                await asyncio.gather(*to_cancel, return_exceptions=True)
+            except Exception:
+                pass
+
+            if self._final_state is None:
                 event_type, error_msg = self._classify_scan_result()
-
-                current_run = self._run_name or ""
-                cleanup_error = None
-                if current_run:
-                    try:
-                        await session_manager.cleanup(current_run)
-                        logger.info("Sandbox cleaned up for run %s", current_run)
-                    except Exception as exc:
-                        logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
-                        cleanup_error = str(exc)
-
-                self._scan_completed = True
-                if event_type == "scan_complete":
-                    self._emit_event("scan_complete", "", "Escaneo finalizado")
+                if event_type == "scan_complete" and _report_md_present(self._run_name or ""):
+                    self._final_state = _FINAL_COMPLETED
                 else:
-                    if error_msg:
+                    if error_msg and not self._last_error:
                         self._last_error = error_msg
-                    self._emit_event(event_type, "", error_msg or "Escaneo terminó con error")
+                    self._final_state = _FINAL_FAILED
 
-                if cleanup_error:
-                    logger.warning("Scan %s sandbox cleanup failed: %s",
-                                 current_run, cleanup_error)
+            rs = _get_report_state()
+            if rs is not None:
+                try:
+                    if self._final_state == _FINAL_STOPPED:
+                        rs.save_run_data(status=_FINAL_STOPPED)
+                    elif self._final_state == _FINAL_FAILED:
+                        rs.save_run_data(status=_FINAL_FAILED)
+                except Exception as exc:
+                    logger.warning("Failed to persist final state for %s: %s",
+                                   self._run_name, exc)
+
+            current_run = self._run_name or ""
+            cleanup_error = None
+            if current_run:
+                try:
+                    await session_manager.cleanup(current_run)
+                    logger.info("Sandbox cleaned up for run %s", current_run)
+                except Exception as exc:
+                    logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
+                    cleanup_error = str(exc)
+
+            if self._final_state == _FINAL_COMPLETED:
+                self._emit_event("scan_complete", "", "Escaneo finalizado")
+            elif self._final_state == _FINAL_STOPPED:
+                self._emit_event("scan_cancelled", "", "Escaneo cancelado")
+            else:
+                self._emit_event("scan_error", "", self._last_error or "Escaneo terminó con error")
+
+            if cleanup_error:
+                logger.warning("Scan %s sandbox cleanup failed: %s",
+                             current_run, cleanup_error)
 
         try:
             loop.run_until_complete(_main())
         except asyncio.CancelledError:
             self._scan_completed = True
-            self._emit_event("scan_cancelled", "", "Escaneo cancelado")
+            self._last_error = "Escaneo cancelado"
         except Exception as e:
             if not self._scan_completed:
                 self._scan_completed = True
                 self._last_error = str(e)
-                self._emit_event("scan_error", "", f"Error en escaneo: {e}")
+                logger.error("Scan thread crashed before finalizer: %s", e)
             else:
                 logger.warning("Post-scan teardown error: %s", e)
         finally:

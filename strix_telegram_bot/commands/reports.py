@@ -6,7 +6,7 @@ from typing import Any
 
 from strix_telegram_bot.config import settings
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
-from strix_telegram_bot.ui.keyboards import reports_list, back_to_menu, parse_callback, report_detail_menu
+from strix_telegram_bot.ui.keyboards import reports_list, reports_main_menu, back_to_menu, parse_callback, report_detail_menu
 from strix_telegram_bot.ui.messages import escape_md, reports_menu_text
 from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.strix.report_delivery import deliver_report_document
@@ -93,7 +93,8 @@ def callback_reports(bot: Any, update: dict) -> None:
         _send_report_type(bot, chat_id, msg_id, "markdown")
 
     elif action == "download_md":
-        _deliver_report_document(bot, chat_id, msg_id)
+        run_name = parts[2] if len(parts) > 2 else ""
+        _deliver_report_document(bot, chat_id, msg_id, run_name)
 
     elif action == "csv":
         _send_report_type(bot, chat_id, msg_id, "csv")
@@ -139,7 +140,6 @@ def _show_reports(bot, chat_id, msg_id=None) -> None:
         kb = back_to_menu()
     else:
         text = reports_menu_text()
-        from strix_telegram_bot.ui.keyboards import reports_main_menu
         kb = reports_main_menu()
 
     if msg_id:
@@ -236,33 +236,34 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
     edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
 
 
-def _deliver_report_document(bot, chat_id, msg_id) -> None:
-    """Find the latest completed run and deliver its report as a single Markdown document."""
-    store = JobStore()
-    jobs = [j for j in store.list_recent(10)
-            if j.phase == JobPhase.COMPLETED
-            and j.run_name != "pending"
-            and _is_run_json_completed(j.run_name)]
-    if not jobs:
-        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
+def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
+    """Deliver the selected run's report as a single Markdown document.
+
+    Falls back to the latest completed run when no run_name is provided.
+    """
+    if run_name and not _is_run_json_completed(run_name):
+        edit_message(bot, chat_id, msg_id, "El informe no está disponible para ese escaneo.", reply_markup=back_to_menu())
         return
 
-    for job in jobs:
-        rc = ReportCollector(job.run_name)
-        report = rc.get_markdown_report()
-        if not report or not report.strip():
-            continue
-        edit_message(bot, chat_id, msg_id, "Descargando informe completo…", reply_markup=back_to_menu())
-        result = deliver_report_document(bot, chat_id, job.run_name)
-        if result == "delivered":
-            edit_message(bot, chat_id, msg_id, "Informe completo enviado como archivo Markdown.", reply_markup=back_to_menu())
-        elif result == "send_failed":
-            edit_message(bot, chat_id, msg_id, "Error al enviar el informe.", reply_markup=back_to_menu())
-        else:
-            edit_message(bot, chat_id, msg_id, "Informe no disponible.", reply_markup=back_to_menu())
-        return
+    if not run_name:
+        store = JobStore()
+        jobs = [j for j in store.list_recent(10)
+                if j.phase == JobPhase.COMPLETED
+                and j.run_name != "pending"
+                and _is_run_json_completed(j.run_name)]
+        if not jobs:
+            edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
+            return
+        run_name = jobs[0].run_name
 
-    edit_message(bot, chat_id, msg_id, "No se encontraron reportes válidos.", reply_markup=back_to_menu())
+    edit_message(bot, chat_id, msg_id, "Descargando informe completo…", reply_markup=back_to_menu())
+    result = deliver_report_document(bot, chat_id, run_name)
+    if result == "delivered":
+        edit_message(bot, chat_id, msg_id, "Informe completo enviado como archivo Markdown.", reply_markup=back_to_menu())
+    elif result == "send_failed":
+        edit_message(bot, chat_id, msg_id, "Error al enviar el informe.", reply_markup=back_to_menu())
+    else:
+        edit_message(bot, chat_id, msg_id, "Informe no disponible.", reply_markup=back_to_menu())
 
 
 def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:

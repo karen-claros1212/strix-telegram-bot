@@ -4,6 +4,8 @@ from strix_telegram_bot.ui.keyboards import (
     job_panel,
     parse_callback,
     back_to_menu,
+    reports_main_menu,
+    report_detail_menu,
 )
 from strix_telegram_bot.ui.messages import (
     main_menu_text,
@@ -55,6 +57,21 @@ class TestKeyboards:
     def test_parse_callback(self):
         parts = parse_callback("menu:scan")
         assert parts == ("menu", "scan")
+
+    def test_reports_main_menu_exists(self):
+        kb = reports_main_menu()
+        texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
+        assert "Último reporte" in texts
+        assert "Historial" in texts
+        assert "Resumen ejecutivo" in texts
+        assert "Limpiar viejos" in texts
+
+    def test_report_detail_menu_download_includes_run_name(self):
+        run_name = "scan-e2b8cca0"
+        kb = report_detail_menu(run_name)
+        cbs = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+        assert f"report:download_md:{run_name}" in cbs
+        assert all(len(cb) <= 64 for cb in cbs)
 
 
 class TestMessages:
