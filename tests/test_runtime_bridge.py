@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, AsyncMock, patch
 
 import pytest
 
@@ -1136,7 +1136,7 @@ class TestTuiAlignment:
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
-        assert "terminal" not in src
+        assert '"terminal"' not in src
         assert 'status == "completed"' in src
 
     def test_watcher_checks_report_state(self):
@@ -1268,7 +1268,7 @@ class TestFinalizerSingleEvent:
              patch.object(rb, "session_manager") as mock_sm:
             bridge._scan_thread({"non_interactive": True}, [])
 
-        assert bridge._final_state == "completed"
+        assert bridge._terminal_kind == "completed"
         assert bridge._scan_completed is True
         rs.save_run_data.assert_not_called()
         assert bridge._emit_event.call_count == 1
@@ -1291,7 +1291,7 @@ class TestFinalizerSingleEvent:
              patch.object(rb, "session_manager") as mock_sm:
             bridge._scan_thread({"non_interactive": True}, [])
 
-        assert bridge._final_state == "failed"
+        assert bridge._terminal_kind == "failed"
         assert bridge._last_error == "provider boom"
         assert bridge._scan_completed is True
         rs.save_run_data.assert_called_once_with(status="failed")
@@ -1316,9 +1316,87 @@ class TestFinalizerSingleEvent:
             bridge._scan_thread({"non_interactive": True}, [])
 
         assert bridge._user_cancelled is True
-        assert bridge._final_state == "stopped"
+        assert bridge._terminal_kind == "stopped"
         assert bridge._scan_completed is True
         rs.save_run_data.assert_called_once_with(status="stopped")
+        assert bridge._emit_event.call_count == 1
+        assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
+        mock_sm.cleanup.assert_called_once_with(run_name)
+
+    def test_failure_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
+        """Failure must persist failed + end_time in the real run.json (spec A)."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        from strix.report.state import ReportState as RealState
+        run_name = "scan-endtime-fail"
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        bridge = rb.StrixRuntimeBridge()
+        bridge._run_name = run_name
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.parent_of = None
+        bridge._coordinator.statuses = {"root": "running"}
+        bridge._root_agent_id = "root"
+        bridge._emit_event = MagicMock()
+
+        rs = RealState(run_name=run_name)
+        rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
+
+        async def fake_scan(**kwargs):
+            raise RuntimeError("original provider error")
+
+        mock_sm = MagicMock()
+        mock_sm.cleanup = AsyncMock()
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb, "_get_report_state", return_value=rs), \
+             patch.object(rb, "session_manager", mock_sm):
+            bridge._scan_thread({"non_interactive": True}, [])
+
+        run_json_path = tmp_path / "strix_runs" / run_name / "run.json"
+        assert run_json_path.is_file()
+        data = json.loads(run_json_path.read_text())
+        assert data.get("status") == "failed"
+        assert data.get("end_time") is not None
+        assert bridge._original_exception is not None
+        assert str(bridge._original_exception) == "original provider error"
+        assert bridge._emit_event.call_count == 1
+        assert bridge._emit_event.call_args[0][0] == "scan_error"
+        mock_sm.cleanup.assert_called_once_with(run_name)
+
+    def test_stop_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
+        """Stop must persist stopped + end_time in the real run.json (spec B)."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        from strix.report.state import ReportState as RealState
+        run_name = "scan-endtime-stop"
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        bridge = rb.StrixRuntimeBridge()
+        bridge._run_name = run_name
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.parent_of = None
+        bridge._coordinator.statuses = {"root": "running"}
+        bridge._root_agent_id = "root"
+        bridge._emit_event = MagicMock()
+
+        rs = RealState(run_name=run_name)
+        rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
+
+        async def fake_scan(**kwargs):
+            raise asyncio.CancelledError
+
+        mock_sm = MagicMock()
+        mock_sm.cleanup = AsyncMock()
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb, "_get_report_state", return_value=rs), \
+             patch.object(rb, "session_manager", mock_sm):
+            bridge._scan_thread({"non_interactive": True}, [])
+
+        run_json_path = tmp_path / "strix_runs" / run_name / "run.json"
+        assert run_json_path.is_file()
+        data = json.loads(run_json_path.read_text())
+        assert data.get("status") == "stopped"
+        assert data.get("end_time") is not None
         assert bridge._emit_event.call_count == 1
         assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
         mock_sm.cleanup.assert_called_once_with(run_name)

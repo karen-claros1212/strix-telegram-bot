@@ -97,11 +97,11 @@ def config_menu() -> dict:
     ])
 
 
-def reports_list(report_names: list[str]) -> dict:
+def reports_list(run_names: list[str]) -> dict:
     rows = []
-    for name in report_names[:8]:
-        rows.append([_btn(name, _cb("report", name))])
-    rows.append([_btn("Volver", _cb("menu", "main"))])
+    for name in run_names[:8]:
+        rows.append([_btn(name, _cb("report", "detail", name))])
+    rows.append([_btn("Volver", _cb("report", "list"))])
     return build_inline_keyboard(rows)
 
 

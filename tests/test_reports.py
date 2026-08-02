@@ -367,6 +367,82 @@ class TestSendLatestReportFilter:
             assert "id,severity" in call_text
 
 
+class TestRunBasedMenu:
+    """Menu flow: runs are listed, selecting a run keeps its identity, MD uses same run."""
+
+    def test_show_reports_lists_runs_not_file_names(self, monkeypatch):
+        from strix_telegram_bot.commands import reports as reports_mod
+
+        monkeypatch.setattr(
+            reports_mod.ReportCollector,
+            "list_jobs_with_reports",
+            staticmethod(lambda limit=8: [
+                {"run_name": "scan-aaa", "report_count": 2},
+                {"run_name": "scan-bbb", "report_count": 1},
+            ]),
+        )
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "send_message") as mock_send:
+            reports_mod._show_reports(fake_bot, 123)
+        kb = mock_send.call_args[1]["reply_markup"]
+        cbs = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+        assert "report:detail:scan-aaa" in cbs
+        assert "report:detail:scan-bbb" in cbs
+        assert any(cb.startswith("report:download_md") for cb in cbs) is False
+
+    def test_show_run_detail_preserves_run_identity(self, monkeypatch):
+        from strix_telegram_bot.commands import reports as reports_mod
+
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message") as mock_edit:
+            reports_mod._show_run_detail(fake_bot, 123, 456, "scan-picked")
+        text = mock_edit.call_args[0][3]
+        assert "scan" in text and "picked" in text
+        kb = mock_edit.call_args.kwargs["reply_markup"]
+        cbs = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+        assert "report:download_md:scan-picked" in cbs
+
+    def test_run_detail_callback_downloads_same_run(self, monkeypatch):
+        from strix_telegram_bot.commands import reports as reports_mod
+
+        mock_deliver = MagicMock(return_value="delivered")
+        monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
+        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: True)
+
+        update = {
+            "callback_query": {
+                "data": "report:download_md:scan-picked",
+                "message": {"chat": {"id": 123}, "message_id": 456},
+            }
+        }
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message"):
+            reports_mod.callback_reports(fake_bot, update)
+        mock_deliver.assert_called_once()
+        assert mock_deliver.call_args[0][2] == "scan-picked"
+
+    def test_selected_older_run_not_overridden_by_newer(self, monkeypatch):
+        """Downloading run A must deliver A even when a newer completed run B exists."""
+        from strix_telegram_bot.commands import reports as reports_mod
+
+        mock_deliver = MagicMock(return_value="delivered")
+        monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
+        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: run in ("scan-aaa", "scan-bbb"))
+
+        update = {
+            "callback_query": {
+                "data": "report:download_md:scan-aaa",
+                "message": {"chat": {"id": 123}, "message_id": 456},
+            }
+        }
+        fake_bot = MagicMock()
+        with patch.object(reports_mod, "edit_message"):
+            reports_mod.callback_reports(fake_bot, update)
+        mock_deliver.assert_called_once()
+        assert mock_deliver.call_args[0][2] == "scan-aaa"
+
+
 class TestDeliverReportDocument:
     def test_deliver_uses_selected_run_name(self, monkeypatch):
         """download_md must deliver the exact run_name passed in the callback."""
@@ -398,23 +474,16 @@ class TestDeliverReportDocument:
         sent_text = mock_edit.call_args[0][3]
         assert "no está disponible" in sent_text
 
-    def test_deliver_falls_back_to_latest_when_no_run_name(self, monkeypatch):
-        """Without a run_name, fall back to the latest completed job."""
+    def test_deliver_requires_run_name_no_fallback(self, monkeypatch):
+        """Without a run_name, fail with a message instead of falling back."""
         from strix_telegram_bot.commands import reports as reports_mod
-        from strix_telegram_bot.jobs.job_store import JobStore
 
-        job = JobState(run_name="scan-latest", target=["x"], mode=ScanMode.DEEP,
-                       phase=JobPhase.COMPLETED)
-        mock_store = MagicMock(spec=JobStore)
-        mock_store.list_recent.return_value = [job]
-        monkeypatch.setattr(reports_mod, "JobStore", lambda: mock_store)
-        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: True)
-        mock_deliver = MagicMock(return_value="delivered")
+        mock_deliver = MagicMock()
         monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
 
         fake_bot = MagicMock()
         with patch.object(reports_mod, "edit_message") as mock_edit:
             reports_mod._deliver_report_document(fake_bot, 123, 456)
-            mock_deliver.assert_called_once_with(fake_bot, 123, "scan-latest")
-        delivered_calls = [c for c in mock_edit.call_args_list if "enviado como archivo" in c[0][3]]
-        assert len(delivered_calls) == 1
+            mock_deliver.assert_not_called()
+        sent_text = mock_edit.call_args[0][3]
+        assert "falta el escaneo seleccionado" in sent_text

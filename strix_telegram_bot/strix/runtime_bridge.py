@@ -118,7 +118,7 @@ class StrixRuntimeBridge:
         self._scan_result: Optional[Any] = None
         self._completion_detected: bool = False
         self._user_cancelled: bool = False
-        self._final_state: Optional[str] = None
+        self._terminal_kind: Optional[str] = None
         self._original_exception: Optional[BaseException] = None
 
         self._live_view: Any = None
@@ -259,7 +259,7 @@ class StrixRuntimeBridge:
         self._scan_result = None
         self._completion_detected = False
         self._user_cancelled = False
-        self._final_state = None
+        self._terminal_kind = None
         self._original_exception = None
         self._preferred_agent_id = None
         self._last_waiting_root = None
@@ -383,9 +383,9 @@ class StrixRuntimeBridge:
             except asyncio.CancelledError:
                 if not self._completion_detected:
                     self._user_cancelled = True
-                    self._final_state = _FINAL_STOPPED
+                    self._terminal_kind = _FINAL_STOPPED
             except Exception as e:
-                self._final_state = _FINAL_FAILED
+                self._terminal_kind = _FINAL_FAILED
                 self._original_exception = e
                 self._last_error = str(e)
 
@@ -402,21 +402,21 @@ class StrixRuntimeBridge:
             except Exception:
                 pass
 
-            if self._final_state is None:
+            if self._terminal_kind is None:
                 event_type, error_msg = self._classify_scan_result()
                 if event_type == "scan_complete" and _report_md_present(self._run_name or ""):
-                    self._final_state = _FINAL_COMPLETED
+                    self._terminal_kind = _FINAL_COMPLETED
                 else:
                     if error_msg and not self._last_error:
                         self._last_error = error_msg
-                    self._final_state = _FINAL_FAILED
+                    self._terminal_kind = _FINAL_FAILED
 
             rs = _get_report_state()
             if rs is not None:
                 try:
-                    if self._final_state == _FINAL_STOPPED:
+                    if self._terminal_kind == _FINAL_STOPPED:
                         rs.save_run_data(status=_FINAL_STOPPED)
-                    elif self._final_state == _FINAL_FAILED:
+                    elif self._terminal_kind == _FINAL_FAILED:
                         rs.save_run_data(status=_FINAL_FAILED)
                 except Exception as exc:
                     logger.warning("Failed to persist final state for %s: %s",
@@ -432,9 +432,9 @@ class StrixRuntimeBridge:
                     logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
                     cleanup_error = str(exc)
 
-            if self._final_state == _FINAL_COMPLETED:
+            if self._terminal_kind == _FINAL_COMPLETED:
                 self._emit_event("scan_complete", "", "Escaneo finalizado")
-            elif self._final_state == _FINAL_STOPPED:
+            elif self._terminal_kind == _FINAL_STOPPED:
                 self._emit_event("scan_cancelled", "", "Escaneo cancelado")
             else:
                 self._emit_event("scan_error", "", self._last_error or "Escaneo terminó con error")

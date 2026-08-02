@@ -6,8 +6,8 @@ from typing import Any
 
 from strix_telegram_bot.config import settings
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
-from strix_telegram_bot.ui.keyboards import reports_list, reports_main_menu, back_to_menu, parse_callback, report_detail_menu
-from strix_telegram_bot.ui.messages import escape_md, reports_menu_text
+from strix_telegram_bot.ui.keyboards import reports_list, back_to_menu, parse_callback, report_detail_menu
+from strix_telegram_bot.ui.messages import escape_md
 from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.strix.report_delivery import deliver_report_document
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
@@ -92,6 +92,10 @@ def callback_reports(bot: Any, update: dict) -> None:
     elif action == "markdown":
         _send_report_type(bot, chat_id, msg_id, "markdown")
 
+    elif action == "detail":
+        run_name = parts[2] if len(parts) > 2 else ""
+        _show_run_detail(bot, chat_id, msg_id, run_name)
+
     elif action == "download_md":
         run_name = parts[2] if len(parts) > 2 else ""
         _deliver_report_document(bot, chat_id, msg_id, run_name)
@@ -125,23 +129,32 @@ def callback_reports(bot: Any, update: dict) -> None:
 
 
 def _show_reports(bot, chat_id, msg_id=None) -> None:
-    store = JobStore()
-    completed = [j for j in store.list_all() if j.is_terminal and j.run_name != "pending"]
+    runs = [j["run_name"] for j in ReportCollector.list_jobs_with_reports(limit=8)]
 
-    all_reports = []
-    for job in completed[:5]:
-        rc = ReportCollector(job.run_name)
-        reports = rc.collect()
-        for r in reports:
-            all_reports.append(r["name"])
-
-    if not all_reports:
+    if not runs:
         text = "No hay reportes disponibles. Completá un escaneo primero."
         kb = back_to_menu()
     else:
-        text = reports_menu_text()
-        kb = reports_main_menu()
+        text = "Seleccioná un escaneo para ver sus reportes:"
+        kb = reports_list(runs)
 
+    if msg_id:
+        edit_message(bot, chat_id, msg_id, text, reply_markup=kb)
+    else:
+        send_message(bot, chat_id, text, reply_markup=kb)
+
+
+def _show_run_detail(bot, chat_id, msg_id, run_name: str = "") -> None:
+    if not run_name:
+        edit_message(bot, chat_id, msg_id, "Escaneo no encontrado.", reply_markup=back_to_menu())
+        return
+
+    text = (
+        f"Reporte de `{escape_md(run_name)}`\n"
+        "\n"
+        "Elegí una opción para este escaneo."
+    )
+    kb = report_detail_menu(run_name)
     if msg_id:
         edit_message(bot, chat_id, msg_id, text, reply_markup=kb)
     else:
@@ -239,22 +252,15 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
 def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
     """Deliver the selected run's report as a single Markdown document.
 
-    Falls back to the latest completed run when no run_name is provided.
+    No fallback: the run_name must come from the report detail callback.
     """
-    if run_name and not _is_run_json_completed(run_name):
-        edit_message(bot, chat_id, msg_id, "El informe no está disponible para ese escaneo.", reply_markup=back_to_menu())
+    if not run_name:
+        edit_message(bot, chat_id, msg_id, "Informe no disponible: falta el escaneo seleccionado.", reply_markup=back_to_menu())
         return
 
-    if not run_name:
-        store = JobStore()
-        jobs = [j for j in store.list_recent(10)
-                if j.phase == JobPhase.COMPLETED
-                and j.run_name != "pending"
-                and _is_run_json_completed(j.run_name)]
-        if not jobs:
-            edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
-            return
-        run_name = jobs[0].run_name
+    if not _is_run_json_completed(run_name):
+        edit_message(bot, chat_id, msg_id, "El informe no está disponible para ese escaneo.", reply_markup=back_to_menu())
+        return
 
     edit_message(bot, chat_id, msg_id, "Descargando informe completo…", reply_markup=back_to_menu())
     result = deliver_report_document(bot, chat_id, run_name)
