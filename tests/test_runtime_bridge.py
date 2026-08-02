@@ -707,8 +707,10 @@ class TestDiffScopeOfficialAPI:
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
     @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources")
     @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
-    def test_diff_scope_called_for_auto_mode_via_start_scan(self, mock_resolve, mock_cls, mock_itt):
+    def test_diff_scope_called_for_auto_mode_via_start_scan(self, mock_resolve, mock_cls, mock_itt,
+                                                            monkeypatch, tmp_path):
         """start_scan() must call resolve_diff_scope_context for auto mode with local sources."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
         from strix.interface.utils import DiffScopeResult
         mock_resolve.return_value = DiffScopeResult(
             active=True, mode="auto",
@@ -717,15 +719,36 @@ class TestDiffScopeOfficialAPI:
         mock_cls.return_value = [{"source_path": "/tmp/repo", "workspace_subdir": "repo"}]
         mock_itt.return_value = ("local_code", {"source_path": "/tmp/repo"})
 
+        # Never run the real scan from start_scan's daemon thread: make it block
+        # until the test releases it, so a fast failure cannot set _last_error
+        # before start_scan returns (race). Artifacts stay inside tmp_path.
+        import threading as _threading
+        release_scan = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            while not release_scan.is_set():
+                await asyncio.sleep(0.05)
+            raise RuntimeError("test diff_scope")
+
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.chdir(tmp_path)
+
         bridge = StrixRuntimeBridge()
-        ok, msg = bridge.start_scan(
-            targets=["/tmp/repo"],
-            instruction="test",
-            scan_mode="deep",
-            scope_mode="auto",
-            non_interactive=True,
-        )
-        assert ok is True
+        try:
+            with patch.object(rb, "run_strix_scan", side_effect=fake_scan):
+                ok, msg = bridge.start_scan(
+                    targets=["/tmp/repo"],
+                    instruction="test",
+                    scan_mode="deep",
+                    scope_mode="auto",
+                    non_interactive=True,
+                )
+                assert ok is True
+        finally:
+            release_scan.set()
+            thread = bridge._thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=10)
 
         # resolve_diff_scope_context must have been called with auto mode
         mock_resolve.assert_called_once()
@@ -1326,31 +1349,36 @@ class TestFinalizerSingleEvent:
     def test_failure_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
         """Failure must persist failed + end_time in the real run.json (spec A)."""
         from strix_telegram_bot.strix import runtime_bridge as rb
-        from strix.report.state import ReportState as RealState
+        from strix.report.state import ReportState as RealState, get_global_report_state
         run_name = "scan-endtime-fail"
         monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        bridge = rb.StrixRuntimeBridge()
-        bridge._run_name = run_name
-        bridge._coordinator = MagicMock()
-        bridge._coordinator.parent_of = None
-        bridge._coordinator.statuses = {"root": "running"}
-        bridge._root_agent_id = "root"
-        bridge._emit_event = MagicMock()
+        prev_global = get_global_report_state()
+        try:
+            bridge = rb.StrixRuntimeBridge()
+            bridge._run_name = run_name
+            bridge._coordinator = MagicMock()
+            bridge._coordinator.parent_of = None
+            bridge._coordinator.statuses = {"root": "running"}
+            bridge._root_agent_id = "root"
+            bridge._emit_event = MagicMock()
 
-        rs = RealState(run_name=run_name)
-        rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
+            rs = RealState(run_name=run_name)
+            rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
 
-        async def fake_scan(**kwargs):
-            raise RuntimeError("original provider error")
+            async def fake_scan(**kwargs):
+                raise RuntimeError("original provider error")
 
-        mock_sm = MagicMock()
-        mock_sm.cleanup = AsyncMock()
-        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
-             patch.object(rb, "_get_report_state", return_value=rs), \
-             patch.object(rb, "session_manager", mock_sm):
-            bridge._scan_thread({"non_interactive": True}, [])
+            mock_sm = MagicMock()
+            mock_sm.cleanup = AsyncMock()
+            with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+                 patch.object(rb, "_get_report_state", return_value=rs), \
+                 patch.object(rb, "session_manager", mock_sm):
+                bridge._scan_thread({"non_interactive": True}, [])
+        finally:
+            from strix.report.state import set_global_report_state
+            set_global_report_state(prev_global)
 
         run_json_path = tmp_path / "strix_runs" / run_name / "run.json"
         assert run_json_path.is_file()
@@ -1366,31 +1394,36 @@ class TestFinalizerSingleEvent:
     def test_stop_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
         """Stop must persist stopped + end_time in the real run.json (spec B)."""
         from strix_telegram_bot.strix import runtime_bridge as rb
-        from strix.report.state import ReportState as RealState
+        from strix.report.state import ReportState as RealState, get_global_report_state
         run_name = "scan-endtime-stop"
         monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        bridge = rb.StrixRuntimeBridge()
-        bridge._run_name = run_name
-        bridge._coordinator = MagicMock()
-        bridge._coordinator.parent_of = None
-        bridge._coordinator.statuses = {"root": "running"}
-        bridge._root_agent_id = "root"
-        bridge._emit_event = MagicMock()
+        prev_global = get_global_report_state()
+        try:
+            bridge = rb.StrixRuntimeBridge()
+            bridge._run_name = run_name
+            bridge._coordinator = MagicMock()
+            bridge._coordinator.parent_of = None
+            bridge._coordinator.statuses = {"root": "running"}
+            bridge._root_agent_id = "root"
+            bridge._emit_event = MagicMock()
 
-        rs = RealState(run_name=run_name)
-        rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
+            rs = RealState(run_name=run_name)
+            rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
 
-        async def fake_scan(**kwargs):
-            raise asyncio.CancelledError
+            async def fake_scan(**kwargs):
+                raise asyncio.CancelledError
 
-        mock_sm = MagicMock()
-        mock_sm.cleanup = AsyncMock()
-        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
-             patch.object(rb, "_get_report_state", return_value=rs), \
-             patch.object(rb, "session_manager", mock_sm):
-            bridge._scan_thread({"non_interactive": True}, [])
+            mock_sm = MagicMock()
+            mock_sm.cleanup = AsyncMock()
+            with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+                 patch.object(rb, "_get_report_state", return_value=rs), \
+                 patch.object(rb, "session_manager", mock_sm):
+                bridge._scan_thread({"non_interactive": True}, [])
+        finally:
+            from strix.report.state import set_global_report_state
+            set_global_report_state(prev_global)
 
         run_json_path = tmp_path / "strix_runs" / run_name / "run.json"
         assert run_json_path.is_file()
