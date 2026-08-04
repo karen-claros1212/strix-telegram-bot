@@ -210,7 +210,6 @@ class TestStrixRuntimeBridge:
 
     def test_get_tool_state_with_awaiting_from_coordinator(self):
         bridge = StrixRuntimeBridge()
-        bridge._non_interactive = False
         from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
         bridge._live_view = TuiLiveView()
         bridge._coordinator = MagicMock()
@@ -254,7 +253,6 @@ class TestStrixRuntimeBridge:
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
     def test_to_status_dict_with_waiting_from_coordinator(self, *_):
         bridge = StrixRuntimeBridge()
-        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
@@ -295,7 +293,6 @@ class TestStrixRuntimeBridge:
     def test_check_waiting_notification(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
-        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
@@ -734,21 +731,24 @@ class TestDiffScopeOfficialAPI:
         monkeypatch.chdir(tmp_path)
 
         bridge = StrixRuntimeBridge()
-        try:
-            with patch.object(rb, "run_strix_scan", side_effect=fake_scan):
+        # The run_strix_scan patch must stay active until the daemon thread has
+        # exited: start_scan returns on readiness but the runner is only invoked
+        # afterwards inside the thread.  Reverting early would start the REAL
+        # runner (network + sandbox + telemetry).
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan):
+            try:
                 ok, msg = bridge.start_scan(
                     targets=["/tmp/repo"],
                     instruction="test",
                     scan_mode="deep",
                     scope_mode="auto",
-                    non_interactive=True,
                 )
                 assert ok is True
-        finally:
-            release_scan.set()
-            thread = bridge._thread
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=10)
+            finally:
+                release_scan.set()
+                thread = bridge._thread
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=10)
 
         # resolve_diff_scope_context must have been called with auto mode
         mock_resolve.assert_called_once()
@@ -848,7 +848,6 @@ class TestFileHostingURLs:
     def test_waiting_notification_suppressed_when_children_running(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
-        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
@@ -869,7 +868,6 @@ class TestFileHostingURLs:
     def test_waiting_notification_suppressed_when_children_waiting(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
-        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
@@ -890,7 +888,6 @@ class TestFileHostingURLs:
     def test_waiting_notification_fires_when_children_all_done(self):
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
-        bridge._non_interactive = False
         bridge._coordinator = MagicMock()
         bridge._root_agent_id = "root"
         bridge._coordinator.statuses = {
@@ -911,26 +908,13 @@ class TestFileHostingURLs:
         assert ev is not None  # fires: all descendants done, interactive mode
         assert ev["data"]["event"] == "agent_waiting"
 
-    def test_waiting_notification_never_fires_in_non_interactive(self):
-        bridge = StrixRuntimeBridge()
-        bridge._run_name = "test-run"
-        bridge._non_interactive = True
-        bridge._coordinator = MagicMock()
-        bridge._root_agent_id = "root"
-        bridge._coordinator.statuses = {
-            "root": "waiting",
-            "child1": "completed",
-        }
-        bridge._coordinator.parent_of = {
-            "root": None,
-            "child1": "root",
-        }
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
-        bridge._live_view.upsert_agent("root", name="strix-agent")
-
-        ev = bridge.check_waiting_notification()
-        assert ev is None  # never request user input in non_interactive
+    def test_no_non_interactive_contract_in_bridge(self):
+        """The bridge always runs interactive: start_scan has no
+        non_interactive parameter and scan_config forces it to False."""
+        import inspect
+        sig = inspect.signature(StrixRuntimeBridge.start_scan)
+        assert "non_interactive" not in sig.parameters
+        assert not hasattr(StrixRuntimeBridge(), "_non_interactive")
 
     # ── descendant counting (recursive) ─────────────────────────
 
@@ -1147,12 +1131,13 @@ class TestTuiAlignment:
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
         assert "_watch_completion" in src
 
-    def test_watcher_only_created_when_interactive(self):
-        """Fix 7: the completion watcher must be gated on real interactive mode."""
+    def test_scan_thread_always_interactive(self):
+        """Fix 7: bridge always runs interactive, so the watcher is always active."""
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
-        assert "if interactive:" in src
+        assert "interactive = True" in src
+        assert "if interactive:" not in src
 
     def test_watcher_only_cancels_on_completed(self):
         """Fix 5: _watch_completion source only checks 'completed', not terminal set."""
@@ -1289,14 +1274,14 @@ class TestFinalizerSingleEvent:
         with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
              patch.object(rb, "ReportState", return_value=rs), \
              patch.object(rb, "session_manager") as mock_sm:
-            bridge._scan_thread({"non_interactive": True}, [])
+            bridge._scan_thread({"non_interactive": False}, [])
 
         assert bridge._terminal_kind == "completed"
         assert bridge._scan_completed is True
-        rs.save_run_data.assert_not_called()
+        rs.save_run_data.assert_called_once()
         assert bridge._emit_event.call_count == 1
         assert bridge._emit_event.call_args[0][0] == "scan_complete"
-        mock_sm.cleanup.assert_called_once_with(run_name)
+        mock_sm.cleanup.assert_not_called()
 
     def test_exception_persists_failed_and_emits_single_error(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix import runtime_bridge as rb
@@ -1312,15 +1297,16 @@ class TestFinalizerSingleEvent:
         with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
              patch.object(rb, "ReportState", return_value=rs), \
              patch.object(rb, "session_manager") as mock_sm:
-            bridge._scan_thread({"non_interactive": True}, [])
+            bridge._scan_thread({"non_interactive": False}, [])
 
         assert bridge._terminal_kind == "failed"
         assert bridge._last_error == "provider boom"
         assert bridge._scan_completed is True
-        rs.save_run_data.assert_called_once_with(status="failed")
+        rs.save_run_data.assert_any_call(status="failed")
+        assert rs.save_run_data.call_count == 2
         assert bridge._emit_event.call_count == 1
         assert bridge._emit_event.call_args[0][0] == "scan_error"
-        mock_sm.cleanup.assert_called_once_with(run_name)
+        mock_sm.cleanup.assert_not_called()
 
     def test_cancel_persists_stopped_and_emits_single_cancelled(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix import runtime_bridge as rb
@@ -1336,15 +1322,16 @@ class TestFinalizerSingleEvent:
         with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
              patch.object(rb, "ReportState", return_value=rs), \
              patch.object(rb, "session_manager") as mock_sm:
-            bridge._scan_thread({"non_interactive": True}, [])
+            bridge._scan_thread({"non_interactive": False}, [])
 
         assert bridge._user_cancelled is True
         assert bridge._terminal_kind == "stopped"
         assert bridge._scan_completed is True
-        rs.save_run_data.assert_called_once_with(status="stopped")
+        rs.save_run_data.assert_any_call(status="stopped")
+        assert rs.save_run_data.call_count == 2
         assert bridge._emit_event.call_count == 1
         assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
-        mock_sm.cleanup.assert_called_once_with(run_name)
+        mock_sm.cleanup.assert_not_called()
 
     def test_failure_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
         """Failure must persist failed + end_time in the real run.json (spec A)."""
@@ -1375,7 +1362,7 @@ class TestFinalizerSingleEvent:
             with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
                  patch.object(rb, "_get_report_state", return_value=rs), \
                  patch.object(rb, "session_manager", mock_sm):
-                bridge._scan_thread({"non_interactive": True}, [])
+                bridge._scan_thread({"non_interactive": False}, [])
         finally:
             from strix.report.state import set_global_report_state
             set_global_report_state(prev_global)
@@ -1389,7 +1376,7 @@ class TestFinalizerSingleEvent:
         assert str(bridge._original_exception) == "original provider error"
         assert bridge._emit_event.call_count == 1
         assert bridge._emit_event.call_args[0][0] == "scan_error"
-        mock_sm.cleanup.assert_called_once_with(run_name)
+        mock_sm.cleanup.assert_not_called()
 
     def test_stop_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
         """Stop must persist stopped + end_time in the real run.json (spec B)."""
@@ -1420,7 +1407,7 @@ class TestFinalizerSingleEvent:
             with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
                  patch.object(rb, "_get_report_state", return_value=rs), \
                  patch.object(rb, "session_manager", mock_sm):
-                bridge._scan_thread({"non_interactive": True}, [])
+                bridge._scan_thread({"non_interactive": False}, [])
         finally:
             from strix.report.state import set_global_report_state
             set_global_report_state(prev_global)
@@ -1432,7 +1419,278 @@ class TestFinalizerSingleEvent:
         assert data.get("end_time") is not None
         assert bridge._emit_event.call_count == 1
         assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
-        mock_sm.cleanup.assert_called_once_with(run_name)
+        mock_sm.cleanup.assert_not_called()
+
+
+class TestStartupReadiness:
+    """Spec 8.10: hermetic start_scan readiness contract.
+
+    start_scan must report success only after the runner thread signals
+    readiness, surface known startup errors, time out with an
+    initialization error, and never spawn duplicate threads or leave
+    orphan scans/tasks.  No real scan, no containers, no writes to the
+    real strix_runs dir.
+    """
+
+    def _patch_scan_path(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(rb, "collect_local_sources", lambda info: [])
+        monkeypatch.setattr(rb, "resolve_diff_scope_context", lambda *a, **k: None)
+
+    def _restore_global_report_state(self):
+        from strix.report.state import set_global_report_state
+        set_global_report_state(None)
+
+    def test_startup_success(self, monkeypatch, tmp_path):
+        """Runner thread confirms readiness → start_scan returns True."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import asyncio
+        import threading as _threading
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            raise RuntimeError("test-release")
+
+        bridge = rb.StrixRuntimeBridge()
+        # The patch must stay alive until the daemon thread has run and exited:
+        # start_scan returns on readiness, but run_strix_scan is only invoked
+        # afterwards inside the thread.  Reverting the patch early would launch
+        # the REAL runner (network + sandbox).
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan):
+            try:
+                ok, msg = bridge.start_scan(
+                    targets=["https://example.com"], instruction="",
+                )
+                assert ok is True
+                assert "Escaneo iniciado:" in msg
+                assert bridge._startup_ready.is_set()
+                assert bridge._startup_error is None
+                assert bridge._thread is not None and bridge._thread.is_alive()
+                assert bridge._scan_task is not None
+                assert bridge._run_name is not None and bridge._run_name.startswith("scan-")
+            finally:
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        assert not bridge._thread.is_alive()
+        assert bridge._scan_completed is True
+        assert bridge._loop is None  # event loop closed, no orphan tasks
+
+    def test_startup_error_before_task(self, monkeypatch, tmp_path):
+        """A failure while creating the runner task surfaces as startup error."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import asyncio
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+
+        bridge = rb.StrixRuntimeBridge()
+        try:
+            with patch.object(rb.asyncio, "create_task",
+                              side_effect=RuntimeError("boom")):
+                ok, msg = bridge.start_scan(
+                    targets=["https://example.com"], instruction="",
+                )
+            assert ok is False
+            assert "boom" in msg
+            assert bridge._startup_error == "boom"
+            assert bridge._scan_task is None
+        finally:
+            if bridge._thread is not None and bridge._thread.is_alive():
+                bridge._thread.join(timeout=10)
+            self._restore_global_report_state()
+
+        assert not bridge._thread.is_alive()
+        assert bridge._loop is None
+
+    def test_startup_timeout_returns_initialization_error(self, monkeypatch, tmp_path):
+        """Readiness not confirmed → start_scan returns the timeout error."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import asyncio
+        import threading as _threading
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            raise RuntimeError("test-release")
+
+        class _FakeEvent:
+            """start_scan rebuilds _startup_ready; make every Event.wait report False."""
+
+            def __init__(self):
+                self.set_called = False
+
+            def set(self):
+                self.set_called = True
+
+            def clear(self):
+                pass
+
+            def is_set(self):
+                return self.set_called
+
+            def wait(self, timeout=None):
+                return False
+
+        bridge = rb.StrixRuntimeBridge()
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb.threading, "Event", _FakeEvent):
+            try:
+                ok, msg = bridge.start_scan(
+                    targets=["https://example.com"], instruction="",
+                )
+                assert ok is False
+                assert "timeout de arranque" in msg
+            finally:
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        assert not bridge._thread.is_alive()
+        assert bridge._loop is None
+
+    def test_no_duplicate_thread_on_second_start(self, monkeypatch, tmp_path):
+        """A second start_scan while running must not spawn a second thread."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import asyncio
+        import threading as _threading
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            raise RuntimeError("test-release")
+
+        bridge = rb.StrixRuntimeBridge()
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan):
+            try:
+                ok, msg = bridge.start_scan(
+                    targets=["https://example.com"], instruction="",
+                )
+                assert ok is True
+                first_thread = bridge._thread
+                first_task = bridge._scan_task
+
+                ok2, msg2 = bridge.start_scan(
+                    targets=["https://example.com"], instruction="",
+                )
+                assert ok2 is False
+                assert "Ya hay" in msg2
+                assert bridge._thread is first_thread
+                assert bridge._scan_task is first_task
+            finally:
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+    def test_no_orphan_scan_no_writes_to_real_runs_dir(self, monkeypatch, tmp_path):
+        """After a full start→teardown cycle: no orphan thread/task and the real
+        strix_runs dir gains no new run directories."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        from strix_telegram_bot.config import settings
+        import asyncio
+        import threading as _threading
+
+        real_runs_dir = settings.strix_runs_dir
+        before = set(real_runs_dir.glob("scan-*")) if real_runs_dir.is_dir() else set()
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            raise RuntimeError("test-release")
+
+        bridge = rb.StrixRuntimeBridge()
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan):
+            try:
+                ok, msg = bridge.start_scan(
+                    targets=["https://example.com"], instruction="",
+                )
+                assert ok is True
+            finally:
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        after = set(real_runs_dir.glob("scan-*")) if real_runs_dir.is_dir() else set()
+        assert after == before
+        assert not bridge._thread.is_alive()
+        assert bridge._scan_completed is True
+        assert bridge.is_running is False
+        assert bridge._loop is None
+
+
+class TestCleanupCountSingle:
+    """Spec 8.9: the official runner owns cleanup; the bridge never calls
+    session_manager.cleanup.  Total cleanup count == 1."""
+
+    def test_cleanup_count_is_one_runner_owned(self, monkeypatch, tmp_path):
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+
+        run_name = "scan-cleanup-1"
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        (run_dir / "penetration_test_report.md").write_text("# Informe\n")
+
+        bridge = rb.StrixRuntimeBridge()
+        bridge._run_name = run_name
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.parent_of = None
+        bridge._coordinator.statuses = {"root": "completed"}
+        bridge._root_agent_id = "root"
+        bridge._emit_event = MagicMock()
+
+        rs = MagicMock()
+        rs.run_record = {"status": "completed"}
+
+        async def fake_scan(**kwargs):
+            # The simulated official runner performs its own cleanup exactly once.
+            await rb.session_manager.cleanup(run_name)
+            return MagicMock(final_output={"scan_completed": True})
+
+        from strix.report.state import (
+            get_global_report_state,
+            set_global_report_state,
+        )
+        from unittest.mock import AsyncMock
+        prev_global = get_global_report_state()
+        mock_sm = MagicMock()
+        mock_sm.cleanup = AsyncMock()
+        try:
+            with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+                 patch.object(rb, "ReportState", return_value=rs), \
+                 patch.object(rb, "session_manager", mock_sm):
+                bridge._scan_thread({"non_interactive": False}, [])
+
+            # Runner's single cleanup — and no second call from the bridge.
+            assert mock_sm.cleanup.await_count == 1
+            assert mock_sm.cleanup.call_count == 1
+            assert mock_sm.cleanup.await_args.args == (run_name,)
+            assert bridge._terminal_kind == "completed"
+            assert bridge._emit_event.call_count == 1
+            assert bridge._emit_event.call_args[0][0] == "scan_complete"
+        finally:
+            set_global_report_state(prev_global)
 
 
 class TestArtifactHintRemoved:

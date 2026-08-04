@@ -165,6 +165,12 @@ class ReportCollector:
 
     @staticmethod
     def list_jobs_with_reports(limit: int = 10) -> list[dict]:
+        """List only runs with an official completed report.
+
+        A run qualifies when its own ``run.json`` has ``status ==
+        "completed"`` AND its ``penetration_test_report.md`` exists and
+        is non-empty.  No partial runs, no report fallback across runs.
+        """
         runs_dir = settings.strix_runs_dir
         if not runs_dir.exists():
             return []
@@ -172,21 +178,31 @@ class ReportCollector:
         for entry in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
             if not entry.is_dir():
                 continue
-            reports_dir_candidates = [entry / "reports", entry]
-            has_reports = False
-            report_count = 0
-            for rd in reports_dir_candidates:
-                if rd.exists():
-                    for f in rd.iterdir():
-                        if f.is_file() and f.suffix in (".md", ".csv", ".json", ".html", ".txt"):
-                            has_reports = True
-                            report_count += 1
-            if has_reports:
-                jobs.append({
-                    "run_name": entry.name,
-                    "report_count": report_count,
-                    "path": str(entry),
-                })
-                if len(jobs) >= limit:
-                    break
+            run_json = entry / "run.json"
+            if not run_json.is_file():
+                continue
+            try:
+                data = json.loads(run_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("status") != "completed":
+                continue
+            md_candidates = [
+                entry / "penetration_test_report.md",
+                entry / "reports" / "penetration_test_report.md",
+            ]
+            report_path = next(
+                (p for p in md_candidates if p.is_file() and p.stat().st_size > 0),
+                None,
+            )
+            if report_path is None:
+                continue
+            jobs.append({
+                "run_name": entry.name,
+                "report_count": 1,
+                "path": str(entry),
+                "report_path": str(report_path),
+            })
+            if len(jobs) >= limit:
+                break
         return jobs

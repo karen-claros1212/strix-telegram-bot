@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -120,7 +121,9 @@ class TestReportCollector:
     def test_list_jobs_with_reports(self, tmp_path):
         run_dir = tmp_path / "strix_runs" / "test-run"
         run_dir.mkdir(parents=True)
-        (run_dir / "report.md").write_text("# Report")
+        run_json = {"run_name": "test-run", "status": "completed"}
+        (run_dir / "run.json").write_text(json.dumps(run_json))
+        (run_dir / "penetration_test_report.md").write_text("# Report")
 
         from strix_telegram_bot.config import settings
         old_dir = settings.strix_runs_dir
@@ -472,7 +475,8 @@ class TestDeliverReportDocument:
             reports_mod._deliver_report_document(fake_bot, 123, 456, "scan-unknown")
             mock_deliver.assert_not_called()
         sent_text = mock_edit.call_args[0][3]
-        assert "no está disponible" in sent_text
+        assert "terminó con error antes de generar el informe oficial" in sent_text
+        assert "No se produjo ningún archivo Markdown para este run" in sent_text
 
     def test_deliver_requires_run_name_no_fallback(self, monkeypatch):
         """Without a run_name, fail with a message instead of falling back."""

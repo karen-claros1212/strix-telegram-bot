@@ -431,21 +431,41 @@ class TestTelegramRenderers:
         assert "edit README.md" in text
 
 
-class TestNonInteractivePreserved:
-    """Verify non_interactive=True remains intact in bridge."""
+class TestInteractiveMirror:
+    """The bridge always runs interactive and never injects Spanish instructions."""
 
-    def test_bridge_default_non_interactive_true(self):
+    def test_start_scan_has_no_non_interactive_parameter(self):
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         sig = inspect.signature(StrixRuntimeBridge.start_scan)
-        default = sig.parameters["non_interactive"].default
-        assert default is True
+        assert "non_interactive" not in sig.parameters
 
-    def test_bot_calls_with_autonomous_mode(self):
+    def test_scan_config_forces_non_interactive_false(self):
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge.start_scan)
+        assert '"non_interactive": False' in src
+
+    def test_scan_thread_always_interactive(self):
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        import inspect
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "interactive = True" in src
+        assert "interactive = not non_interactive" not in src
+
+    def test_bot_no_language_injection(self):
         from strix_telegram_bot.bot import StrixBot
         import inspect
         src = inspect.getsource(StrixBot._launch_scan)
-        assert "non_interactive=True" in src
+        assert "_LANGUAGE_INSTRUCTION" not in src
+        assert "Responde siempre al usuario en español" not in src
+        assert "non_interactive" not in src
+
+    def test_bot_passes_exact_instruction(self):
+        from strix_telegram_bot.bot import StrixBot
+        import inspect
+        src = inspect.getsource(StrixBot._launch_scan)
+        assert "exact_instruction" in src
 
     def test_strix_not_modified(self):
         import strix

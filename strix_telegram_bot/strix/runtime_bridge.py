@@ -114,7 +114,8 @@ class StrixRuntimeBridge:
         self._closed_runs: set[str] = set()
         self._current_targets: list[str] = []
         self._last_error: Optional[str] = None
-        self._non_interactive: bool = True
+        self._startup_ready: threading.Event = threading.Event()
+        self._startup_error: Optional[str] = None
         self._scan_result: Optional[Any] = None
         self._completion_detected: bool = False
         self._user_cancelled: bool = False
@@ -192,7 +193,6 @@ class StrixRuntimeBridge:
         scan_mode: str = "deep",
         scope_mode: str = "auto",
         diff_base: Optional[str] = None,
-        non_interactive: bool = True,
         image: Optional[str] = None,
         local_sources: Optional[list[dict[str, str]]] = None,
     ) -> tuple[bool, str]:
@@ -202,7 +202,10 @@ class StrixRuntimeBridge:
             return False, "Ya hay un escaneo en ejecucion"
 
         run_name = f"scan-{uuid.uuid4().hex[:8]}"
-        targets_info = self._build_targets_info(targets)
+        try:
+            targets_info = self._build_targets_info(targets)
+        except ValueError as exc:
+            return False, f"Objetivo inválido: {exc}"
 
         strix_sources: list[dict] = []
         if collect_local_sources:
@@ -241,7 +244,7 @@ class StrixRuntimeBridge:
             "user_instructions": instruction, "run_name": run_name,
             "scan_mode": scan_mode, "diff_scope": diff_scope,
             "scope_mode": scope_mode, "diff_base": diff_base,
-            "non_interactive": non_interactive,
+            "non_interactive": False,
             "local_sources": merged_sources, "resume_instruction": "",
         }
 
@@ -255,7 +258,8 @@ class StrixRuntimeBridge:
         self._scan_completed = False
         self._scan_task = None
         self._last_error = None
-        self._non_interactive = non_interactive
+        self._startup_ready = threading.Event()
+        self._startup_error = None
         self._scan_result = None
         self._completion_detected = False
         self._user_cancelled = False
@@ -271,8 +275,10 @@ class StrixRuntimeBridge:
             target=self._scan_thread, args=(scan_config, merged_sources), daemon=True)
         self._thread.start()
 
-        if self._last_error:
-            return False, self._last_error
+        if not self._startup_ready.wait(timeout=5.0):
+            return False, "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
+        if self._startup_error:
+            return False, self._startup_error
         return True, f"Escaneo iniciado: {run_name}"
 
     @staticmethod
@@ -296,12 +302,10 @@ class StrixRuntimeBridge:
             try:
                 target_type, target_dict = infer_target_type(t)
                 info.append({"type": target_type, "details": target_dict, "original": t})
-            except ValueError:
-                info.append({
-                    "type": "web_application",
-                    "details": {"target_url": f"https://{t}"},
-                    "original": t,
-                })
+            except ValueError as exc:
+                raise ValueError(
+                    f"No se pudo clasificar el objetivo '{t}': {exc}"
+                ) from exc
         assign_workspace_subdirs(info)
         return info
 
@@ -325,13 +329,15 @@ class StrixRuntimeBridge:
                 await asyncio.sleep(0.1)
             logger.warning("Root agent not discovered within 60s")
 
-        non_interactive = bool(scan_config.get("non_interactive", False))
-        interactive = not non_interactive
+        # The bridge always mirrors the official TUI: interactive=True.
+        interactive = True
 
         async def _run_scan() -> Any:
             rs = ReportState(run_name=self._run_name)
-            set_global_report_state(rs)
+            rs.hydrate_from_run_dir()
             rs.set_scan_config(scan_config)
+            rs.save_run_data()
+            set_global_report_state(rs)
             live_view: Any = self._live_view
             current_run = self._run_name
 
@@ -374,9 +380,8 @@ class StrixRuntimeBridge:
         async def _main() -> None:
             self._scan_task = asyncio.create_task(_run_scan())
             discovery = asyncio.create_task(_poll_root())
-            watcher: Optional[asyncio.Task] = None
-            if interactive:
-                watcher = asyncio.create_task(_watch_completion(self._scan_task))
+            watcher = asyncio.create_task(_watch_completion(self._scan_task))
+            self._startup_ready.set()
 
             try:
                 self._scan_result = await self._scan_task
@@ -422,15 +427,8 @@ class StrixRuntimeBridge:
                     logger.warning("Failed to persist final state for %s: %s",
                                    self._run_name, exc)
 
-            current_run = self._run_name or ""
-            cleanup_error = None
-            if current_run:
-                try:
-                    await session_manager.cleanup(current_run)
-                    logger.info("Sandbox cleaned up for run %s", current_run)
-                except Exception as exc:
-                    logger.warning("session_manager.cleanup failed for %s: %s", current_run, exc)
-                    cleanup_error = str(exc)
+            # Runner owns sandbox cleanup (cleanup_on_exit=True default).
+            # The bridge must not call session_manager.cleanup.
 
             if self._terminal_kind == _FINAL_COMPLETED:
                 self._emit_event("scan_complete", "", "Escaneo finalizado")
@@ -438,10 +436,6 @@ class StrixRuntimeBridge:
                 self._emit_event("scan_cancelled", "", "Escaneo cancelado")
             else:
                 self._emit_event("scan_error", "", self._last_error or "Escaneo terminó con error")
-
-            if cleanup_error:
-                logger.warning("Scan %s sandbox cleanup failed: %s",
-                             current_run, cleanup_error)
 
         try:
             loop.run_until_complete(_main())
@@ -452,10 +446,12 @@ class StrixRuntimeBridge:
             if not self._scan_completed:
                 self._scan_completed = True
                 self._last_error = str(e)
+                self._startup_error = str(e)
                 logger.error("Scan thread crashed before finalizer: %s", e)
             else:
                 logger.warning("Post-scan teardown error: %s", e)
         finally:
+            self._startup_ready.set()
             pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
             for t in pending:
                 t.cancel()
@@ -625,19 +621,14 @@ class StrixRuntimeBridge:
             return {}
 
     def check_waiting_notification(self) -> Optional[dict[str, Any]]:
-        """Return an agent_waiting event ONLY in interactive mode when root
-        is truly waiting for user input (no descendants active).
+        """Return an agent_waiting event when root is truly waiting for user
+        input (no descendants active).
 
-        In non_interactive mode (autonomous scans), root == waiting means
-        the agent is waiting for subagent results — NOT for user text.
-        Never emit agent_waiting in that case.
+        The bridge always runs in interactive mode (TUI mirror), so root
+        == waiting with no active descendants means the agent asked for
+        user input.
         """
         if not self._coordinator or self._scan_completed:
-            return None
-
-        # In non_interactive mode, root waiting is internal — never request
-        # user input.  The panel already shows "esperando" via phase label.
-        if self._non_interactive:
             return None
 
         root = self._root_agent_id
@@ -839,7 +830,7 @@ class StrixRuntimeBridge:
 
             root = self._root_agent_id
             is_waiting = False
-            if self._coordinator and root and not self._non_interactive:
+            if self._coordinator and root:
                 try:
                     statuses = getattr(self._coordinator, "statuses", None)
                     if statuses and root in statuses:
@@ -898,7 +889,7 @@ class StrixRuntimeBridge:
             "elapsed": _fmt_duration(status["elapsed"]),
             "error": self._last_error,
             "is_active": self.is_running,
-            "awaiting_input": (root_status == "waiting" and not self._non_interactive),
+            "awaiting_input": (root_status == "waiting"),
             "input_prompt": "",
         }
 

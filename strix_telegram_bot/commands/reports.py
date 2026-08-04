@@ -259,7 +259,12 @@ def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
         return
 
     if not _is_run_json_completed(run_name):
-        edit_message(bot, chat_id, msg_id, "El informe no está disponible para ese escaneo.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id,
+            "El análisis terminó con error antes de generar el informe oficial.\n"
+            "No se produjo ningún archivo Markdown para este run.",
+            reply_markup=back_to_menu(),
+        )
         return
 
     edit_message(bot, chat_id, msg_id, "Descargando informe completo…", reply_markup=back_to_menu())

@@ -123,17 +123,8 @@ def reports_main_menu() -> dict:
 
 def report_detail_menu(run_name: str) -> dict:
     return build_inline_keyboard([
-        [
-            _btn("Markdown", _cb("report", "markdown")),
-            _btn("Descargar MD", _cb("report", "download_md", run_name)),
-        ],
-        [
-            _btn("CSV", _cb("report", "csv")),
-        ],
-        [
-            _btn("Evidencia", _cb("report", "evidence")),
-        ],
-        [_btn("Volver a reportes", _cb("report", "list"))],
+        [_btn("Descargar informe oficial", _cb("report", "download_md", run_name))],
+        [_btn("Volver", _cb("report", "list"))],
     ])
 
 

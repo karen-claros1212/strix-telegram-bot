@@ -175,23 +175,14 @@ class StrixBot:
         send_chat_action(self, chat_id)
 
         if self._bridge.is_running:
-            targets, instruction = self._extract_targets_from_message(msg, text)
-            current = getattr(self._bridge, "_current_targets", [])
-            if targets and not instruction and current:
-                normalised = [self._validate_url(t) for t in targets]
-                active = [self._validate_url(t) for t in current]
-                if sorted(normalised) == sorted(active):
-                    run_name = getattr(self._bridge, "_run_name", None) or "el escaneo activo"
-                    send_message(self, chat_id, f"Ese objetivo ya está siendo analizado en {run_name}.", parse_mode=None)
-                    return
-
-            agent_id = (
-                getattr(self._bridge, "_preferred_agent_id", None)
-                or self._bridge.root_agent_id
+            send_message(
+                self,
+                chat_id,
+                "El análisis está siendo ejecutado automáticamente por Strix.\n"
+                "El chat es de solo lectura hasta que termine este run.",
+                parse_mode=None,
+                disable_web_page_preview=True,
             )
-            ok = self._bridge.send_message_to_agent(text, agent_id=agent_id)
-            if not ok:
-                send_message(self, chat_id, "STRIX no pudo recibir el mensaje.")
             return
 
         pm = get_panel_manager(chat_id)
@@ -596,25 +587,13 @@ class StrixBot:
 
         prepared_targets, local_sources = self._prepare_scan_targets(targets)
 
-        # Always prepend Spanish instruction
-        _LANGUAGE_INSTRUCTION = (
-            "Responde siempre al usuario en español. "
-            "Describe en español el progreso, los hallazgos y las preguntas. "
-            "Usa inglés solo en comandos, código, nombres técnicos y salidas literales."
-        )
-        full_instruction = _LANGUAGE_INSTRUCTION
-        if instruction.strip():
-            full_instruction += (
-                "\n\nInstrucción específica del usuario:\n"
-                + instruction.strip()
-            )
+        exact_instruction = instruction.strip()
 
         ok, start_msg = self._bridge.start_scan(
             targets=prepared_targets,
             scan_mode=scan_mode,
-            instruction=full_instruction,
+            instruction=exact_instruction,
             scope_mode="auto",
-            non_interactive=True,
             local_sources=local_sources,
         )
 

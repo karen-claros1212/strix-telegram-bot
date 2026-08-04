@@ -210,8 +210,11 @@ class TestUpdatesOffsetPersistence:
             settings.strix_runs_dir = old_dir
 
 
-# ── Fix 1: Target deduplication — same URL during active scan ──
-class TestTargetDeduplication:
+# ── Read-only chat: during an active scan no message reaches the agent ──
+class TestReadOnlyChatDuringScan:
+    """Spec 5.2: while a scan runs, Telegram chat is read-only. Every message
+    receives the same fixed response and nothing is forwarded to Strix."""
+
     def _make_bot_with_active_scan(self, targets):
         from strix_telegram_bot.bot import StrixBot
         from unittest.mock import MagicMock
@@ -236,87 +239,66 @@ class TestTargetDeduplication:
         bot._last_panel_text = ""
         return bot, bridge
 
-    @patch("strix_telegram_bot.telegram.send_chat_action")
-    @patch("strix_telegram_bot.bot.send_message")
-    def test_same_target_no_instruction_deduplicates(self, mock_send, mock_sca):
-        """Same target + no instruction → 'Ese objetivo ya está siendo analizado'."""
-        bot, bridge = self._make_bot_with_active_scan(
-            ["https://drive.google.com/file/d/1abc/view?usp=drivesdk"]
-        )
-        update = {"message": {
-            "chat": {"id": 123},
-            "text": "https://drive.google.com/file/d/1abc/view?usp=drivesdk",
-        }}
+    def _assert_readonly_reply(self, mock_send, bot, bridge, text):
+        update = {"message": {"chat": {"id": 123}, "text": text}}
         bot._handle_text_message(update)
-
         bridge.send_message_to_agent.assert_not_called()
         mock_send.assert_called_once()
         sent_text = mock_send.call_args[0][2]
-        assert "ya está siendo analizado" in sent_text
-        assert "scan-abc12345" in sent_text
+        assert "El análisis está siendo ejecutado automáticamente por Strix." in sent_text
+        assert "El chat es de solo lectura hasta que termine este run." in sent_text
+        assert mock_send.call_args.kwargs.get("disable_web_page_preview") is True
 
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
-    def test_same_target_with_instruction_forwarded(self, mock_send, mock_sca):
-        """Same target + instruction → forwarded to agent."""
+    def test_url_only_receives_readonly_reply(self, mock_send, mock_sca):
+        """A bare URL during scan → read-only reply, never forwarded."""
         bot, bridge = self._make_bot_with_active_scan(
             ["https://drive.google.com/file/d/1abc/view"]
         )
-        update = {"message": {
-            "chat": {"id": 123},
-            "text": "https://drive.google.com/file/d/1abc/view prioriza el manifiesto",
-        }}
-        bot._handle_text_message(update)
-
-        bridge.send_message_to_agent.assert_called_once()
-        mock_send.assert_not_called()
+        self._assert_readonly_reply(
+            mock_send, bot, bridge,
+            "https://drive.google.com/file/d/1abc/view",
+        )
 
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
-    def test_different_target_forwarded(self, mock_send, mock_sca):
-        """Different target during scan → forwarded to agent."""
+    def test_url_with_instruction_receives_readonly_reply(self, mock_send, mock_sca):
+        """URL + instruction during scan → read-only reply, never forwarded."""
         bot, bridge = self._make_bot_with_active_scan(
             ["https://drive.google.com/file/d/1abc/view"]
         )
-        update = {"message": {
-            "chat": {"id": 123},
-            "text": "https://example.com",
-        }}
-        bot._handle_text_message(update)
-
-        bridge.send_message_to_agent.assert_called_once()
-        mock_send.assert_not_called()
+        self._assert_readonly_reply(
+            mock_send, bot, bridge,
+            "https://drive.google.com/file/d/1abc/view prioriza el manifiesto",
+        )
 
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
-    def test_url_with_trailing_punctuation_deduplicates(self, mock_send, mock_sca):
-        """URL ending in period/comma is recognized as duplicate."""
+    def test_different_target_receives_readonly_reply(self, mock_send, mock_sca):
+        """A different URL during scan → read-only reply, never forwarded."""
         bot, bridge = self._make_bot_with_active_scan(
             ["https://drive.google.com/file/d/1abc/view"]
         )
-        update = {"message": {
-            "chat": {"id": 123},
-            "text": "https://drive.google.com/file/d/1abc/view.",
-        }}
-        bot._handle_text_message(update)
-
-        bridge.send_message_to_agent.assert_not_called()
-        mock_send.assert_called_once()
-        sent_text = mock_send.call_args[0][2]
-        assert "ya está siendo analizado" in sent_text
+        self._assert_readonly_reply(mock_send, bot, bridge, "https://example.com")
 
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
-    def test_natural_language_forwarded(self, mock_send, mock_sca):
-        """Natural language without targets → forwarded to agent."""
+    def test_url_with_trailing_punctuation_receives_readonly_reply(self, mock_send, mock_sca):
+        """URL ending in period during scan → read-only reply, never forwarded."""
         bot, bridge = self._make_bot_with_active_scan(
             ["https://drive.google.com/file/d/1abc/view"]
         )
-        update = {"message": {
-            "chat": {"id": 123},
-            "text": "Continúa con el análisis",
-        }}
-        bot._handle_text_message(update)
+        self._assert_readonly_reply(
+            mock_send, bot, bridge,
+            "https://drive.google.com/file/d/1abc/view.",
+        )
 
-        bridge.send_message_to_agent.assert_called_once()
-        mock_send.assert_not_called()
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_natural_language_receives_readonly_reply(self, mock_send, mock_sca):
+        """Natural language during scan → read-only reply, never forwarded."""
+        bot, bridge = self._make_bot_with_active_scan(
+            ["https://drive.google.com/file/d/1abc/view"]
+        )
+        self._assert_readonly_reply(mock_send, bot, bridge, "Continúa con el análisis")
