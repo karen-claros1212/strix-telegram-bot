@@ -1524,22 +1524,20 @@ class TestStartupReadiness:
                 await asyncio.sleep(0.02)
             raise RuntimeError("test-release")
 
-        class _FakeEvent:
-            """start_scan rebuilds _startup_ready; make every Event.wait report False."""
+        class _FakeEvent(_threading.Event):
+            """start_scan rebuilds _startup_ready; force its timeout wait.
 
-            def __init__(self):
-                self.set_called = False
-
-            def set(self):
-                self.set_called = True
-
-            def clear(self):
-                pass
-
-            def is_set(self):
-                return self.set_called
+            Must subclass the real threading.Event and only override the
+            timed wait: threading.Thread.start()/join() rely on the internal
+            ``_started`` Event (blocking wait, real is_set), so replacing Event
+            wholesale would make ``thread.is_alive()`` lie and the test would
+            skip the join, leaking the daemon thread into the REAL
+            run_strix_scan once the patch reverts.
+            """
 
             def wait(self, timeout=None):
+                if timeout is None:
+                    return super().wait()
                 return False
 
         bridge = rb.StrixRuntimeBridge()
@@ -1551,9 +1549,10 @@ class TestStartupReadiness:
                 )
                 assert ok is False
                 assert "timeout de arranque" in msg
+                assert bridge._thread.is_alive()
             finally:
                 release.set()
-                if bridge._thread is not None and bridge._thread.is_alive():
+                if bridge._thread is not None:
                     bridge._thread.join(timeout=10)
                 self._restore_global_report_state()
 
