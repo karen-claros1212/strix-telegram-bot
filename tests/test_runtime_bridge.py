@@ -1549,7 +1549,8 @@ class TestStartupReadiness:
                 )
                 assert ok is False
                 assert "timeout de arranque" in msg
-                assert bridge._thread.is_alive()
+                assert bridge._startup_abort.is_set()
+                assert not bridge._thread.is_alive()
             finally:
                 release.set()
                 if bridge._thread is not None:
@@ -1557,6 +1558,7 @@ class TestStartupReadiness:
                 self._restore_global_report_state()
 
         assert not bridge._thread.is_alive()
+        assert bridge._starting is False
         assert bridge._loop is None
 
     def test_no_duplicate_thread_on_second_start(self, monkeypatch, tmp_path):
@@ -1634,6 +1636,287 @@ class TestStartupReadiness:
         assert bridge._scan_completed is True
         assert bridge.is_running is False
         assert bridge._loop is None
+
+    def _wait_until_true(self, predicate, timeout=5.0):
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            try:
+                if predicate():
+                    return True
+            except (AttributeError, TypeError):
+                pass
+            _time.sleep(0.005)
+        return False
+
+    def _make_instant_timeout_event(self):
+        """An Event whose timed wait always reports timeout (real untimed wait)."""
+        import threading as _threading
+
+        class _InstantTimeoutEvent(_threading.Event):
+            def wait(self, timeout=None):
+                if timeout is None:
+                    return super().wait()
+                return False
+
+        return _InstantTimeoutEvent
+
+    def _make_delayed_timeout_event(self):
+        """An Event whose timed wait blocks on a test gate then reports timeout."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import threading as _threading
+
+        gate = _threading.Event()
+
+        class _DelayedTimeoutEvent(_threading.Event):
+            def wait(self, timeout=None):
+                if timeout is None:
+                    return super().wait()
+                gate.wait()
+                return False
+
+        return gate, _DelayedTimeoutEvent
+
+    def test_abort_before_task_never_invokes_runner(self, monkeypatch, tmp_path):
+        """4.1: timeout before the runner task exists → no runner call, thread
+        joined, loop closed, abort flag set."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import threading as _threading
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+
+        calls = {"n": 0}
+
+        async def fake_scan(**kwargs):
+            calls["n"] += 1
+            raise RuntimeError("should-not-run")
+
+        real_new_event_loop = rb.asyncio.new_event_loop
+        loop_arrived = _threading.Event()
+        loop_gate = _threading.Event()
+
+        def gated_new_event_loop():
+            loop_arrived.set()
+            loop_gate.wait()
+            return real_new_event_loop()
+
+        bridge = rb.StrixRuntimeBridge()
+        result = {}
+        instant_timeout_event = self._make_instant_timeout_event()
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb.asyncio, "new_event_loop", gated_new_event_loop), \
+             patch.object(rb.threading, "Event", instant_timeout_event):
+            worker = _threading.Thread(
+                target=lambda: result.update(
+                    {"ret": bridge.start_scan(
+                        targets=["https://example.com"], instruction="")}),
+                daemon=True,
+            )
+            worker.start()
+            try:
+                assert loop_arrived.wait(timeout=10)
+                assert bridge._thread is not None and bridge._thread.is_alive()
+                assert bridge._starting is True
+                assert self._wait_until_true(
+                    lambda: bridge._startup_abort.is_set(), timeout=2.0)
+            finally:
+                loop_gate.set()
+                worker.join(timeout=15)
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        ok, msg = result["ret"]
+        assert ok is False
+        assert "timeout de arranque" in msg
+        assert calls["n"] == 0
+        assert bridge._startup_abort.is_set()
+        assert bridge._scan_task is None
+        assert not bridge._thread.is_alive()
+        assert bridge._loop is None
+        assert bridge._starting is False
+
+    def test_abort_after_task_cancels_runner(self, monkeypatch, tmp_path):
+        """4.2: timeout after the runner task exists → task cancelled, runner
+        never continues after start_scan returns, thread joined, second start
+        rejected while the abort is still winding down."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import threading as _threading
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+
+        gate, delayed_event = self._make_delayed_timeout_event()
+        calls = {"n": 0}
+        runner_started = _threading.Event()
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            calls["n"] += 1
+            runner_started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            raise RuntimeError("test-release")
+
+        bridge = rb.StrixRuntimeBridge()
+        result = {}
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb.threading, "Event", delayed_event):
+            worker = _threading.Thread(
+                target=lambda: result.update(
+                    {"ret": bridge.start_scan(
+                        targets=["https://example.com"], instruction="")}),
+                daemon=True,
+            )
+            worker.start()
+            try:
+                assert runner_started.wait(timeout=10)
+                first_thread = bridge._thread
+                first_task = bridge._scan_task
+                assert first_thread is not None and first_thread.is_alive()
+                assert first_task is not None and not first_task.done()
+                assert bridge._starting is True
+                assert bridge._loop is not None
+
+                ok2, msg2 = bridge.start_scan(
+                    targets=["https://example.com"], instruction="")
+                assert ok2 is False
+                assert "Ya hay" in msg2
+                assert bridge._thread is first_thread
+                assert bridge._scan_task is first_task
+            finally:
+                gate.set()
+                worker.join(timeout=15)
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        ok, msg = result["ret"]
+        assert ok is False
+        assert "timeout de arranque" in msg
+        assert bridge._startup_abort.is_set()
+        assert calls["n"] == 1
+        assert not bridge._thread.is_alive()
+        assert bridge._loop is None
+        assert bridge._starting is False
+
+    def test_second_start_rejected_during_initialization(self, monkeypatch, tmp_path):
+        """4.3: a second start while the first scan is still initializing is
+        rejected and must not touch the existing thread/task."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import threading as _threading
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+
+        gate, delayed_event = self._make_delayed_timeout_event()
+        runner_started = _threading.Event()
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            runner_started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            raise RuntimeError("test-release")
+
+        bridge = rb.StrixRuntimeBridge()
+        result = {}
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb.threading, "Event", delayed_event):
+            worker = _threading.Thread(
+                target=lambda: result.update(
+                    {"ret": bridge.start_scan(
+                        targets=["https://example.com"], instruction="")}),
+                daemon=True,
+            )
+            worker.start()
+            try:
+                assert runner_started.wait(timeout=10)
+                first_thread = bridge._thread
+                first_task = bridge._scan_task
+                assert bridge._starting is True
+
+                ok2, msg2 = bridge.start_scan(
+                    targets=["https://example.com"], instruction="")
+                assert ok2 is False
+                assert "Ya hay" in msg2
+                assert bridge._thread is first_thread
+                assert bridge._scan_task is first_task
+                assert bridge._run_name is not None
+            finally:
+                gate.set()
+                worker.join(timeout=15)
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        ok, msg = result["ret"]
+        assert ok is False
+        assert "timeout de arranque" in msg
+
+    def test_stuck_thread_fails_closed(self, monkeypatch, tmp_path):
+        """4.4: a scan thread that refuses to die leaves the bridge blocked
+        (fail closed): identifiable grave error, same thread object kept, a
+        second start is rejected, and the join timeout is bounded."""
+        from strix_telegram_bot.strix import runtime_bridge as rb
+        import threading as _threading
+        import time as _time
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+
+        gate, delayed_event = self._make_delayed_timeout_event()
+        runner_started = _threading.Event()
+        release = _threading.Event()
+
+        async def fake_scan(**kwargs):
+            runner_started.set()
+            while not release.is_set():
+                pass
+            return MagicMock(final_output={"scan_completed": True})
+
+        bridge = rb.StrixRuntimeBridge()
+        result = {}
+        with patch.object(rb, "run_strix_scan", side_effect=fake_scan), \
+             patch.object(rb.threading, "Event", delayed_event):
+            worker = _threading.Thread(
+                target=lambda: result.update(
+                    {"ret": bridge.start_scan(
+                        targets=["https://example.com"], instruction="")}),
+                daemon=True,
+            )
+            started = _time.monotonic()
+            worker.start()
+            try:
+                assert runner_started.wait(timeout=10)
+                first_thread = bridge._thread
+
+                gate.set()
+                worker.join(timeout=30)
+                elapsed = _time.monotonic() - started
+
+                ok, msg = result["ret"]
+                assert ok is False
+                assert "no terminó" in msg
+                assert bridge._startup_abort.is_set()
+                assert bridge._thread is first_thread
+                assert bridge._thread.is_alive()
+                assert bridge._starting is True
+                assert bridge._scan_completed is False
+
+                ok2, msg2 = bridge.start_scan(
+                    targets=["https://example.com"], instruction="")
+                assert ok2 is False
+                assert "Ya hay" in msg2
+                assert bridge._thread is first_thread
+            finally:
+                release.set()
+                if bridge._thread is not None and bridge._thread.is_alive():
+                    bridge._thread.join(timeout=10)
+                self._restore_global_report_state()
+
+        assert not bridge._thread.is_alive()
+        assert bridge._starting is False
+        assert elapsed < 40
 
 
 class TestCleanupCountSingle:

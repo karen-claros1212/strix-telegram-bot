@@ -29,6 +29,8 @@ _FINAL_COMPLETED = "completed"
 _FINAL_FAILED = "failed"
 _FINAL_STOPPED = "stopped"
 
+_STARTUP_JOIN_TIMEOUT = 5.0
+
 _STRIX_AVAILABLE = False
 AgentCoordinator: Any = None
 run_strix_scan: Any = None
@@ -45,6 +47,7 @@ build_diff_scope_instruction: Any = None
 DiffScopeResult: Any = None
 RepoDiffScope: Any = None
 _load_settings: Any = None
+_run_dir_for: Any = None
 
 try:
     from strix.config import load_settings as _ls
@@ -67,6 +70,8 @@ try:
     from strix.report.state import get_global_report_state as _ggrs
     from strix.interface.tui.messages import send_user_message_to_agent as _send_umta
 
+    from strix.core.paths import run_dir_for as _rdir
+
     AgentCoordinator = _AC
     run_strix_scan = _rss
     ReportState = _RS
@@ -80,6 +85,7 @@ try:
     rewrite_localhost_targets = _rewrite
     build_diff_scope_instruction = _build_diff_instr
     _load_settings = _ls
+    _run_dir_for = _rdir
     _STRIX_AVAILABLE = True
 except ImportError:
     pass
@@ -111,11 +117,14 @@ class StrixRuntimeBridge:
         self._start_time: float = 0.0
         self._scan_completed: bool = False
         self._scan_task: Optional[Any] = None
+        self._runner_started: bool = False
         self._closed_runs: set[str] = set()
         self._current_targets: list[str] = []
         self._last_error: Optional[str] = None
         self._startup_ready: threading.Event = threading.Event()
         self._startup_error: Optional[str] = None
+        self._starting = False
+        self._startup_abort: threading.Event = threading.Event()
         self._scan_result: Optional[Any] = None
         self._completion_detected: bool = False
         self._user_cancelled: bool = False
@@ -139,6 +148,8 @@ class StrixRuntimeBridge:
     def is_running(self) -> bool:
         if self._scan_completed:
             return False
+        if self._starting:
+            return True
         if not self._coordinator:
             return self._scan_task is not None
         try:
@@ -257,8 +268,11 @@ class StrixRuntimeBridge:
         self._start_time = time.time()
         self._scan_completed = False
         self._scan_task = None
+        self._runner_started = False
         self._last_error = None
         self._startup_ready = threading.Event()
+        self._startup_abort.clear()
+        self._starting = False
         self._startup_error = None
         self._scan_result = None
         self._completion_detected = False
@@ -271,15 +285,82 @@ class StrixRuntimeBridge:
         self._live_view = TuiLiveView()
         self._seen_versions.clear()
 
+        self._starting = True
+        self._startup_abort.clear()
         self._thread = threading.Thread(
             target=self._scan_thread, args=(scan_config, merged_sources), daemon=True)
         self._thread.start()
 
         if not self._startup_ready.wait(timeout=5.0):
-            return False, "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
+            return self._abort_startup()
         if self._startup_error:
             return False, self._startup_error
         return True, f"Escaneo iniciado: {run_name}"
+
+    def _abort_startup(self) -> tuple[bool, str]:
+        """Timeout path: signal the scan thread to abort, cancel any pending
+        task, and join the thread UNCONDITIONALLY so the real runner can never
+        execute after we return.  If the thread refuses to die, fail closed:
+        keep the bridge blocked until the service is restarted."""
+        self._startup_abort.set()
+        self._startup_error = "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
+        if self._loop is not None and not self._loop.is_closed():
+            scan_task = self._scan_task
+            if scan_task is not None and not scan_task.done():
+                try:
+                    async def _cancel_startup_task() -> None:
+                        # Only cancel an IN-FLIGHT runner.  If the runner has
+                        # not started yet, `_run_scan` sees the abort flag on
+                        # entry and returns on its own — cancelling an
+                        # un-started task would abandon an un-awaited coroutine.
+                        if self._runner_started and self._scan_task is not None \
+                                and not self._scan_task.done():
+                            self._scan_task.cancel()
+                    cancel_future = asyncio.run_coroutine_threadsafe(
+                        _cancel_startup_task(), self._loop)
+                    cancel_future.result(timeout=2.0)
+                except Exception as exc:
+                    logger.warning("start_scan: task cancel after startup timeout failed: %s", exc)
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=_STARTUP_JOIN_TIMEOUT)
+            if thread.is_alive():
+                self._startup_error = (
+                    "STRIX no confirmó el inicio del escaneo y el hilo de arranque "
+                    "no terminó; el bridge queda bloqueado hasta reiniciar el servicio"
+                )
+                logger.error("start_scan: startup thread still alive after join timeout")
+                return False, self._startup_error
+        return False, "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
+
+    def _persist_aborted_run(self) -> None:
+        """Persist an aborted startup attempt as failed ONLY if the scan thread
+        had already created run artifacts for THIS run.  Never fabricate a run
+        or a run directory that was never started."""
+        run_name = self._run_name
+        if not run_name or _run_dir_for is None:
+            return
+        rs = _get_report_state()
+        if rs is None or getattr(rs, "run_name", None) != run_name:
+            return
+        try:
+            if rs.run_record.get("status") == _FINAL_FAILED:
+                return
+            run_dir = _run_dir_for(run_name)
+            if not (run_dir / "run.json").is_file():
+                return
+        except Exception:
+            return
+        try:
+            if self._startup_error:
+                try:
+                    rs.run_record["error"] = self._startup_error
+                except Exception:
+                    pass
+            rs.save_run_data(status=_FINAL_FAILED)
+            logger.warning("Startup abort persisted %s as failed", run_name)
+        except Exception as exc:
+            logger.warning("Failed to persist aborted startup for %s: %s", run_name, exc)
 
     @staticmethod
     def _resolve_image() -> str:
@@ -333,6 +414,8 @@ class StrixRuntimeBridge:
         interactive = True
 
         async def _run_scan() -> Any:
+            if self._startup_abort.is_set():
+                return None
             rs = ReportState(run_name=self._run_name)
             rs.hydrate_from_run_dir()
             rs.set_scan_config(scan_config)
@@ -345,6 +428,9 @@ class StrixRuntimeBridge:
                 with self._lv_lock:
                     live_view.ingest_sdk_event(agent_id, event)
 
+            if self._startup_abort.is_set():
+                return None
+            self._runner_started = True
             return await run_strix_scan(
                 scan_config=scan_config, scan_id=current_run,
                 image=self._scan_image,
@@ -378,7 +464,31 @@ class StrixRuntimeBridge:
                 await asyncio.sleep(1.0)
 
         async def _main() -> None:
-            self._scan_task = asyncio.create_task(_run_scan())
+            if self._startup_abort.is_set():
+                return
+
+            runner_coro = _run_scan()
+            try:
+                self._scan_task = asyncio.create_task(runner_coro)
+            except BaseException:
+                # create_task failed; `_run_scan()` was never scheduled.
+                # Close the bare coroutine so it isn't GC'd as un-awaited.
+                runner_coro.close()
+                raise
+            if self._startup_abort.is_set():
+                # The abort raced in while the task was being created.  Do NOT
+                # cancel — `_run_scan` checks the flag on entry and returns
+                # immediately; draining keeps the coroutine properly awaited
+                # (cancelling an un-started task abandons it un-awaited).
+                task = self._scan_task
+                self._scan_task = None
+                if task is not None:
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                return
+
             discovery = asyncio.create_task(_poll_root())
             watcher = asyncio.create_task(_watch_completion(self._scan_task))
             self._startup_ready.set()
@@ -386,7 +496,11 @@ class StrixRuntimeBridge:
             try:
                 self._scan_result = await self._scan_task
             except asyncio.CancelledError:
-                if not self._completion_detected:
+                if self._startup_abort.is_set() and not self._completion_detected:
+                    self._terminal_kind = _FINAL_FAILED
+                    self._last_error = self._startup_error or (
+                        "Escaneo abortado durante el arranque")
+                elif not self._completion_detected:
                     self._user_cancelled = True
                     self._terminal_kind = _FINAL_STOPPED
             except Exception as e:
@@ -451,7 +565,10 @@ class StrixRuntimeBridge:
             else:
                 logger.warning("Post-scan teardown error: %s", e)
         finally:
+            self._starting = False
             self._startup_ready.set()
+            if self._startup_abort.is_set():
+                self._persist_aborted_run()
             pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
             for t in pending:
                 t.cancel()
