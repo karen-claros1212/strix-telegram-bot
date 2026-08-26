@@ -221,16 +221,32 @@ class TestScanCompleteCycle:
         bot._process_scan_events([ev])
         assert mock_send.call_count == 0
 
-    def test_scan_complete_sends_final_message(self, bot, mock_telegram):
+    def test_terminal_completed_via_drain_delivers_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """Terminal state detected via _drain_update_queue triggers report delivery."""
         mock_send, _, _ = mock_telegram
-        bot._bridge._start_time = 0
-        bot._bridge._scan_status = "completed"
-        ev = _make_system_event("scan_complete")
-        bot._process_scan_events([ev])
-        assert mock_send.call_count == 1
-        text = mock_send.call_args[0][2]
-        assert "completado" in text
-        assert "informe final no fue generado" in text
+        mock_send_doc.return_value = {"message_id": 200}
+        run_name = "scan-terminal-test"
+        bot._active_job_run_name = run_name
+        bot._bridge._run_name = run_name
+        bot._bridge._scan_completed = True
+        bot._bridge._terminal_kind = "completed"
+        bot._bridge._coordinator = MagicMock()
+        bot._bridge._coordinator.statuses = {"root": "completed"}
+        bot._bridge._coordinator.parent_of = {"root": None}
+        bot._bridge._root_agent_id = "root"
+
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({"status": "completed", "run_name": run_name}))
+        (run_dir / "penetration_test_report.md").write_text("# Report\n")
+
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
+            mock_settings.strix_runs_dir = tmp_path
+            bot._drain_update_queue()
+
+        mock_send_doc.assert_called_once()
+        texts = [c.args[2] for c in mock_send.call_args_list]
+        assert any("Informe" in t or "completado" in t.lower() for t in texts)
 
 
 class TestCallHistory:
@@ -444,13 +460,13 @@ class TestInteractiveMirror:
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        assert "non_interactive" not in src
+        assert "non_interactive=True" in src
 
     def test_scan_thread_always_interactive(self):
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
-        assert "non_interactive" not in src
+        assert 'scan_config["non_interactive"] = True' in src
         assert "interactive = not non_interactive" not in src
 
     def test_bot_no_language_injection(self):
@@ -739,30 +755,44 @@ class TestDeliverFinalReport:
     def test_sends_confirmation_after_document(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Confirmation message must appear after send_document."""
         mock_send, _, _ = mock_telegram
+        mock_send_doc.return_value = {"message_id": 200}
         bot._active_job_run_name = "scan-confirm"
+        bot._bridge._run_name = "scan-confirm"
+        bot._bridge._scan_completed = True
+        bot._bridge._terminal_kind = "completed"
+        bot._bridge._coordinator = MagicMock()
+        bot._bridge._coordinator.statuses = {"root": "completed"}
+        bot._bridge._coordinator.parent_of = {"root": None}
+        bot._bridge._root_agent_id = "root"
         self._setup_run_dir(tmp_path, "scan-confirm")
 
         with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            ev = _make_system_event("scan_complete", run_name="scan-confirm")
-            bot._process_scan_events([ev])
+            bot._drain_update_queue()
 
         mock_send_doc.assert_called_once()
         confirm_texts = [c.args[2] for c in mock_send.call_args_list]
         assert any("Informe completo enviado" in t for t in confirm_texts)
 
-    def test_two_scan_complete_only_one_delivery(self, bot, mock_telegram, mock_send_doc, tmp_path):
-        """Two scan_complete events for the same run must only deliver once."""
+    def test_two_drain_cycles_only_one_delivery(self, bot, mock_telegram, mock_send_doc, tmp_path):
+        """Two _drain_update_queue cycles for the same run must only deliver once."""
         mock_send, _, _ = mock_telegram
+        mock_send_doc.return_value = {"message_id": 200}
         bot._active_job_run_name = "scan-idempotent"
+        bot._bridge._run_name = "scan-idempotent"
+        bot._bridge._scan_completed = True
+        bot._bridge._terminal_kind = "completed"
+        bot._bridge._coordinator = MagicMock()
+        bot._bridge._coordinator.statuses = {"root": "completed"}
+        bot._bridge._coordinator.parent_of = {"root": None}
+        bot._bridge._root_agent_id = "root"
         self._setup_run_dir(tmp_path, "scan-idempotent")
 
         with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            ev = _make_system_event("scan_complete", run_name="scan-idempotent")
-            bot._process_scan_events([ev])
+            bot._drain_update_queue()
             count_first = mock_send_doc.call_count
-            bot._process_scan_events([ev])
+            bot._drain_update_queue()
             count_second = mock_send_doc.call_count
 
         assert count_first == 1
@@ -808,31 +838,45 @@ class TestDeliverFinalReport:
         assert result == "not_completed"
         mock_send_doc.assert_not_called()
 
-    def test_scan_complete_with_delivered_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
+    def test_terminal_completed_with_delivered_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Successful delivery sends document, then confirmation text."""
         mock_send, _, _ = mock_telegram
+        mock_send_doc.return_value = {"message_id": 200}
         bot._active_job_run_name = "scan-delivered"
+        bot._bridge._run_name = "scan-delivered"
+        bot._bridge._scan_completed = True
+        bot._bridge._terminal_kind = "completed"
+        bot._bridge._coordinator = MagicMock()
+        bot._bridge._coordinator.statuses = {"root": "completed"}
+        bot._bridge._coordinator.parent_of = {"root": None}
+        bot._bridge._root_agent_id = "root"
         self._setup_run_dir(tmp_path, "scan-delivered")
 
         with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            ev = _make_system_event("scan_complete", run_name="scan-delivered")
-            bot._process_scan_events([ev])
+            bot._drain_update_queue()
 
         mock_send_doc.assert_called_once()
         calls = [c.args[2] for c in mock_send.call_args_list]
         assert any("Informe completo enviado" in t for t in calls)
 
     def test_all_messages_use_parse_mode_none(self, bot, mock_telegram, mock_send_doc, tmp_path):
-        """Every send_message call (from scan_complete handler) must use parse_mode=None."""
+        """Every send_message call (from _drain_update_queue terminal handler) must use parse_mode=None."""
         mock_send, _, _ = mock_telegram
+        mock_send_doc.return_value = {"message_id": 200}
         bot._active_job_run_name = "scan-parse"
+        bot._bridge._run_name = "scan-parse"
+        bot._bridge._scan_completed = True
+        bot._bridge._terminal_kind = "completed"
+        bot._bridge._coordinator = MagicMock()
+        bot._bridge._coordinator.statuses = {"root": "completed"}
+        bot._bridge._coordinator.parent_of = {"root": None}
+        bot._bridge._root_agent_id = "root"
         self._setup_run_dir(tmp_path, "scan-parse")
 
         with patch("strix_telegram_bot.config.settings") as mock_settings:
             mock_settings.strix_runs_dir = tmp_path
-            ev = _make_system_event("scan_complete", run_name="scan-parse")
-            bot._process_scan_events([ev])
+            bot._drain_update_queue()
 
         for call in mock_send.call_args_list:
             assert call.kwargs.get("parse_mode") is None

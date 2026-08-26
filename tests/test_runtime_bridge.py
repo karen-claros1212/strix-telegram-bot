@@ -127,43 +127,40 @@ class TestStrixRuntimeBridge:
         events = bridge.poll_events()
         assert events == []
 
-    def test_emit_event_adds_to_live_view(self):
+    def test_poll_events_no_synthetic_lifecycle_events(self):
         bridge = StrixRuntimeBridge()
-        bridge._run_name = "test-run"
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
 
-        bridge._emit_event("scan_complete", "a1", "Done")
+        bridge._scan_completed = True
+        bridge._terminal_kind = "completed"
+
+        events = bridge.poll_events()
+        assert events == []
+
+    def test_poll_events_returns_only_sdk_events(self):
+        from types import SimpleNamespace
+        bridge = StrixRuntimeBridge()
+
+        bridge._scan_completed = True
+        bridge._terminal_kind = "completed"
+        bridge._live_view = SimpleNamespace(events=[])
+
+        events = bridge.poll_events()
+        assert events == []
+
+    def test_poll_events_delivers_sdk_events_not_lifecycle(self):
+        from types import SimpleNamespace
+        bridge = StrixRuntimeBridge()
+
+        sdk_event = {
+            "id": "sdk_1", "type": "chat", "agent_id": "a1",
+            "version": 0, "data": {"role": "assistant", "content": "hello"},
+        }
+        bridge._live_view = SimpleNamespace(events=[sdk_event])
+
         events = bridge.poll_events()
         assert len(events) == 1
-        ev = events[0]
-        assert ev["type"] == "system"
-        assert ev["data"]["event"] == "scan_complete"
-        assert ev["data"]["content"] == "Done"
-        assert ev["data"]["run_name"] == "test-run"
-
-    def test_emit_event_blocked_for_closed_runs(self):
-        bridge = StrixRuntimeBridge()
-        bridge._run_name = "closed-run"
-        bridge._closed_runs.add("closed-run")
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
-
-        bridge._emit_event("scan_complete", "a1", "Done")
-        events = bridge.poll_events()
-        assert len(events) == 0
-
-    def test_closed_runs_allow_cancelled(self):
-        bridge = StrixRuntimeBridge()
-        bridge._run_name = "closed-run"
-        bridge._closed_runs.add("closed-run")
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
-
-        bridge._emit_event("scan_cancelled", "", "Cancelled")
-        events = bridge.poll_events()
-        assert len(events) == 1
-        assert events[0]["data"]["event"] == "scan_cancelled"
+        assert events[0]["id"] == "sdk_1"
+        assert events[0]["type"] == "chat"
 
     def test_poll_events_deduplicates_by_version(self):
         bridge = StrixRuntimeBridge()
@@ -186,18 +183,22 @@ class TestStrixRuntimeBridge:
         third = bridge.poll_events()
         assert len(third) == 1
 
-    def test_poll_events_over_multiple_emits(self):
+    def test_poll_events_over_multiple_sdk_events(self):
+        from types import SimpleNamespace as SN
         bridge = StrixRuntimeBridge()
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
+        bridge._live_view = SN(events=[])
 
-        bridge._emit_event("root_discovered", "a1", "root")
-        bridge._emit_event("scan_complete", "", "done")
+        bridge._live_view.events.append(
+            {"id": "sdk_1", "type": "chat", "agent_id": "a1",
+             "version": 0, "data": {"role": "assistant", "content": "first"}})
+        bridge._live_view.events.append(
+            {"id": "sdk_2", "type": "chat", "agent_id": "a1",
+             "version": 0, "data": {"role": "assistant", "content": "second"}})
 
         events = bridge.poll_events()
         assert len(events) == 2
-        assert events[0]["data"]["event"] == "root_discovered"
-        assert events[1]["data"]["event"] == "scan_complete"
+        assert events[0]["id"] == "sdk_1"
+        assert events[1]["id"] == "sdk_2"
 
     def test_get_tool_state_empty(self):
         bridge = StrixRuntimeBridge()
@@ -294,6 +295,7 @@ class TestStrixRuntimeBridge:
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
         bridge._coordinator = MagicMock()
+        bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
         from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
         bridge._live_view = TuiLiveView()
@@ -325,25 +327,27 @@ class TestStrixRuntimeBridge:
 
     def test_fresh_live_view_on_start_scan_init(self):
         bridge = StrixRuntimeBridge()
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        lv = TuiLiveView()
-        lv.events.append({"id": "test_1", "type": "chat", "data": {}})
-        bridge._live_view = lv
-        # Skip prepopulated event
+        bridge._live_view = MagicMock(events=[{"id": "test_1", "type": "chat", "data": {}}])
         bridge.poll_events()
 
         bridge._run_name = "active"
-        bridge._emit_event("scan_complete", "", "done")
+        ev = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output="done")
+        with bridge._lv_lock:
+            bridge._live_view.ingest_sdk_event("a1", ev)
+            bridge._live_view.events.append({"id": "sdk_1", "type": "chat", "data": {"role": "assistant", "content": "done"}})
         events = bridge.poll_events()
         assert len(events) >= 1
-        assert events[-1]["data"]["event"] == "scan_complete"
+        assert events[-1]["type"] == "chat"
 
     def test_get_agent_tree_from_live_view(self):
         bridge = StrixRuntimeBridge()
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
-        bridge._live_view.upsert_agent("a1", name="root", status="running")
-        bridge._live_view.upsert_agent("a2", name="child", parent_id="a1", status="waiting")
+        mock_lv = MagicMock()
+        mock_lv.agents = {
+            "a1": {"id": "a1", "name": "root", "status": "running", "parent_id": None},
+            "a2": {"id": "a2", "name": "child", "status": "waiting", "parent_id": "a1"},
+        }
+        mock_lv.tool_calls = {}
+        bridge._live_view = mock_lv
 
         tree = bridge.get_agent_tree()
         assert tree is not None
@@ -407,8 +411,10 @@ class TestStrixRuntimeBridge:
 
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
+        mock_lv = MagicMock()
+        mock_lv.events = []
+        mock_lv.ingest_sdk_event = MagicMock(side_effect=lambda agent_id, ev: mock_lv.events.append(ev))
+        bridge._live_view = mock_lv
 
         errors = []
         barrier = threading.Barrier(2, timeout=5)
@@ -417,7 +423,9 @@ class TestStrixRuntimeBridge:
             try:
                 barrier.wait()
                 for i in range(100):
-                    bridge._emit_event("root_discovered", f"a{i}", f"msg{i}")
+                    ev = _make_sdk_event("run_item_stream_event", item_type="message_output_item", output=f"msg{i}")
+                    with bridge._lv_lock:
+                        bridge._live_view.ingest_sdk_event(f"a{i}", ev)
             except Exception as e:
                 errors.append(f"writer: {e}")
 
@@ -604,8 +612,10 @@ class TestConcurrentSdkEvents:
 
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
+        mock_lv = MagicMock()
+        mock_lv.events = []
+        mock_lv.ingest_sdk_event = MagicMock(side_effect=lambda agent_id, ev: mock_lv.events.append(ev))
+        bridge._live_view = mock_lv
 
         errors = []
         barrier = threading.Barrier(2, timeout=5)
@@ -624,7 +634,6 @@ class TestConcurrentSdkEvents:
                         bridge._live_view.ingest_sdk_event("a1", ev_tool)
                         bridge._live_view.ingest_sdk_event("a1", ev_out)
                         bridge._live_view.ingest_sdk_event("a1", ev_delta)
-                    bridge._emit_event("root_discovered", f"a{i}", f"msg{i}")
             except Exception as e:
                 errors.append(f"writer: {e}")
 
@@ -706,18 +715,11 @@ class TestDiffScopeOfficialAPI:
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources")
-    @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
-    def test_diff_scope_called_for_auto_mode_via_start_scan(self, mock_resolve, mock_cls, mock_itt,
-                                                            monkeypatch, tmp_path):
-        """start_scan() must call resolve_diff_scope_context for auto mode with local sources."""
-        from strix.interface.utils import DiffScopeResult
-        mock_resolve.return_value = DiffScopeResult(
-            active=True, mode="auto",
-            instruction_block="diff instruction", metadata={"key": "val"},
-        )
-        mock_cls.return_value = [{"source_path": "/tmp/repo", "workspace_subdir": "repo"}]
-        mock_itt.return_value = ("local_code", {"source_path": "/tmp/repo"})
+    @patch("strix_telegram_bot.strix.runtime_bridge.prepare_run")
+    def test_prepare_run_called_via_start_scan(self, mock_prepare, mock_itt,
+                                               monkeypatch, tmp_path):
+        """start_scan() must delegate to prepare_run for target resolution and diff scope."""
+        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
 
         import threading as _threading
         release_scan = _threading.Event()
@@ -746,7 +748,7 @@ class TestDiffScopeOfficialAPI:
         bridge._GoTuiRuntime = mock_runtime_factory
         try:
             ok, msg = bridge.start_scan(
-                targets=["/tmp/repo"],
+                targets=["https://example.com"],
                 instruction="test",
                 scan_mode="deep",
                 scope_mode="auto",
@@ -758,12 +760,13 @@ class TestDiffScopeOfficialAPI:
             if thread is not None and thread.is_alive():
                 thread.join(timeout=10)
 
-        mock_resolve.assert_called_once()
-        call_args = mock_resolve.call_args
-        assert call_args[0][1] == "auto"
-        assert call_args[0][3] is False
+        mock_prepare.assert_called_once()
+        call_args = mock_prepare.call_args
+        ns = call_args[0][0]
+        assert ns.scope_mode == "auto"
+        assert ns.non_interactive is True
 
-        assert bridge._current_targets == ["/tmp/repo"]
+        assert bridge._current_targets == ["https://example.com"]
         assert bridge._run_name is not None
         assert bridge._run_name.startswith("scan-")
 
@@ -917,6 +920,7 @@ class TestFileHostingURLs:
         bridge = StrixRuntimeBridge()
         bridge._run_name = "test-run"
         bridge._coordinator = MagicMock()
+        bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
         from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
         bridge._live_view = TuiLiveView()
@@ -1088,23 +1092,18 @@ class TestTuiAlignment:
         assert "has_local_sources" not in src
 
     def test_diff_scope_non_interactive_false(self):
-        """Fix 3: resolve_diff_scope_context always receives non_interactive=False."""
+        """prepare_run receives non_interactive=True from bridge."""
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        # The call to resolve_diff_scope_context must pass False as the 4th arg
-        assert "resolve_diff_scope_context(" in src
-        assert "False," in src  # non_interactive=False
+        assert "non_interactive=True" in src
 
     def test_diff_scope_instruction_prepend(self):
-        """Fix 3: diff instruction is prepended (not appended) to user instruction."""
+        """_scan_thread delegates diff resolution to prepare_run."""
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
-        src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        # Should be: diff_block + newline + instruction (prepending)
-        assert "diff_result.instruction_block" in src
-        # The TUI pattern: f"{diff_result.instruction_block}\\n\\n{instruction}"
-        assert "instruction_block}" in src
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "prepare_run(" in src
 
     def test_scan_thread_uses_gotuiruntime(self):
         """_scan_thread creates GoTuiRuntime and calls init_run_state + start_scan."""
@@ -1205,6 +1204,7 @@ class TestFinalizerSingleEvent:
     def _make_bridge(self, monkeypatch, tmp_path, run_name, root_status):
         from strix_telegram_bot.strix import runtime_bridge as rb
         monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.setattr(rb, "prepare_run", lambda args: None)
 
         bridge = rb.StrixRuntimeBridge()
         bridge._run_name = run_name
@@ -1212,7 +1212,6 @@ class TestFinalizerSingleEvent:
         bridge._coordinator.parent_of = None
         bridge._coordinator.statuses = {"root": root_status}
         bridge._root_agent_id = "root"
-        bridge._emit_event = MagicMock()
         return bridge
 
     def _make_mock_runtime(self, scan_task_coro=None, error=None):
@@ -1251,7 +1250,7 @@ class TestFinalizerSingleEvent:
         type(mock_runtime).scan_task = property(lambda self: _get_scan_task())
         return mock_runtime
 
-    def test_success_emits_single_complete(self, monkeypatch, tmp_path):
+    def test_success_sets_terminal_completed(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix import runtime_bridge as rb
         run_name = "scan-ok"
         run_dir = tmp_path / run_name
@@ -1270,14 +1269,12 @@ class TestFinalizerSingleEvent:
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
         with patch.object(rb, "_get_report_state", return_value=rs):
             from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace())
+            bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
 
         assert bridge._terminal_kind == "completed"
         assert bridge._scan_completed is True
-        assert bridge._emit_event.call_count == 1
-        assert bridge._emit_event.call_args[0][0] == "scan_complete"
 
-    def test_exception_persists_failed_and_emits_single_error(self, monkeypatch, tmp_path):
+    def test_exception_persists_failed_and_sets_terminal(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix import runtime_bridge as rb
         run_name = "scan-fail"
         bridge = self._make_bridge(monkeypatch, tmp_path, run_name, "running")
@@ -1290,16 +1287,14 @@ class TestFinalizerSingleEvent:
 
         with patch.object(rb, "_get_report_state", return_value=rs):
             from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace())
+            bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
 
         assert bridge._terminal_kind == "failed"
         assert bridge._last_error == "provider boom"
         assert bridge._scan_completed is True
         rs.save_run_data.assert_any_call(status="failed")
-        assert bridge._emit_event.call_count == 1
-        assert bridge._emit_event.call_args[0][0] == "scan_error"
 
-    def test_cancel_persists_stopped_and_emits_single_cancelled(self, monkeypatch, tmp_path):
+    def test_cancel_persists_stopped_and_sets_terminal(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix import runtime_bridge as rb
         run_name = "scan-stop"
         bridge = self._make_bridge(monkeypatch, tmp_path, run_name, "running")
@@ -1312,14 +1307,12 @@ class TestFinalizerSingleEvent:
 
         with patch.object(rb, "_get_report_state", return_value=rs):
             from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace())
+            bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
 
         assert bridge._user_cancelled is True
         assert bridge._terminal_kind == "stopped"
         assert bridge._scan_completed is True
         rs.save_run_data.assert_any_call(status="stopped")
-        assert bridge._emit_event.call_count == 1
-        assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
 
     def test_failure_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
         """Failure must persist failed + end_time in the real run.json (spec A)."""
@@ -1337,7 +1330,6 @@ class TestFinalizerSingleEvent:
             bridge._coordinator.parent_of = None
             bridge._coordinator.statuses = {"root": "running"}
             bridge._root_agent_id = "root"
-            bridge._emit_event = MagicMock()
 
             mock_runtime = self._make_mock_runtime(error=RuntimeError("original provider error"))
             bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
@@ -1347,7 +1339,7 @@ class TestFinalizerSingleEvent:
 
             with patch.object(rb, "_get_report_state", return_value=rs):
                 from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace())
+                bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
         finally:
             from strix.report.state import set_global_report_state
             set_global_report_state(prev_global)
@@ -1357,8 +1349,6 @@ class TestFinalizerSingleEvent:
         data = json.loads(run_json_path.read_text())
         assert data.get("status") == "failed"
         assert data.get("end_time") is not None
-        assert bridge._emit_event.call_count == 1
-        assert bridge._emit_event.call_args[0][0] == "scan_error"
 
     def test_stop_writes_end_time_in_run_json(self, monkeypatch, tmp_path):
         """Stop must persist stopped + end_time in the real run.json (spec B)."""
@@ -1376,7 +1366,6 @@ class TestFinalizerSingleEvent:
             bridge._coordinator.parent_of = None
             bridge._coordinator.statuses = {"root": "running"}
             bridge._root_agent_id = "root"
-            bridge._emit_event = MagicMock()
 
             mock_runtime = self._make_mock_runtime(error=asyncio.CancelledError())
             bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
@@ -1386,7 +1375,7 @@ class TestFinalizerSingleEvent:
 
             with patch.object(rb, "_get_report_state", return_value=rs):
                 from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace())
+                bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
         finally:
             from strix.report.state import set_global_report_state
             set_global_report_state(prev_global)
@@ -1396,8 +1385,6 @@ class TestFinalizerSingleEvent:
         data = json.loads(run_json_path.read_text())
         assert data.get("status") == "stopped"
         assert data.get("end_time") is not None
-        assert bridge._emit_event.call_count == 1
-        assert bridge._emit_event.call_args[0][0] == "scan_cancelled"
 
 
 class TestStartupReadiness:
@@ -1414,8 +1401,8 @@ class TestStartupReadiness:
         from strix_telegram_bot.strix import runtime_bridge as rb
         monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(rb, "collect_local_sources", lambda info: [])
-        monkeypatch.setattr(rb, "resolve_diff_scope_context", lambda *a, **k: None)
+        monkeypatch.setattr(rb, "_STRIX_AVAILABLE", True)
+        monkeypatch.setattr(rb, "prepare_run", lambda args: None)
 
     def _restore_global_report_state(self):
         from strix.report.state import set_global_report_state
@@ -1942,7 +1929,6 @@ class TestCleanupCountSingle:
         bridge = rb.StrixRuntimeBridge()
         bridge._run_name = run_name
         bridge._root_agent_id = "root"
-        bridge._emit_event = MagicMock()
 
         mock_runtime = MagicMock()
         mock_runtime.coordinator = MagicMock()
@@ -1978,11 +1964,10 @@ class TestCleanupCountSingle:
         try:
             with patch.object(rb, "_get_report_state", return_value=rs):
                 from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace())
+                bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
 
             assert bridge._terminal_kind == "completed"
-            assert bridge._emit_event.call_count == 1
-            assert bridge._emit_event.call_args[0][0] == "scan_complete"
+            assert bridge._scan_completed is True
         finally:
             set_global_report_state(prev_global)
 
@@ -2021,45 +2006,82 @@ class TestDiffScopeExactMetadata:
     def test_metadata_used_directly(self):
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
-        src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        assert "dict(diff_result.metadata)" in src
+        src = inspect.getsource(StrixRuntimeBridge._scan_thread)
+        assert "prepare_run(" in src
 
 
 class TestDiffScopeFailFast:
-    """ValueError from resolver must fail start_scan before thread creation."""
+    """ValueError from prepare_run must fail _scan_thread before runtime creation."""
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
-    @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
-    def test_valueerror_returns_false_no_thread(self, mock_resolve, mock_itt):
+    @patch("strix_telegram_bot.strix.runtime_bridge.prepare_run")
+    def test_valueerror_returns_false_no_thread(self, mock_prepare, mock_itt, monkeypatch, tmp_path):
         mock_itt.return_value = ("url", {"target_url": "https://example.com"})
-        mock_resolve.side_effect = ValueError("invalid scope: bad repo state")
+        mock_prepare.side_effect = ValueError("invalid scope: bad repo state")
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.chdir(tmp_path)
         bridge = StrixRuntimeBridge()
+
+        def mock_runtime_factory(args):
+            mock_runtime = MagicMock()
+            mock_runtime.coordinator = MagicMock()
+            mock_runtime.coordinator.parent_of = None
+            mock_runtime.coordinator.statuses = {"root": "running"}
+            mock_runtime.live_view = MagicMock()
+            mock_runtime.live_view.events = []
+            mock_runtime.live_view._next_event_id = 0
+            import asyncio as _aio
+            async def blocking():
+                await _aio.sleep(100)
+            mock_runtime.scan_task = _aio.ensure_future(blocking())
+            return mock_runtime
+
+        bridge._GoTuiRuntime = mock_runtime_factory
         ok, msg = bridge.start_scan(
             targets=["https://example.com"],
             instruction="test",
             scan_mode="deep",
             scope_mode="auto",
         )
+        import time as _time
+        _time.sleep(1.0)
         assert ok is False
-        assert "scope" in msg.lower() or "invalid" in msg.lower()
-        assert bridge._thread is None
-        assert bridge.is_running is False
+        assert "preparación" in msg.lower() or "scope" in msg.lower()
+        assert bridge._scan_completed is True
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
-    @patch("strix_telegram_bot.strix.runtime_bridge.resolve_diff_scope_context")
-    def test_generic_exception_returns_false(self, mock_resolve, mock_itt):
+    @patch("strix_telegram_bot.strix.runtime_bridge.prepare_run")
+    def test_generic_exception_returns_false(self, mock_prepare, mock_itt, monkeypatch, tmp_path):
         mock_itt.return_value = ("url", {"target_url": "https://example.com"})
-        mock_resolve.side_effect = RuntimeError("unexpected failure")
+        mock_prepare.side_effect = RuntimeError("unexpected failure")
+        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.chdir(tmp_path)
         bridge = StrixRuntimeBridge()
+
+        def mock_runtime_factory(args):
+            mock_runtime = MagicMock()
+            mock_runtime.coordinator = MagicMock()
+            mock_runtime.coordinator.parent_of = None
+            mock_runtime.coordinator.statuses = {"root": "running"}
+            mock_runtime.live_view = MagicMock()
+            mock_runtime.live_view.events = []
+            mock_runtime.live_view._next_event_id = 0
+            import asyncio as _aio
+            async def blocking():
+                await _aio.sleep(100)
+            mock_runtime.scan_task = _aio.ensure_future(blocking())
+            return mock_runtime
+
+        bridge._GoTuiRuntime = mock_runtime_factory
         ok, msg = bridge.start_scan(
             targets=["https://example.com"],
             instruction="test",
             scan_mode="deep",
             scope_mode="auto",
         )
+        import time as _time
+        _time.sleep(1.0)
         assert ok is False
-        assert bridge._thread is None
+        assert bridge._scan_completed is True

@@ -50,6 +50,7 @@ RepoDiffScope: Any = None
 _load_settings: Any = None
 _run_dir_for: Any = None
 send_user_message_to_agent: Any = None
+prepare_run: Any = None
 
 try:
     from strix.config import load_settings as _ls
@@ -73,6 +74,7 @@ try:
     from strix.interface.tui.backend.messages import send_user_message_to_agent as _send_umta
     from strix.core.paths import run_dir_for as _rdir
     from strix.interface.tui.runtime import GoTuiRuntime as _GTR
+    from strix.interface.scan_setup import prepare_run as _prepare_run
 
     AgentCoordinator = _AC
     run_strix_scan = _rss
@@ -90,11 +92,25 @@ try:
     _run_dir_for = _rdir
     send_user_message_to_agent = _send_umta
     GoTuiRuntime = _GTR
+    prepare_run = _prepare_run
     _STRIX_AVAILABLE = True
 except ImportError:
     pass
 
 _get_report_state = _ggrs if _STRIX_AVAILABLE else (lambda: None)
+
+DEFAULT_MAX_TURNS: int = 500
+try:
+    from strix.config.settings import DEFAULT_MAX_TURNS as _DMT
+    DEFAULT_MAX_TURNS = _DMT
+except ImportError:
+    pass
+
+
+def _normalize_max_turns(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_MAX_TURNS
 
 
 def _report_md_present(run_name: str) -> bool:
@@ -216,37 +232,6 @@ class StrixRuntimeBridge:
         except ValueError as exc:
             return False, f"Objetivo inválido: {exc}"
 
-        strix_sources: list[dict] = []
-        if collect_local_sources:
-            try:
-                strix_sources = collect_local_sources(targets_info)
-            except Exception as exc:
-                logger.warning("collect_local_sources failed: %s", exc)
-
-        seen_paths: set[str] = set()
-        merged_sources: list[dict[str, str]] = []
-        for s in strix_sources + (local_sources or []):
-            sp = s.get("source_path", "")
-            if sp not in seen_paths:
-                seen_paths.add(sp)
-                merged_sources.append(s)
-
-        diff_scope: dict[str, Any] = {"active": False}
-        try:
-            diff_result = resolve_diff_scope_context(
-                merged_sources, scope_mode, diff_base, False,
-            )
-        except Exception as exc:
-            logger.error("resolve_diff_scope_context failed: %s", exc)
-            return False, f"Error de scope: {exc}"
-        if isinstance(diff_result, DiffScopeResult):
-            diff_scope = dict(diff_result.metadata) if diff_result.metadata else {"active": False}
-            if diff_result.instruction_block:
-                instruction = (
-                    f"{diff_result.instruction_block}\n\n{instruction}"
-                    if instruction else diff_result.instruction_block
-                )
-
         self._stop_event.clear()
         self._current_targets = list(targets)
         self._root_agent_id = None
@@ -272,20 +257,23 @@ class StrixRuntimeBridge:
             targets_info=targets_info,
             instruction=instruction or "",
             scan_mode=scan_mode,
-            diff_scope=diff_scope,
+            diff_scope={"active": False},
             scope_mode=scope_mode,
             diff_base=diff_base,
-            local_sources=merged_sources,
+            local_sources=list(local_sources or []),
             user_explicit_instruction="",
             max_budget_usd=None,
-            max_turns=None,
+            max_turns=_normalize_max_turns(DEFAULT_MAX_TURNS),
             needs_setup=False,
+            non_interactive=True,
+            resume=run_name,
+            workspace_mount=None,
         )
 
         self._starting = True
         self._startup_abort.clear()
         self._thread = threading.Thread(
-            target=self._scan_thread, args=(args,), daemon=True)
+            target=self._scan_thread, args=(args, local_sources), daemon=True)
         self._thread.start()
 
         if not self._startup_ready.wait(timeout=5.0):
@@ -351,7 +339,7 @@ class StrixRuntimeBridge:
 
     # ── scan thread ────────────────────────────────────────────
 
-    def _scan_thread(self, args: SimpleNamespace) -> None:
+    def _scan_thread(self, args: SimpleNamespace, user_local_sources: Optional[list[dict[str, str]]] = None) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
 
@@ -359,17 +347,41 @@ class StrixRuntimeBridge:
             if self._startup_abort.is_set():
                 return
 
+            args.max_turns = _normalize_max_turns(args.max_turns)
+
+            if prepare_run is not None:
+                try:
+                    prepare_run(args)
+                except Exception as exc:
+                    logger.error("prepare_run failed: %s", exc)
+                    self._startup_error = f"Preparación del escaneo falló: {exc}"
+                    self._scan_completed = True
+                    return
+                if args.local_sources is None:
+                    args.local_sources = []
+                for s in (user_local_sources or []):
+                    sp = s.get("source_path", "")
+                    if sp and not any(x.get("source_path") == sp for x in args.local_sources):
+                        args.local_sources.append(s)
+
             runtime = self._GoTuiRuntime(args)
+            if self._startup_abort.is_set():
+                return
             self._runtime = runtime
             self._coordinator = runtime.coordinator
 
             runtime.init_run_state()
+            if self._startup_abort.is_set():
+                return
+            runtime.scan_config["non_interactive"] = True
 
             with self._lv_lock:
                 self._live_view = runtime.live_view
             self._root_agent_id = None
 
             runtime.start_scan()
+            if self._startup_abort.is_set():
+                return
             self._scan_task = runtime.scan_task
 
             discovery = asyncio.create_task(self._poll_root())
@@ -401,13 +413,6 @@ class StrixRuntimeBridge:
                 self._terminal_kind = self._derive_terminal_kind()
 
             self._persist_final_state()
-
-            if self._terminal_kind == _FINAL_COMPLETED:
-                self._emit_event("scan_complete", "", "Escaneo finalizado")
-            elif self._terminal_kind == _FINAL_STOPPED:
-                self._emit_event("scan_cancelled", "", "Escaneo cancelado")
-            else:
-                self._emit_event("scan_error", "", self._last_error or "Escaneo terminó con error")
 
         try:
             loop.run_until_complete(_main())
@@ -517,27 +522,6 @@ class StrixRuntimeBridge:
         except Exception as exc:
             logger.warning("Failed to persist aborted startup for %s: %s", run_name, exc)
 
-    # ── event emission ─────────────────────────────────────────
-
-    def _emit_event(self, event_type: str, agent_id: str, content: str) -> None:
-        rn = self._run_name or ""
-        if rn in self._closed_runs and event_type not in ("scan_cancelled",):
-            return
-        with self._lv_lock:
-            lv = self._live_view
-            if lv is None:
-                return
-            event = {
-                "id": f"bridge_{event_type}_{lv._next_event_id}",
-                "type": "system",
-                "agent_id": agent_id,
-                "timestamp": time.time(),
-                "version": 0,
-                "data": {"event": event_type, "content": content, "run_name": rn},
-            }
-            lv._next_event_id += 1
-            lv.events.append(event)
-
     # ── bot interface ──────────────────────────────────────────
 
     def poll_events(self) -> list[dict[str, Any]]:
@@ -618,40 +602,44 @@ class StrixRuntimeBridge:
         if not self._coordinator or self._scan_completed:
             return None
 
-        root = self._root_agent_id
-        if not root:
-            return None
-
         if self._loop is None or self._loop.is_closed():
             return None
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._coordinator.wait_kind_of(root), self._loop)
-            wait_kind = future.result(timeout=2.0)
-        except Exception:
+
+        statuses = getattr(self._coordinator, "statuses", None)
+        if not statuses:
             return None
 
-        if wait_kind != "user":
-            return None
+        for agent_id in list(statuses.keys()):
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._coordinator.wait_kind_of(agent_id), self._loop)
+                wait_kind = future.result(timeout=2.0)
+            except Exception:
+                continue
 
-        agent_name = ""
-        with self._lv_lock:
-            lv = self._live_view
-            if lv and root in lv.agents:
-                agent_name = lv.agents[root].get("name", root)
+            if wait_kind != "user":
+                continue
 
-        return {
-            "id": f"bridge_agent_waiting_{root}",
-            "type": "system",
-            "agent_id": root,
-            "timestamp": time.time(),
-            "version": 0,
-            "data": {
-                "event": "agent_waiting",
-                "content": agent_name or root,
-                "run_name": self._run_name or "",
-            },
-        }
+            agent_name = ""
+            with self._lv_lock:
+                lv = self._live_view
+                if lv and hasattr(lv, "agents") and agent_id in lv.agents:
+                    agent_name = lv.agents[agent_id].get("name", agent_id)
+
+            return {
+                "id": f"bridge_agent_waiting_{agent_id}",
+                "type": "system",
+                "agent_id": agent_id,
+                "timestamp": time.time(),
+                "version": 0,
+                "data": {
+                    "event": "agent_waiting",
+                    "content": agent_name or agent_id,
+                    "run_name": self._run_name or "",
+                },
+            }
+
+        return None
 
     def ack_waiting_notification(self) -> None:
         pass

@@ -59,6 +59,7 @@ class StrixBot:
         self._active_chat_chat_id: Optional[int] = None
 
         self._final_reports_delivered: set[str] = set()
+        self._terminal_handled: set[str] = set()
 
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
@@ -628,6 +629,7 @@ class StrixBot:
         self._chat_event_version.clear()
         self._tool_message_ids.clear()
         self._final_reports_delivered.clear()
+        self._terminal_handled.clear()
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
@@ -661,6 +663,58 @@ class StrixBot:
                         job.phase = JobPhase.COMPLETED
                     job.error = status.get("error")
                     self._job_store.save(job)
+
+                if (
+                    run_name
+                    and run_name not in self._terminal_handled
+                    and self._active_job_chat_id is not None
+                ):
+                    self._terminal_handled.add(run_name)
+                    phase_str = status.get("phase", "running")
+                    chat_id = self._active_job_chat_id
+                    if phase_str == "completed":
+                        result = self._deliver_final_report(chat_id, run_name)
+                        if result == "missing":
+                            send_message(
+                                self, chat_id,
+                                "Escaneo completado.\n"
+                                "El informe final no fue generado por Strix.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+                        elif result == "not_completed":
+                            send_message(
+                                self, chat_id,
+                                "Strix emitió una señal de finalización, "
+                                "pero el run todavía no está marcado como "
+                                "completed. No se envió ningún informe.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+                        elif result == "send_failed":
+                            send_message(
+                                self, chat_id,
+                                "Escaneo completado.\n"
+                                "El informe fue generado pero no pudo enviarse. "
+                                "Disponible en Reportes.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+                        else:
+                            send_message(
+                                self, chat_id,
+                                "Informe completo enviado como archivo Markdown.",
+                                reply_markup=main_menu(),
+                                parse_mode=None,
+                            )
+                    elif phase_str == "failed":
+                        error_msg = status.get("error") or "Escaneo terminó con error"
+                        send_message(
+                            self, chat_id,
+                            f"Error: {escape_md(error_msg)}",
+                            reply_markup=main_menu(),
+                            parse_mode=None,
+                        )
 
         if self._active_job_chat_id is not None and self._active_job_message_id is not None:
             tool_state = self._bridge.get_tool_state()
@@ -778,59 +832,6 @@ class StrixBot:
                     # In non_interactive mode, check_waiting_notification
                     # already returns None.  In interactive mode, the status
                     # panel shows "esperando" — no chat bubble needed.
-                    pass
-                elif event_name == "scan_complete":
-                    run_name = data.get("run_name", current_run or "")
-                    delta = self._bridge.to_status_dict().get("elapsed", "0s")
-
-                    if run_name and run_name not in self._final_reports_delivered:
-                        result = self._deliver_final_report(chat_id, run_name)
-                        if result == "missing":
-                            send_message(
-                                self, chat_id,
-                                "Escaneo completado.\n"
-                                "El informe final no fue generado por Strix.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                        elif result == "not_completed":
-                            send_message(
-                                self, chat_id,
-                                "Strix emitió una señal de finalización, "
-                                "pero el run todavía no está marcado como "
-                                "completed. No se envió ningún informe.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                        elif result == "send_failed":
-                            send_message(
-                                self, chat_id,
-                                "Escaneo completado.\n"
-                                "El informe fue generado pero no pudo enviarse. "
-                                "Disponible en Reportes.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                        else:
-                            send_message(
-                                self, chat_id,
-                                "Informe completo enviado como archivo Markdown.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                    else:
-                        if run_name not in self._final_reports_delivered:
-                            send_message(
-                                self, chat_id,
-                                f"Escaneo completado.\n"
-                                f"Duracion: {delta}",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                elif event_name == "scan_error":
-                    content = data.get("content", "")
-                    send_message(self, chat_id, f"Error: {escape_md(content)}", reply_markup=main_menu())
-                elif event_name == "scan_cancelled":
                     pass
 
     def _send_long_message(self, chat_id: int, text: str, sender) -> Optional[dict]:
