@@ -1,11 +1,12 @@
-"""StrixRuntimeBridge — thin projection of the official Strix TUI for Telegram.
+"""StrixRuntimeBridge — thin projection of the official Strix 1.5 TUI for Telegram.
 
-Telegram does NOT control or infer scan state. It reads directly from:
-  - AgentCoordinator.statuses   → agent state (running/waiting/completed/...)
-  - TuiLiveView.agents          → agent tree
-  - TuiLiveView.events          → chat / tool stream with event.id:event.version
-  - ReportState                 → vulnerabilities
-  - run_strix_scan return       → scan finished
+Delegates lifecycle to GoTuiRuntime WITHOUT starting the Go sidecar:
+  - GoTuiRuntime creates coordinator, live_view, controller, report_state
+  - bridge reuses init_run_state() + start_scan() for setup
+  - Agent data via coordinator.graph_snapshot()
+  - Events via live_view.events (populated by capture_event)
+  - AWAITING_USER via coordinator.wait_kind_of(agent_id) == "user"
+  - Cleanup via GoTuiRuntime.quit()
 
 No parallel event queue. No duplicate state. No synthetic lifecycle events.
 """
@@ -13,12 +14,11 @@ No parallel event queue. No duplicate state. No synthetic lifecycle events.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
 import uuid
-from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from strix_telegram_bot.config import settings
@@ -32,6 +32,7 @@ _FINAL_STOPPED = "stopped"
 _STARTUP_JOIN_TIMEOUT = 5.0
 
 _STRIX_AVAILABLE = False
+GoTuiRuntime: Any = None
 AgentCoordinator: Any = None
 run_strix_scan: Any = None
 ReportState: Any = None
@@ -48,6 +49,7 @@ DiffScopeResult: Any = None
 RepoDiffScope: Any = None
 _load_settings: Any = None
 _run_dir_for: Any = None
+send_user_message_to_agent: Any = None
 
 try:
     from strix.config import load_settings as _ls
@@ -68,9 +70,9 @@ try:
     )
     from strix.report.state import ReportState as _RS, set_global_report_state as _sgrs
     from strix.report.state import get_global_report_state as _ggrs
-    from strix.interface.tui.messages import send_user_message_to_agent as _send_umta
-
+    from strix.interface.tui.backend.messages import send_user_message_to_agent as _send_umta
     from strix.core.paths import run_dir_for as _rdir
+    from strix.interface.tui.runtime import GoTuiRuntime as _GTR
 
     AgentCoordinator = _AC
     run_strix_scan = _rss
@@ -86,10 +88,11 @@ try:
     build_diff_scope_instruction = _build_diff_instr
     _load_settings = _ls
     _run_dir_for = _rdir
+    send_user_message_to_agent = _send_umta
+    GoTuiRuntime = _GTR
     _STRIX_AVAILABLE = True
 except ImportError:
     pass
-
 
 _get_report_state = _ggrs if _STRIX_AVAILABLE else (lambda: None)
 
@@ -113,30 +116,26 @@ class StrixRuntimeBridge:
         self._stop_event = threading.Event()
         self._root_agent_id: Optional[str] = None
         self._run_name: Optional[str] = None
-        self._scan_image: str = ""
         self._start_time: float = 0.0
         self._scan_completed: bool = False
         self._scan_task: Optional[Any] = None
-        self._runner_started: bool = False
-        self._closed_runs: set[str] = set()
-        self._current_targets: list[str] = []
         self._last_error: Optional[str] = None
         self._startup_ready: threading.Event = threading.Event()
         self._startup_error: Optional[str] = None
         self._starting = False
         self._startup_abort: threading.Event = threading.Event()
-        self._scan_result: Optional[Any] = None
-        self._completion_detected: bool = False
         self._user_cancelled: bool = False
         self._terminal_kind: Optional[str] = None
-        self._original_exception: Optional[BaseException] = None
 
         self._live_view: Any = None
         self._lv_lock: threading.Lock = threading.Lock()
         self._seen_versions: dict[str, int] = {}
         self._preferred_agent_id: Optional[str] = None
+        self._current_targets: list[str] = []
+        self._closed_runs: set[str] = set()
 
-        self._last_waiting_root: Optional[str] = None
+        self._runtime: Any = None
+        self._GoTuiRuntime: Any = GoTuiRuntime
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -204,7 +203,6 @@ class StrixRuntimeBridge:
         scan_mode: str = "deep",
         scope_mode: str = "auto",
         diff_base: Optional[str] = None,
-        image: Optional[str] = None,
         local_sources: Optional[list[dict[str, str]]] = None,
     ) -> tuple[bool, str]:
         if not _STRIX_AVAILABLE:
@@ -233,7 +231,6 @@ class StrixRuntimeBridge:
                 seen_paths.add(sp)
                 merged_sources.append(s)
 
-        # ── diff_scope: mirror TUI exactly ──
         diff_scope: dict[str, Any] = {"active": False}
         try:
             diff_result = resolve_diff_scope_context(
@@ -250,45 +247,45 @@ class StrixRuntimeBridge:
                     if instruction else diff_result.instruction_block
                 )
 
-        scan_config: dict[str, Any] = {
-            "scan_id": run_name, "targets": targets_info,
-            "user_instructions": instruction, "run_name": run_name,
-            "scan_mode": scan_mode, "diff_scope": diff_scope,
-            "scope_mode": scope_mode, "diff_base": diff_base,
-            "non_interactive": False,
-            "local_sources": merged_sources, "resume_instruction": "",
-        }
-
         self._stop_event.clear()
         self._current_targets = list(targets)
-        self._coordinator = AgentCoordinator()
         self._root_agent_id = None
         self._run_name = run_name
-        self._scan_image = image or self._resolve_image()
         self._start_time = time.time()
         self._scan_completed = False
         self._scan_task = None
-        self._runner_started = False
         self._last_error = None
         self._startup_ready = threading.Event()
         self._startup_abort.clear()
         self._starting = False
         self._startup_error = None
-        self._scan_result = None
-        self._completion_detected = False
         self._user_cancelled = False
         self._terminal_kind = None
-        self._original_exception = None
         self._preferred_agent_id = None
-        self._last_waiting_root = None
-
-        self._live_view = TuiLiveView()
+        self._live_view = None
+        self._coordinator = None
+        self._runtime = None
         self._seen_versions.clear()
+
+        args = SimpleNamespace(
+            run_name=run_name,
+            targets_info=targets_info,
+            instruction=instruction or "",
+            scan_mode=scan_mode,
+            diff_scope=diff_scope,
+            scope_mode=scope_mode,
+            diff_base=diff_base,
+            local_sources=merged_sources,
+            user_explicit_instruction="",
+            max_budget_usd=None,
+            max_turns=None,
+            needs_setup=False,
+        )
 
         self._starting = True
         self._startup_abort.clear()
         self._thread = threading.Thread(
-            target=self._scan_thread, args=(scan_config, merged_sources), daemon=True)
+            target=self._scan_thread, args=(args,), daemon=True)
         self._thread.start()
 
         if not self._startup_ready.wait(timeout=5.0):
@@ -298,10 +295,6 @@ class StrixRuntimeBridge:
         return True, f"Escaneo iniciado: {run_name}"
 
     def _abort_startup(self) -> tuple[bool, str]:
-        """Timeout path: signal the scan thread to abort, cancel any pending
-        task, and join the thread UNCONDITIONALLY so the real runner can never
-        execute after we return.  If the thread refuses to die, fail closed:
-        keep the bridge blocked until the service is restarted."""
         self._startup_abort.set()
         self._startup_error = "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
         if self._loop is not None and not self._loop.is_closed():
@@ -309,12 +302,7 @@ class StrixRuntimeBridge:
             if scan_task is not None and not scan_task.done():
                 try:
                     async def _cancel_startup_task() -> None:
-                        # Only cancel an IN-FLIGHT runner.  If the runner has
-                        # not started yet, `_run_scan` sees the abort flag on
-                        # entry and returns on its own — cancelling an
-                        # un-started task would abandon an un-awaited coroutine.
-                        if self._runner_started and self._scan_task is not None \
-                                and not self._scan_task.done():
+                        if self._scan_task is not None and not self._scan_task.done():
                             self._scan_task.cancel()
                     cancel_future = asyncio.run_coroutine_threadsafe(
                         _cancel_startup_task(), self._loop)
@@ -332,35 +320,6 @@ class StrixRuntimeBridge:
                 logger.error("start_scan: startup thread still alive after join timeout")
                 return False, self._startup_error
         return False, "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
-
-    def _persist_aborted_run(self) -> None:
-        """Persist an aborted startup attempt as failed ONLY if the scan thread
-        had already created run artifacts for THIS run.  Never fabricate a run
-        or a run directory that was never started."""
-        run_name = self._run_name
-        if not run_name or _run_dir_for is None:
-            return
-        rs = _get_report_state()
-        if rs is None or getattr(rs, "run_name", None) != run_name:
-            return
-        try:
-            if rs.run_record.get("status") == _FINAL_FAILED:
-                return
-            run_dir = _run_dir_for(run_name)
-            if not (run_dir / "run.json").is_file():
-                return
-        except Exception:
-            return
-        try:
-            if self._startup_error:
-                try:
-                    rs.run_record["error"] = self._startup_error
-                except Exception:
-                    pass
-            rs.save_run_data(status=_FINAL_FAILED)
-            logger.warning("Startup abort persisted %s as failed", run_name)
-        except Exception as exc:
-            logger.warning("Failed to persist aborted startup for %s: %s", run_name, exc)
 
     @staticmethod
     def _resolve_image() -> str:
@@ -392,157 +351,56 @@ class StrixRuntimeBridge:
 
     # ── scan thread ────────────────────────────────────────────
 
-    def _scan_thread(self, scan_config: dict, local_sources: list[dict]) -> None:
+    def _scan_thread(self, args: SimpleNamespace) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
-
-        async def _poll_root() -> None:
-            for _ in range(600):
-                parent_of = getattr(self._coordinator, "parent_of", None)
-                if parent_of:
-                    for aid, p in parent_of.items():
-                        if p is None:
-                            self._root_agent_id = aid
-                            with self._lv_lock:
-                                self._live_view.upsert_agent(aid, status="running")
-                            self._emit_event("root_discovered", aid, f"Agente raiz: {aid}")
-                            return
-                await asyncio.sleep(0.1)
-            logger.warning("Root agent not discovered within 60s")
-
-        # The bridge always mirrors the official TUI: interactive=True.
-        interactive = True
-
-        async def _run_scan() -> Any:
-            if self._startup_abort.is_set():
-                return None
-            rs = ReportState(run_name=self._run_name)
-            rs.hydrate_from_run_dir()
-            rs.set_scan_config(scan_config)
-            rs.save_run_data()
-            set_global_report_state(rs)
-            live_view: Any = self._live_view
-            current_run = self._run_name
-
-            def bound_event_sink(agent_id: str, event: Any) -> None:
-                with self._lv_lock:
-                    live_view.ingest_sdk_event(agent_id, event)
-
-            if self._startup_abort.is_set():
-                return None
-            self._runner_started = True
-            return await run_strix_scan(
-                scan_config=scan_config, scan_id=current_run,
-                image=self._scan_image,
-                local_sources=scan_config.get("local_sources"),
-                coordinator=self._coordinator,
-                interactive=interactive,
-                event_sink=bound_event_sink,
-            )
-
-        async def _watch_completion(scan_task: asyncio.Task) -> None:
-            """Cancel scan_task ONLY when finish_scan completed officially.
-
-            In interactive mode, ``run_agent_loop`` parks inside
-            ``wait_for_message`` after ``finish_scan`` sets root to
-            completed.  The TUI tolerates a hung daemon thread;
-            Radamanthys cannot.
-
-            For failed/crashed/stopped: the runner propagates the real
-            exception — we must NOT cancel the task and risk masking it.
-            """
-            while not scan_task.done():
-                status = self.get_root_status()
-                if status == "completed":
-                    rs = _get_report_state()
-                    rr_status = (rs.run_record or {}).get("status") if rs else None
-                    if rr_status == "completed":
-                        self._completion_detected = True
-                        if not scan_task.done():
-                            scan_task.cancel()
-                        return
-                await asyncio.sleep(1.0)
 
         async def _main() -> None:
             if self._startup_abort.is_set():
                 return
 
-            runner_coro = _run_scan()
-            try:
-                self._scan_task = asyncio.create_task(runner_coro)
-            except BaseException:
-                # create_task failed; `_run_scan()` was never scheduled.
-                # Close the bare coroutine so it isn't GC'd as un-awaited.
-                runner_coro.close()
-                raise
-            if self._startup_abort.is_set():
-                # The abort raced in while the task was being created.  Do NOT
-                # cancel — `_run_scan` checks the flag on entry and returns
-                # immediately; draining keeps the coroutine properly awaited
-                # (cancelling an un-started task abandons it un-awaited).
-                task = self._scan_task
-                self._scan_task = None
-                if task is not None:
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                return
+            runtime = self._GoTuiRuntime(args)
+            self._runtime = runtime
+            self._coordinator = runtime.coordinator
 
-            discovery = asyncio.create_task(_poll_root())
-            watcher = asyncio.create_task(_watch_completion(self._scan_task))
+            runtime.init_run_state()
+
+            with self._lv_lock:
+                self._live_view = runtime.live_view
+            self._root_agent_id = None
+
+            runtime.start_scan()
+            self._scan_task = runtime.scan_task
+
+            discovery = asyncio.create_task(self._poll_root())
             self._startup_ready.set()
 
             try:
-                self._scan_result = await self._scan_task
+                if self._scan_task is not None:
+                    await self._scan_task
             except asyncio.CancelledError:
-                if self._startup_abort.is_set() and not self._completion_detected:
+                if self._startup_abort.is_set():
                     self._terminal_kind = _FINAL_FAILED
                     self._last_error = self._startup_error or (
                         "Escaneo abortado durante el arranque")
-                elif not self._completion_detected:
+                else:
                     self._user_cancelled = True
                     self._terminal_kind = _FINAL_STOPPED
             except Exception as e:
                 self._terminal_kind = _FINAL_FAILED
-                self._original_exception = e
                 self._last_error = str(e)
 
-            # ── single finalizer: exactly one final event ──
             self._scan_completed = True
-
-            to_cancel: list[asyncio.Task] = [discovery]
-            if watcher is not None:
-                to_cancel.append(watcher)
-            for task in to_cancel:
-                task.cancel()
+            discovery.cancel()
             try:
-                await asyncio.gather(*to_cancel, return_exceptions=True)
+                await asyncio.gather(discovery, return_exceptions=True)
             except Exception:
                 pass
 
             if self._terminal_kind is None:
-                event_type, error_msg = self._classify_scan_result()
-                if event_type == "scan_complete" and _report_md_present(self._run_name or ""):
-                    self._terminal_kind = _FINAL_COMPLETED
-                else:
-                    if error_msg and not self._last_error:
-                        self._last_error = error_msg
-                    self._terminal_kind = _FINAL_FAILED
+                self._terminal_kind = self._derive_terminal_kind()
 
-            rs = _get_report_state()
-            if rs is not None:
-                try:
-                    if self._terminal_kind == _FINAL_STOPPED:
-                        rs.save_run_data(status=_FINAL_STOPPED)
-                    elif self._terminal_kind == _FINAL_FAILED:
-                        rs.save_run_data(status=_FINAL_FAILED)
-                except Exception as exc:
-                    logger.warning("Failed to persist final state for %s: %s",
-                                   self._run_name, exc)
-
-            # Runner owns sandbox cleanup (cleanup_on_exit=True default).
-            # The bridge must not call session_manager.cleanup.
+            self._persist_final_state()
 
             if self._terminal_kind == _FINAL_COMPLETED:
                 self._emit_event("scan_complete", "", "Escaneo finalizado")
@@ -584,6 +442,81 @@ class StrixRuntimeBridge:
             loop.close()
             self._loop = None
 
+    async def _poll_root(self) -> None:
+        for _ in range(600):
+            parent_of = getattr(self._coordinator, "parent_of", None)
+            if parent_of:
+                for aid, p in parent_of.items():
+                    if p is None:
+                        self._root_agent_id = aid
+                        return
+            await asyncio.sleep(0.1)
+        logger.warning("Root agent not discovered within 60s")
+
+    # ── scan state derivation ──────────────────────────────────
+
+    def _derive_terminal_kind(self) -> str:
+        root_status = self.get_root_status()
+        rs = _get_report_state()
+        rr_status = (rs.run_record or {}).get("status") if rs else None
+
+        if root_status == "completed" and rr_status == _FINAL_COMPLETED:
+            if _report_md_present(self._run_name or ""):
+                return _FINAL_COMPLETED
+            return _FINAL_FAILED
+
+        if root_status == "stopped":
+            return _FINAL_STOPPED
+
+        if root_status in ("failed", "crashed"):
+            return _FINAL_FAILED
+
+        return _FINAL_FAILED
+
+    def _persist_final_state(self) -> None:
+        rs = _get_report_state()
+        if rs is None:
+            return
+        try:
+            if self._terminal_kind == _FINAL_STOPPED:
+                rs.save_run_data(status=_FINAL_STOPPED)
+            elif self._terminal_kind == _FINAL_FAILED:
+                if self._last_error:
+                    try:
+                        rs.run_record["error"] = self._last_error
+                    except Exception:
+                        pass
+                rs.save_run_data(status=_FINAL_FAILED)
+        except Exception as exc:
+            logger.warning("Failed to persist final state for %s: %s",
+                           self._run_name, exc)
+
+    def _persist_aborted_run(self) -> None:
+        run_name = self._run_name
+        if not run_name or _run_dir_for is None:
+            return
+        rs = _get_report_state()
+        if rs is None or getattr(rs, "run_name", None) != run_name:
+            return
+        try:
+            if rs.run_record.get("status") == _FINAL_FAILED:
+                return
+            run_dir = _run_dir_for(run_name)
+            if not (run_dir / "run.json").is_file():
+                return
+        except Exception:
+            return
+        try:
+            if self._startup_error:
+                try:
+                    rs.run_record["error"] = self._startup_error
+                except Exception:
+                    pass
+            rs.save_run_data(status=_FINAL_FAILED)
+            logger.warning("Startup abort persisted %s as failed", run_name)
+        except Exception as exc:
+            logger.warning("Failed to persist aborted startup for %s: %s", run_name, exc)
+
     # ── event emission ─────────────────────────────────────────
 
     def _emit_event(self, event_type: str, agent_id: str, content: str) -> None:
@@ -608,12 +541,6 @@ class StrixRuntimeBridge:
     # ── bot interface ──────────────────────────────────────────
 
     def poll_events(self) -> list[dict[str, Any]]:
-        """Return events whose version has changed since last poll.
-
-        Unlike _last_event_index, this tracks event.id:event.version pairs.
-        When TuiLiveView updates a tool from running→completed (bumps version
-        in-place), the updated event is re-delivered.
-        """
         with self._lv_lock:
             lv = self._live_view
             if lv is None:
@@ -634,7 +561,7 @@ class StrixRuntimeBridge:
         if not self._coordinator or not self._loop or self._loop.is_closed():
             return False
         try:
-            return _send_umta(
+            return send_user_message_to_agent(
                 coordinator=self._coordinator,
                 loop=self._loop,
                 live_view=self._live_view,
@@ -653,40 +580,27 @@ class StrixRuntimeBridge:
 
     def stop_scan(self) -> bool:
         self._stop_event.set()
-        current_run = self._run_name or ""
-        self._closed_runs.add(current_run)
-        cancel_failed = False
-        aid = self._root_agent_id or ""
-        if self._coordinator and self._loop and not self._loop.is_closed() and aid:
+        if self._runtime is None:
+            return True
+
+        quit_done = False
+        if self._loop and not self._loop.is_closed():
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._coordinator.cancel_descendants_graceful(aid), self._loop)
+                    self._runtime.quit(), self._loop)
                 future.result(timeout=30)
-                logger.info("stop_scan: agents cancelled gracefully")
+                quit_done = True
             except Exception as exc:
-                logger.warning("stop_scan: graceful cancel failed: %s", exc)
-                cancel_failed = True
-        if self._loop and not self._loop.is_closed() and self._scan_task is not None:
-            try:
-                async def _cancel_task() -> None:
-                    if self._scan_task and not self._scan_task.done():
-                        self._scan_task.cancel()
-                cancel_future = asyncio.run_coroutine_threadsafe(
-                    _cancel_task(), self._loop)
-                cancel_future.result(timeout=10)
-                logger.info("stop_scan: scan task cancelled")
-            except Exception as exc:
-                logger.warning("stop_scan: task cancel failed: %s", exc)
-                cancel_failed = True
+                logger.warning("stop_scan: quit() failed: %s", exc)
 
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=20)
         if thread and thread.is_alive():
             logger.error("stop_scan: STRIX thread still alive after join timeout")
-            cancel_failed = True
+            return False
 
-        return not cancel_failed
+        return quit_done
 
     def stop_agent(self, agent_id: str) -> bool:
         if not self._coordinator or not self._loop or self._loop.is_closed():
@@ -700,75 +614,25 @@ class StrixRuntimeBridge:
             logger.warning("stop_agent(%s) failed: %s", agent_id, exc)
             return False
 
-    def get_descendant_status_summary(self) -> dict[str, int]:
-        """Count ALL descendant agent statuses (recursive, excluding root).
-
-        Walks the parent_of graph to find every non-root agent, not just
-        direct children.  This is critical because Strix nests sub-sub-agents.
-        """
-        if not self._coordinator:
-            return {}
-        try:
-            statuses = getattr(self._coordinator, "statuses", None)
-            parent_of = getattr(self._coordinator, "parent_of", None)
-            if not statuses or not parent_of:
-                return {}
-            root = self._root_agent_id
-            counts: dict[str, int] = {}
-            for aid, s in statuses.items():
-                if aid == root:
-                    continue
-                # Walk parent chain to confirm this agent descends from root
-                current = aid
-                is_descendant = False
-                for _ in range(20):
-                    p = parent_of.get(current)
-                    if p == root:
-                        is_descendant = True
-                        break
-                    if p is None or p not in parent_of:
-                        break
-                    current = p
-                if not is_descendant:
-                    continue
-                key = str(s)
-                counts[key] = counts.get(key, 0) + 1
-            return counts
-        except Exception:
-            return {}
-
     def check_waiting_notification(self) -> Optional[dict[str, Any]]:
-        """Return an agent_waiting event when root is truly waiting for user
-        input (no descendants active).
-
-        The bridge always runs in interactive mode (TUI mirror), so root
-        == waiting with no active descendants means the agent asked for
-        user input.
-        """
         if not self._coordinator or self._scan_completed:
             return None
 
         root = self._root_agent_id
         if not root:
             return None
+
+        if self._loop is None or self._loop.is_closed():
+            return None
         try:
-            statuses = getattr(self._coordinator, "statuses", None)
-            if not statuses or root not in statuses:
-                return None
-            if str(statuses[root]) != "waiting":
-                self._last_waiting_root = None
-                return None
+            future = asyncio.run_coroutine_threadsafe(
+                self._coordinator.wait_kind_of(root), self._loop)
+            wait_kind = future.result(timeout=2.0)
         except Exception:
             return None
 
-        # In interactive mode: check if any descendants are still active
-        desc_summary = self.get_descendant_status_summary()
-        if desc_summary.get("running", 0) > 0 or desc_summary.get("waiting", 0) > 0:
+        if wait_kind != "user":
             return None
-
-        if self._last_waiting_root == root:
-            return None
-        self._last_waiting_root = root
 
         agent_name = ""
         with self._lv_lock:
@@ -790,82 +654,38 @@ class StrixRuntimeBridge:
         }
 
     def ack_waiting_notification(self) -> None:
-        """Reset waiting notification tracking (call when status changes from waiting)."""
+        pass
+
+    def get_descendant_status_summary(self) -> dict[str, int]:
         if not self._coordinator:
-            return
-        root = self._root_agent_id
-        if not root:
-            return
+            return {}
         try:
             statuses = getattr(self._coordinator, "statuses", None)
-            if statuses and root in statuses and str(statuses[root]) != "waiting":
-                self._last_waiting_root = None
+            parent_of = getattr(self._coordinator, "parent_of", None)
+            if not statuses or not parent_of:
+                return {}
+            root = self._root_agent_id
+            counts: dict[str, int] = {}
+            for aid, s in statuses.items():
+                if aid == root:
+                    continue
+                current = aid
+                is_descendant = False
+                for _ in range(20):
+                    p = parent_of.get(current)
+                    if p == root:
+                        is_descendant = True
+                        break
+                    if p is None or p not in parent_of:
+                        break
+                    current = p
+                if not is_descendant:
+                    continue
+                key = str(s)
+                counts[key] = counts.get(key, 0) + 1
+            return counts
         except Exception:
-            pass
-
-    # ── lifecycle classification ────────────────────────────────
-
-    @staticmethod
-    def _parse_scan_completed(final_output: Any) -> bool:
-        """Return True only if final_output contains scan_completed=true.
-
-        This is the canonical signal that Strix's finish_scan tool was called.
-        """
-        if isinstance(final_output, dict):
-            return bool(final_output.get("scan_completed"))
-        if isinstance(final_output, str):
-            try:
-                parsed = json.loads(final_output)
-                return bool(isinstance(parsed, dict) and parsed.get("scan_completed"))
-            except (ValueError, TypeError):
-                pass
-        return False
-
-    def _classify_scan_result(self) -> tuple[str, Optional[str]]:
-        """Classify the scan result into (event_type, error_message).
-
-        Returns one of:
-          ("scan_complete", None)       — real success
-          ("scan_error", msg)           — failure / inconsistent
-          ("scan_cancelled", None)      — user/system cancel
-
-        The caller emits the event.  Never fabricates scan_complete.
-
-        In interactive mode, the authoritative success signal is:
-          root_status == "completed" AND run_record["status"] == "completed"
-        (finish_scan persists the report before marking root completed).
-        final_output["scan_completed"] is secondary evidence.
-        """
-        root_status = self.get_root_status()
-
-        # ── primary: ReportState (authoritative for interactive mode) ──
-        rs = _get_report_state()
-        rr_status = (rs.run_record or {}).get("status") if rs else None
-        report_persisted = rr_status == "completed"
-
-        if root_status == "completed" and report_persisted:
-            return "scan_complete", None
-
-        # ── secondary: final_output (non-interactive legacy path) ─────
-        scan_completed_ok = self._parse_scan_completed(
-            getattr(self._scan_result, "final_output", None)
-        )
-        if root_status == "completed" and scan_completed_ok:
-            return "scan_complete", None
-
-        if root_status == "stopped":
-            msg = self._last_error or f"Strix detuvo el escaneo (root={root_status})"
-            return "scan_error", msg
-
-        if root_status in ("failed", "crashed"):
-            msg = self._last_error or (
-                f"Strix terminó con estado {root_status} sin completar finish_scan."
-            )
-            return "scan_error", msg
-
-        return "scan_error", (
-            "Strix terminó sin completar el lifecycle mediante finish_scan."
-        )
+            return {}
 
     # ── read-only projections ──────────────────────────────────
 
@@ -966,8 +786,7 @@ class StrixRuntimeBridge:
         }
 
     def get_vulnerabilities(self) -> list[dict[str, Any]]:
-        from strix.report.state import get_global_report_state
-        rs = get_global_report_state()
+        rs = _get_report_state()
         if rs is None:
             return []
         return list(rs.vulnerability_reports)
@@ -983,6 +802,7 @@ class StrixRuntimeBridge:
             run_json = run_dir / "run.json"
             if run_json.exists():
                 try:
+                    import json
                     data = json.loads(run_json.read_text())
                     status["mode"] = data.get("scan_mode", "unknown")
                     status["phase"] = data.get("status", "running")
@@ -1017,22 +837,11 @@ class StrixRuntimeBridge:
 
     def cleanup(self) -> None:
         self._stop_event.set()
-        aid = self._root_agent_id or ""
-        if self._coordinator and self._loop and not self._loop.is_closed() and aid:
+        if self._runtime is not None and self._loop and not self._loop.is_closed():
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._coordinator.cancel_descendants_graceful(aid), self._loop)
+                    self._runtime.quit(), self._loop)
                 future.result(timeout=30)
-            except Exception:
-                pass
-        if self._loop and not self._loop.is_closed() and self._scan_task is not None:
-            try:
-                async def _cancel_task() -> None:
-                    if self._scan_task and not self._scan_task.done():
-                        self._scan_task.cancel()
-                cancel_future = asyncio.run_coroutine_threadsafe(
-                    _cancel_task(), self._loop)
-                cancel_future.result(timeout=10)
             except Exception:
                 pass
         self._scan_completed = True

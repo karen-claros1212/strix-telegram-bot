@@ -444,13 +444,13 @@ class TestInteractiveMirror:
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        assert '"non_interactive": False' in src
+        assert "non_interactive" not in src
 
     def test_scan_thread_always_interactive(self):
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
-        assert "interactive = True" in src
+        assert "non_interactive" not in src
         assert "interactive = not non_interactive" not in src
 
     def test_bot_no_language_injection(self):
