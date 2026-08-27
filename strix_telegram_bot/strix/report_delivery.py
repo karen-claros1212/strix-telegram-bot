@@ -73,12 +73,27 @@ def deliver_report_document(
         caption=caption,
     )
 
-    if not resp or not resp.get("message_id"):
+    if not resp:
         logger.error(
-            "deliver_report: send_document failed for %s — %s",
+            "deliver_report: send_document returned None for %s",
+            run_name,
+        )
+        return "send_transient"
+
+    if not resp.get("message_id"):
+        error_code = resp.get("error_code", 0)
+        if 400 <= error_code < 500:
+            logger.error(
+                "deliver_report: send_document permanent failure for %s"
+                " — error_code=%s",
+                run_name, error_code,
+            )
+            return "send_permanent"
+        logger.error(
+            "deliver_report: send_document transient failure for %s — %s",
             run_name, resp,
         )
-        return "send_failed"
+        return "send_transient"
 
     logger.info("deliver_report: delivered for %s (message_id=%s)", run_name, resp.get("message_id"))
     return "delivered"

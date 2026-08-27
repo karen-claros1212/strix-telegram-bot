@@ -700,7 +700,6 @@ class StrixBot:
                                 self._report_pending_until[run_name] = now + 60.0
                                 self._report_pending.add(run_name)
                             elif now < pending_until:
-                                time.sleep(2.0)
                                 return
                             else:
                                 send_message(
@@ -721,7 +720,6 @@ class StrixBot:
                                 self._report_pending_until[run_name] = now + 60.0
                                 self._report_pending.add(run_name)
                             elif now < pending_until:
-                                time.sleep(2.0)
                                 return
                             else:
                                 send_message(
@@ -734,11 +732,29 @@ class StrixBot:
                                 self._terminal_notified.add(run_name)
                                 self._report_pending.discard(run_name)
                                 self._report_pending_until.pop(run_name, None)
-                        elif result == "send_failed":
+                        elif result == "send_transient":
+                            now = time.time()
+                            pending_until = self._report_pending_until.get(run_name, 0.0)
+                            if pending_until == 0.0:
+                                self._report_pending_until[run_name] = now + 60.0
+                                self._report_pending.add(run_name)
+                            elif now >= pending_until:
+                                send_message(
+                                    self, chat_id,
+                                    "Escaneo completado.\n"
+                                    "El informe fue generado pero no pudo enviarse tras varios intentos. "
+                                    "Disponible en Reportes.",
+                                    reply_markup=main_menu(),
+                                    parse_mode=None,
+                                )
+                                self._terminal_notified.add(run_name)
+                                self._report_pending.discard(run_name)
+                                self._report_pending_until.pop(run_name, None)
+                        elif result == "send_permanent":
                             send_message(
                                 self, chat_id,
                                 "Escaneo completado.\n"
-                                "El informe fue generado pero no pudo enviarse. "
+                                "El informe fue generado pero no pudo enviarse (error permanente). "
                                 "Disponible en Reportes.",
                                 reply_markup=main_menu(),
                                 parse_mode=None,
@@ -782,11 +798,14 @@ class StrixBot:
                     pass  # Panel edit is best-effort; don't crash drain loop
 
             if not status.get("is_active") and run_name:
-                self._active_job_chat_id = None
-                self._active_job_message_id = None
-                self._active_job_run_name = None
-                self._active_chat_agent_id = None
-                self._active_chat_message_id = None
+                if run_name in self._report_pending:
+                    pass  # Keep chat_id alive for retry
+                else:
+                    self._active_job_chat_id = None
+                    self._active_job_message_id = None
+                    self._active_job_run_name = None
+                    self._active_chat_agent_id = None
+                    self._active_chat_message_id = None
 
         # Live refresh: if a chat view is open, push latest agent timeline
         # Throttled: max 1 refresh per 3s, and only when signature changes

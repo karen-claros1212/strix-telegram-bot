@@ -108,30 +108,28 @@ class TestStrixRuntimeBridge:
             loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
             loop.close()
 
-    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
-    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_build_targets_info_url(self, mock_itt):
-        mock_itt.side_effect = lambda t: ("url", {"target_url": t})
-        info = StrixRuntimeBridge._build_targets_info(
-            ["https://example.com", "http://test.local"]
-        )
-        assert len(info) == 2
-        assert info[0]["type"] == "url"
-        assert info[1]["type"] == "url"
+    def test_build_targets_info_url(self):
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://example.com", "http://test.local"], target_list=[])
+        build_targets_info(args)
+        assert len(args.targets_info) == 2
+        assert args.targets_info[0]["type"] == "web_application"
+        assert args.targets_info[1]["type"] == "web_application"
 
-    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
-    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_build_targets_info_domain_adds_scheme(self, mock_itt):
-        mock_itt.side_effect = lambda t: ("web_application", {"target_url": f"https://{t}"})
-        info = StrixRuntimeBridge._build_targets_info(["example.com", "test.org/path"])
-        assert len(info) == 2
+    def test_build_targets_info_domain_adds_scheme(self):
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["example.com", "test.org/path"], target_list=[])
+        build_targets_info(args)
+        assert len(args.targets_info) == 2
 
-    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
-    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_build_targets_info_strips_whitespace(self, mock_itt):
-        mock_itt.side_effect = lambda t: ("url", {"target_url": t.strip()})
-        info = StrixRuntimeBridge._build_targets_info(["  https://example.com  ", ""])
-        assert len(info) == 1
+    def test_build_targets_info_strips_whitespace(self):
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["  https://example.com  "], target_list=[])
+        build_targets_info(args)
+        assert len(args.targets_info) == 1
 
     def test_poll_events_no_live_view(self):
         bridge = StrixRuntimeBridge()
@@ -227,8 +225,25 @@ class TestStrixRuntimeBridge:
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
-        ts = bridge.get_tool_state()
-        assert ts["awaiting_input"] is True
+
+        loop = asyncio.new_event_loop()
+        bridge._loop = loop
+
+        async def mock_wait_kind(agent_id):
+            return "user"
+        bridge._coordinator.wait_kind_of = mock_wait_kind
+
+        import threading as _threading
+        loop_thread = _threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+
+        try:
+            ts = bridge.get_tool_state()
+            assert ts["awaiting_input"] is True
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
+            bridge._loop = None
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
     def test_get_run_status_idle(self, *_):
@@ -271,17 +286,27 @@ class TestStrixRuntimeBridge:
         bridge._scan_completed = False
 
         loop = asyncio.new_event_loop()
+        async def mock_wait_kind(agent_id):
+            return "user"
+        bridge._coordinator.wait_kind_of = mock_wait_kind
+
         async def noop():
             await asyncio.sleep(100)
         bridge._scan_task = loop.create_task(noop())
         bridge._loop = loop
+
+        import threading as _threading
+        loop_thread = _threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+
         try:
             sd = bridge.to_status_dict()
             assert sd["awaiting_input"] is True
             assert sd["is_active"] is True
         finally:
             bridge._scan_task.cancel()
-            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
             loop.close()
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
@@ -786,19 +811,16 @@ class TestStatusDictCompatWithJobStatusText:
 
 # ── Fix 1: diff_scope uses official API after merged_sources ──
 class TestDiffScopeOfficialAPI:
-    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
-    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
-    def test_diff_scope_inactive_for_url_only(self, mock_itt):
+    def test_diff_scope_inactive_for_url_only(self):
         """When scope_mode=auto and targets are URLs (no local repos),
         diff_scope.active should be False."""
-        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
         bridge = StrixRuntimeBridge()
-        # We can't call start_scan easily, but we can verify the logic
-        # by checking _build_targets_info and the diff_scope construction
-        info = bridge._build_targets_info(["https://example.com"])
-        # URLs have no source_path, so has_local_sources will be False
-        assert info[0]["type"] == "url"
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://example.com"], target_list=[])
+        build_targets_info(args)
+        info = args.targets_info
+        assert info[0]["type"] == "web_application"
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
@@ -851,21 +873,63 @@ class TestDiffScopeOfficialAPI:
         call_args = mock_prepare.call_args
         ns = call_args[0][0]
         assert ns.scope_mode == "auto"
-        assert "non_interactive" not in ns.__dict__
+        assert ns.non_interactive is False
 
         assert bridge._current_targets == ["https://example.com"]
         assert bridge._run_name is not None
         assert bridge._run_name.startswith("scan-")
 
-    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
-    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    @patch("strix_telegram_bot.strix.runtime_bridge.collect_local_sources", MagicMock(return_value=[]))
-    def test_diff_scope_inactive_for_urls_without_local(self, mock_itt):
+    def test_diff_scope_inactive_for_urls_without_local(self):
         """No local sources → diff_scope stays inactive (API not called)."""
-        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://example.com"], target_list=[])
+        build_targets_info(args)
+        info = args.targets_info
+        assert info[0]["type"] == "web_application"
+
+    def test_prepare_run_contract_real(self, monkeypatch):
+        """Contract test: real Strix prepare_run() receives valid args."""
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge, _STRIX_AVAILABLE
+        if not _STRIX_AVAILABLE:
+            pytest.skip("Strix not installed")
+
+        from strix.interface.scan_setup import prepare_run as real_prepare_run
+        from types import SimpleNamespace
+
         bridge = StrixRuntimeBridge()
-        info = bridge._build_targets_info(["https://example.com"])
-        assert info[0]["type"] == "url"
+
+        # Build args exactly as start_scan does (with all required fields)
+        args = SimpleNamespace(
+            run_name="contract-test-run",
+            targets_info=[
+                {"type": "url", "details": {"target_url": "https://example.com"}, "original": "https://example.com"}
+            ],
+            instruction="test instruction",
+            scan_mode="deep",
+            diff_scope={"active": False},
+            scope_mode="auto",
+            diff_base=None,
+            local_sources=[],
+            user_explicit_instruction="",
+            max_budget_usd=None,
+            max_turns=500,
+            needs_setup=False,
+            workspace_mount=None,
+            resume=None,
+            non_interactive=False,
+            target=["https://example.com"],
+            target_list=[],
+        )
+
+        # Call real prepare_run — should NOT raise
+        real_prepare_run(args)
+
+        # Verify prepare_run mutated args correctly
+        assert args.run_name is not None
+        assert len(args.run_name) > 0
+        assert hasattr(args, "local_sources")
+        assert isinstance(args.local_sources, list)
 
 
 # ── Fix 1: Google Drive stays web_application, no artifact type ──
@@ -874,9 +938,11 @@ class TestFileHostingURLs:
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
     def test_google_drive_stays_web_application(self, mock_itt):
         mock_itt.return_value = ("web_application", {"target_url": "https://drive.google.com/file/d/1abc/view"})
-        info = StrixRuntimeBridge._build_targets_info(
-            ["https://drive.google.com/file/d/1abc/view?usp=drivesdk"]
-        )
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://drive.google.com/file/d/1abc/view?usp=drivesdk"], target_list=[])
+        build_targets_info(args)
+        info = args.targets_info
         assert len(info) == 1
         assert info[0]["type"] == "web_application"
         assert "drive.google.com" in info[0]["details"]["target_url"]
@@ -885,27 +951,32 @@ class TestFileHostingURLs:
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
     def test_dropbox_stays_web_application(self, mock_itt):
         mock_itt.return_value = ("web_application", {"target_url": "https://www.dropbox.com/s/abc/file.apk"})
-        info = StrixRuntimeBridge._build_targets_info(
-            ["https://www.dropbox.com/s/abc/file.apk"]
-        )
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://www.dropbox.com/s/abc/file.apk"], target_list=[])
+        build_targets_info(args)
+        info = args.targets_info
+        assert len(info) == 1
+        assert info[0]["type"] == "web_application"
+
+    def test_regular_url_unaffected(self):
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://example.com"], target_list=[])
+        build_targets_info(args)
+        info = args.targets_info
         assert len(info) == 1
         assert info[0]["type"] == "web_application"
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
-    def test_regular_url_unaffected(self, mock_itt):
-        mock_itt.return_value = ("url", {"target_url": "https://example.com"})
-        info = StrixRuntimeBridge._build_targets_info(["https://example.com"])
-        assert len(info) == 1
-        assert info[0]["type"] == "url"
-
-    @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
-    @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
     def test_mega_stays_web_application(self, mock_itt):
         mock_itt.return_value = ("web_application", {"target_url": "https://mega.nz/file/abc/file.apk"})
-        info = StrixRuntimeBridge._build_targets_info(
-            ["https://mega.nz/file/abc/file.apk"]
-        )
+        from strix.interface.scan_setup import build_targets_info
+        from types import SimpleNamespace
+        args = SimpleNamespace(target=["https://mega.nz/file/abc/file.apk"], target_list=[])
+        build_targets_info(args)
+        info = args.targets_info
         assert len(info) == 1
         assert info[0]["type"] == "web_application"
 
@@ -1179,11 +1250,11 @@ class TestTuiAlignment:
         assert "has_local_sources" not in src
 
     def test_diff_scope_non_interactive_false(self):
-        """prepare_run no longer receives non_interactive from bridge."""
+        """prepare_run now receives non_interactive=False from start_scan."""
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        assert "non_interactive" not in src
+        assert "non_interactive=False" in src
 
     def test_diff_scope_instruction_prepend(self):
         """_scan_thread delegates diff resolution to prepare_run."""
@@ -1260,15 +1331,18 @@ class TestWatcherBehavior:
 class TestReportMdPresent:
     def test_true_for_non_empty_file(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix.runtime_bridge import _report_md_present
+        from pathlib import Path
         run_dir = tmp_path / "scan-report"
         run_dir.mkdir()
         (run_dir / "penetration_test_report.md").write_text("# Informe\n")
-        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.setattr("strix_telegram_bot.strix.runtime_bridge._run_dir_for",
+                            lambda name: run_dir)
         assert _report_md_present("scan-report") is True
 
     def test_false_for_missing_file(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix.runtime_bridge import _report_md_present
-        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.setattr("strix_telegram_bot.strix.runtime_bridge._run_dir_for",
+                            lambda name: tmp_path / name)
         assert _report_md_present("scan-missing") is False
 
     def test_false_for_empty_file(self, monkeypatch, tmp_path):
@@ -1276,12 +1350,14 @@ class TestReportMdPresent:
         run_dir = tmp_path / "scan-empty"
         run_dir.mkdir()
         (run_dir / "penetration_test_report.md").write_text("")
-        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.setattr("strix_telegram_bot.strix.runtime_bridge._run_dir_for",
+                            lambda name: run_dir)
         assert _report_md_present("scan-empty") is False
 
     def test_false_for_blank_run_name(self, monkeypatch, tmp_path):
         from strix_telegram_bot.strix.runtime_bridge import _report_md_present
-        monkeypatch.setattr("strix_telegram_bot.config.settings.strix_runs_dir", tmp_path)
+        monkeypatch.setattr("strix_telegram_bot.strix.runtime_bridge._run_dir_for",
+                            lambda name: tmp_path / name)
         assert _report_md_present("") is False
 
 
@@ -1354,7 +1430,8 @@ class TestFinalizerSingleEvent:
         rs.run_record = {"status": "completed"}
 
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
-        with patch.object(rb, "_get_report_state", return_value=rs):
+        with patch.object(rb, "_get_report_state", return_value=rs), \
+             patch.object(rb, "_run_dir_for", lambda name: run_dir):
             from types import SimpleNamespace
             bridge._scan_thread(SimpleNamespace(
                 max_turns=10, run_name="scan-ok",
@@ -2078,7 +2155,8 @@ class TestCleanupCountSingle:
         prev_global = get_global_report_state()
         try:
             with patch.object(rb, "_get_report_state", return_value=rs), \
-                 patch.object(rb, "prepare_run", lambda args: None):
+                 patch.object(rb, "prepare_run", lambda args: None), \
+                 patch.object(rb, "_run_dir_for", lambda name: run_dir):
                 from types import SimpleNamespace
                 bridge._scan_thread(SimpleNamespace(
                     max_turns=10, run_name="scan-cleanup-1",

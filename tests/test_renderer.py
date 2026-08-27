@@ -240,7 +240,11 @@ class TestScanCompleteCycle:
         (run_dir / "run.json").write_text(json.dumps({"status": "completed", "run_name": run_name}))
         (run_dir / "penetration_test_report.md").write_text("# Report\n")
 
-        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
+        status_dict = {"run_name": run_name, "phase": "completed", "is_active": False,
+                        "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                        "awaiting_input": False, "input_prompt": ""}
+        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir), \
+             patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
             bot._drain_update_queue()
 
         mock_send_doc.assert_called_once()
@@ -459,7 +463,7 @@ class TestInteractiveMirror:
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        assert "non_interactive" not in src
+        assert "non_interactive=False" in src
 
     def test_scan_thread_always_interactive(self):
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
@@ -764,7 +768,11 @@ class TestDeliverFinalReport:
         bot._bridge._root_agent_id = "root"
         run_dir = self._setup_run_dir(tmp_path, "scan-confirm")
 
-        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
+        status_dict = {"run_name": "scan-confirm", "phase": "completed", "is_active": False,
+                        "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                        "awaiting_input": False, "input_prompt": ""}
+        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir), \
+             patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
             bot._drain_update_queue()
 
         mock_send_doc.assert_called_once()
@@ -785,7 +793,11 @@ class TestDeliverFinalReport:
         bot._bridge._root_agent_id = "root"
         run_dir = self._setup_run_dir(tmp_path, "scan-idempotent")
 
-        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
+        status_dict = {"run_name": "scan-idempotent", "phase": "completed", "is_active": False,
+                        "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                        "awaiting_input": False, "input_prompt": ""}
+        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir), \
+             patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
             bot._drain_update_queue()
             count_first = mock_send_doc.call_count
             bot._drain_update_queue()
@@ -795,14 +807,14 @@ class TestDeliverFinalReport:
         assert count_second == 1
 
     def test_send_document_failure(self, bot, mock_telegram, mock_send_doc, tmp_path):
-        """If send_document returns None, result is send_failed."""
+        """If send_document returns None, result is send_transient."""
         mock_send_doc.return_value = None
         run_dir = self._setup_run_dir(tmp_path, "scan-doc-fail")
 
         with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
             result = bot._deliver_final_report(12345, "scan-doc-fail")
 
-        assert result == "send_failed"
+        assert result == "send_transient"
         assert "scan-doc-fail" not in bot._final_reports_delivered
 
     def test_missing_report_returns_missing(self, bot, mock_telegram, mock_send_doc, tmp_path):
@@ -845,7 +857,11 @@ class TestDeliverFinalReport:
         bot._bridge._root_agent_id = "root"
         run_dir = self._setup_run_dir(tmp_path, "scan-delivered")
 
-        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
+        status_dict = {"run_name": "scan-delivered", "phase": "completed", "is_active": False,
+                        "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                        "awaiting_input": False, "input_prompt": ""}
+        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir), \
+             patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
             bot._drain_update_queue()
 
         mock_send_doc.assert_called_once()
@@ -866,7 +882,11 @@ class TestDeliverFinalReport:
         bot._bridge._root_agent_id = "root"
         run_dir = self._setup_run_dir(tmp_path, "scan-parse")
 
-        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
+        status_dict = {"run_name": "scan-parse", "phase": "completed", "is_active": False,
+                        "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                        "awaiting_input": False, "input_prompt": ""}
+        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir), \
+             patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
             bot._drain_update_queue()
 
         for call in mock_send.call_args_list:
