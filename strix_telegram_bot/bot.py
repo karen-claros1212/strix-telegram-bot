@@ -59,7 +59,10 @@ class StrixBot:
         self._active_chat_chat_id: Optional[int] = None
 
         self._final_reports_delivered: set[str] = set()
-        self._terminal_handled: set[str] = set()
+        self._terminal_notified: set[str] = set()
+        self._report_delivered: set[str] = set()
+        self._report_pending: set[str] = set()
+        self._report_pending_until: dict[str, float] = {}
 
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
@@ -604,10 +607,14 @@ class StrixBot:
 
         run_name = self._bridge.run_name or f"scan-{time.time():.0f}"
 
+        try:
+            mode_enum = ScanMode(scan_mode)
+        except ValueError:
+            mode_enum = ScanMode.DEEP
         job = JobState(
             run_name=run_name,
             target=targets,
-            mode=ScanMode.DEEP,
+            mode=mode_enum,
             phase=JobPhase.SCANNING,
             instruction=instruction,
         )
@@ -629,7 +636,10 @@ class StrixBot:
         self._chat_event_version.clear()
         self._tool_message_ids.clear()
         self._final_reports_delivered.clear()
-        self._terminal_handled.clear()
+        self._terminal_notified.clear()
+        self._report_delivered.clear()
+        self._report_pending.clear()
+        self._report_pending_until.clear()
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
@@ -664,33 +674,66 @@ class StrixBot:
                     job.error = status.get("error")
                     self._job_store.save(job)
 
+                chat_id = self._active_job_chat_id
                 if (
                     run_name
-                    and run_name not in self._terminal_handled
-                    and self._active_job_chat_id is not None
+                    and chat_id is not None
+                    and run_name not in self._report_delivered
+                    and run_name not in self._terminal_notified
                 ):
-                    self._terminal_handled.add(run_name)
                     phase_str = status.get("phase", "running")
-                    chat_id = self._active_job_chat_id
+
                     if phase_str == "completed":
                         result = self._deliver_final_report(chat_id, run_name)
-                        if result == "missing":
+                        if result == "delivered":
+                            self._report_delivered.add(run_name)
                             send_message(
                                 self, chat_id,
-                                "Escaneo completado.\n"
-                                "El informe final no fue generado por Strix.",
+                                "Informe completo enviado como archivo Markdown.",
                                 reply_markup=main_menu(),
                                 parse_mode=None,
                             )
                         elif result == "not_completed":
-                            send_message(
-                                self, chat_id,
-                                "Strix emitió una señal de finalización, "
-                                "pero el run todavía no está marcado como "
-                                "completed. No se envió ningún informe.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
+                            now = time.time()
+                            pending_until = self._report_pending_until.get(run_name, 0.0)
+                            if pending_until == 0.0:
+                                self._report_pending_until[run_name] = now + 60.0
+                                self._report_pending.add(run_name)
+                            elif now < pending_until:
+                                time.sleep(2.0)
+                                return
+                            else:
+                                send_message(
+                                    self, chat_id,
+                                    "Strix emitió una señal de finalización, "
+                                    "pero el run todavía no está marcado como "
+                                    "completed. No se envió ningún informe.",
+                                    reply_markup=main_menu(),
+                                    parse_mode=None,
+                                )
+                                self._terminal_notified.add(run_name)
+                                self._report_pending.discard(run_name)
+                                self._report_pending_until.pop(run_name, None)
+                        elif result == "missing":
+                            now = time.time()
+                            pending_until = self._report_pending_until.get(run_name, 0.0)
+                            if pending_until == 0.0:
+                                self._report_pending_until[run_name] = now + 60.0
+                                self._report_pending.add(run_name)
+                            elif now < pending_until:
+                                time.sleep(2.0)
+                                return
+                            else:
+                                send_message(
+                                    self, chat_id,
+                                    "Escaneo completado.\n"
+                                    "El informe final no fue generado por Strix.",
+                                    reply_markup=main_menu(),
+                                    parse_mode=None,
+                                )
+                                self._terminal_notified.add(run_name)
+                                self._report_pending.discard(run_name)
+                                self._report_pending_until.pop(run_name, None)
                         elif result == "send_failed":
                             send_message(
                                 self, chat_id,
@@ -700,21 +743,20 @@ class StrixBot:
                                 reply_markup=main_menu(),
                                 parse_mode=None,
                             )
-                        else:
-                            send_message(
-                                self, chat_id,
-                                "Informe completo enviado como archivo Markdown.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                    elif phase_str == "failed":
-                        error_msg = status.get("error") or "Escaneo terminó con error"
+                            self._terminal_notified.add(run_name)
+                    elif phase_str in ("failed", "stopped"):
                         send_message(
                             self, chat_id,
-                            f"Error: {escape_md(error_msg)}",
+                            "El análisis terminó con error antes de generar el informe oficial. "
+                            "No se produjo ningún archivo Markdown para este run.",
                             reply_markup=main_menu(),
                             parse_mode=None,
                         )
+                        self._terminal_notified.add(run_name)
+                    else:
+                        if run_name not in self._report_pending:
+                            self._report_pending.add(run_name)
+                            self._report_pending_until[run_name] = time.time() + 60.0
 
         if self._active_job_chat_id is not None and self._active_job_message_id is not None:
             tool_state = self._bridge.get_tool_state()

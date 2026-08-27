@@ -3,9 +3,10 @@
 Delegates lifecycle to GoTuiRuntime WITHOUT starting the Go sidecar:
   - GoTuiRuntime creates coordinator, live_view, controller, report_state
   - bridge reuses init_run_state() + start_scan() for setup
-  - Agent data via coordinator.graph_snapshot()
+  - Agent data via coordinator.graph_snapshot() (parent_of, statuses, names, errors)
   - Events via live_view.events (populated by capture_event)
-  - AWAITING_USER via coordinator.wait_kind_of(agent_id) == "user"
+  - AWAITING_USER requires both coordinator.wait_kind_of == "user" AND status == "waiting"
+  - Lifecycle driven by scan_task.done(), NOT root agent status
   - Cleanup via GoTuiRuntime.quit()
 
 No parallel event queue. No duplicate state. No synthetic lifecycle events.
@@ -18,6 +19,7 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -30,6 +32,26 @@ _FINAL_FAILED = "failed"
 _FINAL_STOPPED = "stopped"
 
 _STARTUP_JOIN_TIMEOUT = 5.0
+
+SPANISH_DIRECTIVE = (
+    "Todas las comunicaciones dirigidas al usuario deben estar en español.\n"
+    "El informe final y su narrativa deben estar en español.\n"
+    "Conserva literalmente código, comandos, URLs, endpoints, payloads, "
+    "encabezados, rutas, nombres de herramientas, CVE/CWE e identificadores técnicos."
+)
+
+
+@dataclass
+class ScanContext:
+    original_instruction: str
+    effective_strix_instruction: str = field(default="")
+
+    def __post_init__(self) -> None:
+        if not self.effective_strix_instruction:
+            self.effective_strix_instruction = (
+                SPANISH_DIRECTIVE + "\n\n" + self.original_instruction
+            )
+
 
 _STRIX_AVAILABLE = False
 GoTuiRuntime: Any = None
@@ -161,23 +183,28 @@ class StrixRuntimeBridge:
 
     @property
     def is_running(self) -> bool:
-        if self._scan_completed:
+        if self._startup_abort.is_set():
             return False
         if self._starting:
             return True
-        if not self._coordinator:
-            return self._scan_task is not None
-        try:
-            statuses = getattr(self._coordinator, "statuses", None)
-            if not statuses:
-                return self._scan_task is not None
-            root = self._root_agent_id
-            if root and root in statuses:
-                s = str(statuses[root])
-                return s in ("running", "waiting")
-            return any(str(s) == "running" for s in statuses.values())
-        except Exception:
-            return self._scan_task is not None
+        if self._scan_task is not None and not self._scan_task.done():
+            return True
+        if self._scan_task is not None and self._scan_task.done():
+            if self._last_error is not None:
+                return False
+            if self._runtime is not None:
+                ctrl = getattr(self._runtime, "controller", None)
+                if ctrl is not None:
+                    scan_state = getattr(ctrl, "scan_state", None)
+                    if scan_state in ("running", "waiting"):
+                        return True
+            rs = _get_report_state()
+            if rs is not None and rs.run_record:
+                rr_status = rs.run_record.get("status")
+                if rr_status in ("running", "waiting"):
+                    return True
+            return False
+        return False
 
     @property
     def is_actively_working(self) -> bool:
@@ -226,6 +253,7 @@ class StrixRuntimeBridge:
         if self.is_running:
             return False, "Ya hay un escaneo en ejecucion"
 
+        ctx = ScanContext(original_instruction=instruction or "")
         run_name = f"scan-{uuid.uuid4().hex[:8]}"
         try:
             targets_info = self._build_targets_info(targets)
@@ -255,7 +283,7 @@ class StrixRuntimeBridge:
         args = SimpleNamespace(
             run_name=run_name,
             targets_info=targets_info,
-            instruction=instruction or "",
+            instruction=ctx.effective_strix_instruction,
             scan_mode=scan_mode,
             diff_scope={"active": False},
             scope_mode=scope_mode,
@@ -265,8 +293,6 @@ class StrixRuntimeBridge:
             max_budget_usd=None,
             max_turns=_normalize_max_turns(DEFAULT_MAX_TURNS),
             needs_setup=False,
-            non_interactive=True,
-            resume=run_name,
             workspace_mount=None,
         )
 
@@ -345,6 +371,7 @@ class StrixRuntimeBridge:
 
         async def _main() -> None:
             if self._startup_abort.is_set():
+                self._scan_completed = True
                 return
 
             args.max_turns = _normalize_max_turns(args.max_turns)
@@ -357,6 +384,7 @@ class StrixRuntimeBridge:
                     self._startup_error = f"Preparación del escaneo falló: {exc}"
                     self._scan_completed = True
                     return
+                self._run_name = args.run_name
                 if args.local_sources is None:
                     args.local_sources = []
                 for s in (user_local_sources or []):
@@ -366,14 +394,15 @@ class StrixRuntimeBridge:
 
             runtime = self._GoTuiRuntime(args)
             if self._startup_abort.is_set():
+                self._scan_completed = True
                 return
             self._runtime = runtime
             self._coordinator = runtime.coordinator
 
             runtime.init_run_state()
             if self._startup_abort.is_set():
+                self._scan_completed = True
                 return
-            runtime.scan_config["non_interactive"] = True
 
             with self._lv_lock:
                 self._live_view = runtime.live_view
@@ -381,6 +410,7 @@ class StrixRuntimeBridge:
 
             runtime.start_scan()
             if self._startup_abort.is_set():
+                self._scan_completed = True
                 return
             self._scan_task = runtime.scan_task
 
@@ -474,6 +504,16 @@ class StrixRuntimeBridge:
             return _FINAL_STOPPED
 
         if root_status in ("failed", "crashed"):
+            error_msg = ""
+            if self._runtime is not None:
+                ctrl = getattr(self._runtime, "controller", None)
+                if ctrl is not None:
+                    error_msg = getattr(ctrl, "error", "") or ""
+            if "context size" in error_msg.lower():
+                logger.error(
+                    "ROOT FAILED BEFORE FINISH_SCAN → OFFICIAL REPORT NOT PRODUCED. "
+                    "Context size exceeded. Root agent death means finish_scan never ran."
+                )
             return _FINAL_FAILED
 
         return _FINAL_FAILED
@@ -610,6 +650,10 @@ class StrixRuntimeBridge:
             return None
 
         for agent_id in list(statuses.keys()):
+            agent_status = str(statuses.get(agent_id, ""))
+            if agent_status != "waiting":
+                continue
+
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._coordinator.wait_kind_of(agent_id), self._loop)
@@ -678,13 +722,25 @@ class StrixRuntimeBridge:
     # ── read-only projections ──────────────────────────────────
 
     def get_agent_tree(self) -> Optional[dict[str, Any]]:
-        with self._lv_lock:
-            lv = self._live_view
-            if lv is None:
-                return None
-            tree: dict[str, Any] = {"agents": {}}
-            for aid, info in lv.agents.items():
-                tree["agents"][aid] = dict(info)
+        if not self._coordinator or not self._loop or self._loop.is_closed():
+            return None
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._coordinator.graph_snapshot(), self._loop)
+            result = future.result(timeout=3.0)
+        except Exception:
+            return None
+        parent_of, statuses, names = result[0], result[1], result[2]
+        errors = result[3] if len(result) > 3 else {}
+        tree: dict[str, Any] = {"agents": {}}
+        for aid in statuses:
+            tree["agents"][aid] = {
+                "id": aid,
+                "name": names.get(aid, aid),
+                "status": str(statuses[aid]),
+                "parent_id": parent_of.get(aid),
+                "error": errors.get(aid) if errors else None,
+            }
         return tree
 
     def list_agents(self) -> list[dict]:

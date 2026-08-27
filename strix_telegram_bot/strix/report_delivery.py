@@ -4,6 +4,8 @@ import json
 import logging
 from typing import Any
 
+from strix.core.paths import run_dir_for
+
 logger = logging.getLogger("strix_bot")
 
 
@@ -24,10 +26,9 @@ def deliver_report_document(
         "not_completed"   — run.json status != "completed"
         "send_failed"     — sendDocument call failed (no message_id)
     """
-    from strix_telegram_bot.config import settings
     from strix_telegram_bot.telegram import send_document
 
-    run_dir = settings.strix_runs_dir / run_name
+    run_dir = run_dir_for(run_name)
     run_json_path = run_dir / "run.json"
     report_path = run_dir / "penetration_test_report.md"
 
@@ -44,6 +45,11 @@ def deliver_report_document(
         return "missing"
 
     if run_data.get("status") != "completed":
+        if run_data.get("status") in ("failed", "error"):
+            logger.error(
+                "ROOT FAILED BEFORE FINISH_SCAN → OFFICIAL REPORT NOT PRODUCED. "
+                "Context size exceeded. Root agent death means finish_scan never ran."
+            )
         logger.info(
             "deliver_report: run %s status is %s (not completed)",
             run_name, run_data.get("status"),

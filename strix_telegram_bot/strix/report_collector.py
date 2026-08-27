@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from strix_telegram_bot.config import settings
 from strix_telegram_bot.safety.redaction import redact_text
+from strix_telegram_bot.strix import report_delivery
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
 
 
@@ -17,12 +17,9 @@ class ReportCollector:
         self._collected: list[dict] = []
 
     def _resolve_dir(self) -> Optional[Path]:
-        for candidate in [
-            settings.strix_runs_dir / self.run_name,
-            Path.cwd() / "strix_runs" / self.run_name,
-        ]:
-            if candidate.exists():
-                return candidate
+        run_dir = report_delivery.run_dir_for(self.run_name)
+        if run_dir.exists():
+            return run_dir
         return None
 
     def collect(self) -> list[dict]:
@@ -171,7 +168,7 @@ class ReportCollector:
         "completed"`` AND its ``penetration_test_report.md`` exists and
         is non-empty.  No partial runs, no report fallback across runs.
         """
-        runs_dir = settings.strix_runs_dir
+        runs_dir = report_delivery.run_dir_for("")
         if not runs_dir.exists():
             return []
         jobs = []

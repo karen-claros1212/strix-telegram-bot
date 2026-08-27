@@ -9,7 +9,7 @@ def test_job_state_defaults():
     job = JobState(run_name="test-run", target=["https://example.com"])
     assert job.run_name == "test-run"
     assert job.phase == JobPhase.CREATED
-    assert job.mode == ScanMode.DEEP
+    assert job.mode == ScanMode.QUICK
     assert job.is_active is False
     assert job.is_terminal is False
 

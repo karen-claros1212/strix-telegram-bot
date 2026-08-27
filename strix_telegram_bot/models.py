@@ -49,7 +49,7 @@ class MenuState(str, Enum):
 class JobState:
     run_name: str
     target: list[str]
-    mode: ScanMode = ScanMode.DEEP
+    mode: ScanMode = ScanMode.QUICK
     phase: JobPhase = JobPhase.CREATED
     instruction: str = ""
     start_time: float = field(default_factory=time.time)
@@ -102,7 +102,7 @@ class JobState:
         return cls(
             run_name=d["run_name"],
             target=d.get("target", []),
-            mode=ScanMode(d.get("mode", "deep")),
+            mode=ScanMode(d.get("mode", "quick")),
             phase=JobPhase(d.get("phase", "created")),
             instruction=d.get("instruction", ""),
             start_time=d.get("start_time", time.time()),

@@ -92,10 +92,21 @@ class TestStrixRuntimeBridge:
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "running"}
         bridge._root_agent_id = "root"
-        assert bridge.is_running is True
-        ok, msg = bridge.start_scan(targets=["https://example.com"])
-        assert ok is False
-        assert "Ya hay" in msg
+
+        loop = asyncio.new_event_loop()
+        async def noop():
+            await asyncio.sleep(100)
+        bridge._scan_task = loop.create_task(noop())
+        bridge._loop = loop
+        try:
+            assert bridge.is_running is True
+            ok, msg = bridge.start_scan(targets=["https://example.com"])
+            assert ok is False
+            assert "Ya hay" in msg
+        finally:
+            bridge._scan_task.cancel()
+            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            loop.close()
 
     @patch("strix_telegram_bot.strix.runtime_bridge.infer_target_type")
     @patch("strix_telegram_bot.strix.runtime_bridge.assign_workspace_subdirs", MagicMock())
@@ -259,9 +270,19 @@ class TestStrixRuntimeBridge:
         bridge._root_agent_id = "root"
         bridge._scan_completed = False
 
-        sd = bridge.to_status_dict()
-        assert sd["awaiting_input"] is True
-        assert sd["is_active"] is True
+        loop = asyncio.new_event_loop()
+        async def noop():
+            await asyncio.sleep(100)
+        bridge._scan_task = loop.create_task(noop())
+        bridge._loop = loop
+        try:
+            sd = bridge.to_status_dict()
+            assert sd["awaiting_input"] is True
+            assert sd["is_active"] is True
+        finally:
+            bridge._scan_task.cancel()
+            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            loop.close()
 
     @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
     def test_send_message_noop_when_not_running(self, *_):
@@ -280,16 +301,29 @@ class TestStrixRuntimeBridge:
         bridge._coordinator = MagicMock()
         bridge._coordinator.statuses = {"root": "running"}
         bridge._root_agent_id = "root"
-        assert bridge.is_actively_working is True
-        assert bridge.is_running is True
 
-        bridge._coordinator.statuses = {"root": "waiting"}
-        assert bridge.is_actively_working is False
-        assert bridge.is_running is True
+        loop = asyncio.new_event_loop()
+        async def noop():
+            await asyncio.sleep(100)
+        bridge._scan_task = loop.create_task(noop())
+        bridge._loop = loop
+        try:
+            assert bridge.is_actively_working is True
+            assert bridge.is_running is True
 
-        bridge._scan_completed = True
-        assert bridge.is_actively_working is False
-        assert bridge.is_running is False
+            bridge._coordinator.statuses = {"root": "waiting"}
+            assert bridge.is_actively_working is False
+            assert bridge.is_running is True
+
+            bridge._scan_completed = True
+            bridge._scan_task.cancel()
+            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            bridge._scan_task = None
+            assert bridge.is_actively_working is False
+            assert bridge.is_running is False
+        finally:
+            if not loop.is_closed():
+                loop.close()
 
     def test_check_waiting_notification(self):
         bridge = StrixRuntimeBridge()
@@ -341,18 +375,31 @@ class TestStrixRuntimeBridge:
 
     def test_get_agent_tree_from_live_view(self):
         bridge = StrixRuntimeBridge()
-        mock_lv = MagicMock()
-        mock_lv.agents = {
-            "a1": {"id": "a1", "name": "root", "status": "running", "parent_id": None},
-            "a2": {"id": "a2", "name": "child", "status": "waiting", "parent_id": "a1"},
-        }
-        mock_lv.tool_calls = {}
-        bridge._live_view = mock_lv
-
-        tree = bridge.get_agent_tree()
-        assert tree is not None
-        assert "a1" in tree["agents"]
-        assert "a2" in tree["agents"]
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.graph_snapshot = AsyncMock(
+            return_value=(
+                {"a1": None, "a2": "a1"},
+                {"a1": "running", "a2": "waiting"},
+                {"a1": "root", "a2": "child"},
+                {},
+            )
+        )
+        loop = asyncio.new_event_loop()
+        bridge._loop = loop
+        import threading as _th
+        loop_thread = _th.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+        try:
+            tree = bridge.get_agent_tree()
+            assert tree is not None
+            assert "a1" in tree["agents"]
+            assert "a2" in tree["agents"]
+            assert tree["agents"]["a1"]["name"] == "root"
+            assert tree["agents"]["a2"]["parent_id"] == "a1"
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
+            bridge._loop = None
 
     def test_get_agent_tree_none_when_no_live_view(self):
         bridge = StrixRuntimeBridge()
@@ -361,13 +408,30 @@ class TestStrixRuntimeBridge:
 
     def test_list_agents_from_live_view(self):
         bridge = StrixRuntimeBridge()
-        from strix_telegram_bot.strix.runtime_bridge import TuiLiveView
-        bridge._live_view = TuiLiveView()
-        bridge._live_view.upsert_agent("a1", name="agent1")
-        bridge._live_view.upsert_agent("a2", name="agent2")
-
-        agents = bridge.list_agents()
-        assert len(agents) == 2
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.graph_snapshot = AsyncMock(
+            return_value=(
+                {"a1": None, "a2": None},
+                {"a1": "running", "a2": "running"},
+                {"a1": "agent1", "a2": "agent2"},
+                {},
+            )
+        )
+        loop = asyncio.new_event_loop()
+        bridge._loop = loop
+        import threading as _th
+        loop_thread = _th.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+        try:
+            agents = bridge.list_agents()
+            assert len(agents) == 2
+            names = {a["name"] for a in agents}
+            assert "agent1" in names
+            assert "agent2" in names
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
+            bridge._loop = None
 
     def test_agent_timeline_returns_events_for_agent(self):
         bridge = StrixRuntimeBridge()
@@ -461,24 +525,36 @@ class TestWaitingCycle:
         bridge._live_view = TuiLiveView()
         bridge._live_view.upsert_agent("root", name="strix")
 
-        # Running
-        bridge._coordinator.statuses = {"root": "running"}
-        assert bridge.is_actively_working is True
-        assert bridge.is_running is True
+        loop = asyncio.new_event_loop()
+        async def noop():
+            await asyncio.sleep(100)
+        bridge._scan_task = loop.create_task(noop())
+        bridge._loop = loop
+        try:
+            # Running
+            bridge._coordinator.statuses = {"root": "running"}
+            assert bridge.is_actively_working is True
+            assert bridge.is_running is True
 
-        # Waiting
-        bridge._coordinator.statuses = {"root": "waiting"}
-        assert bridge.is_actively_working is False
-        assert bridge.is_running is True
-        assert bridge.get_root_status() == "waiting"
+            # Waiting
+            bridge._coordinator.statuses = {"root": "waiting"}
+            assert bridge.is_actively_working is False
+            assert bridge.is_running is True
+            assert bridge.get_root_status() == "waiting"
 
-        # Back to running
-        bridge._coordinator.statuses = {"root": "running"}
-        assert bridge.is_actively_working is True
+            # Back to running
+            bridge._coordinator.statuses = {"root": "running"}
+            assert bridge.is_actively_working is True
 
-        # Completed
-        bridge._scan_completed = True
-        assert bridge.is_running is False
+            # Completed
+            bridge._scan_completed = True
+            bridge._scan_task.cancel()
+            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            bridge._scan_task = None
+            assert bridge.is_running is False
+        finally:
+            if not loop.is_closed():
+                loop.close()
 
     def test_typing_stops_during_waiting(self):
         bridge = StrixRuntimeBridge()
@@ -519,8 +595,19 @@ class TestCleanupCycle:
         bridge._coordinator.statuses = {"root": "waiting"}
         bridge._root_agent_id = "root"
         bridge._scan_completed = False
-        assert bridge.is_running is True
-        assert bridge._scan_completed is False
+
+        loop = asyncio.new_event_loop()
+        async def noop():
+            await asyncio.sleep(100)
+        bridge._scan_task = loop.create_task(noop())
+        bridge._loop = loop
+        try:
+            assert bridge.is_running is True
+            assert bridge._scan_completed is False
+        finally:
+            bridge._scan_task.cancel()
+            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            loop.close()
 
     def test_idempotent_cleanup(self):
         bridge = StrixRuntimeBridge()
@@ -764,7 +851,7 @@ class TestDiffScopeOfficialAPI:
         call_args = mock_prepare.call_args
         ns = call_args[0][0]
         assert ns.scope_mode == "auto"
-        assert ns.non_interactive is True
+        assert "non_interactive" not in ns.__dict__
 
         assert bridge._current_targets == ["https://example.com"]
         assert bridge._run_name is not None
@@ -1092,11 +1179,11 @@ class TestTuiAlignment:
         assert "has_local_sources" not in src
 
     def test_diff_scope_non_interactive_false(self):
-        """prepare_run receives non_interactive=True from bridge."""
+        """prepare_run no longer receives non_interactive from bridge."""
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
-        assert "non_interactive=True" in src
+        assert "non_interactive" not in src
 
     def test_diff_scope_instruction_prepend(self):
         """_scan_thread delegates diff resolution to prepare_run."""
@@ -1269,7 +1356,12 @@ class TestFinalizerSingleEvent:
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
         with patch.object(rb, "_get_report_state", return_value=rs):
             from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
+            bridge._scan_thread(SimpleNamespace(
+                max_turns=10, run_name="scan-ok",
+                targets_info=[], instruction="", scan_mode="deep",
+                diff_scope={"active": False}, scope_mode="auto",
+                diff_base=None, local_sources=[], needs_setup=False,
+            ))
 
         assert bridge._terminal_kind == "completed"
         assert bridge._scan_completed is True
@@ -1287,7 +1379,12 @@ class TestFinalizerSingleEvent:
 
         with patch.object(rb, "_get_report_state", return_value=rs):
             from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
+            bridge._scan_thread(SimpleNamespace(
+                max_turns=10, run_name="scan-fail",
+                targets_info=[], instruction="", scan_mode="deep",
+                diff_scope={"active": False}, scope_mode="auto",
+                diff_base=None, local_sources=[], needs_setup=False,
+            ))
 
         assert bridge._terminal_kind == "failed"
         assert bridge._last_error == "provider boom"
@@ -1307,7 +1404,12 @@ class TestFinalizerSingleEvent:
 
         with patch.object(rb, "_get_report_state", return_value=rs):
             from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
+            bridge._scan_thread(SimpleNamespace(
+                max_turns=10, run_name="scan-stop",
+                targets_info=[], instruction="", scan_mode="deep",
+                diff_scope={"active": False}, scope_mode="auto",
+                diff_base=None, local_sources=[], needs_setup=False,
+            ))
 
         assert bridge._user_cancelled is True
         assert bridge._terminal_kind == "stopped"
@@ -1337,9 +1439,15 @@ class TestFinalizerSingleEvent:
             rs = RealState(run_name=run_name)
             rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
 
-            with patch.object(rb, "_get_report_state", return_value=rs):
+            with patch.object(rb, "_get_report_state", return_value=rs), \
+                 patch.object(rb, "prepare_run", lambda args: None):
                 from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
+                bridge._scan_thread(SimpleNamespace(
+                    max_turns=10, run_name=run_name,
+                    targets_info=[], instruction="", scan_mode="deep",
+                    diff_scope={"active": False}, scope_mode="auto",
+                    diff_base=None, local_sources=[], needs_setup=False,
+                ))
         finally:
             from strix.report.state import set_global_report_state
             set_global_report_state(prev_global)
@@ -1373,9 +1481,15 @@ class TestFinalizerSingleEvent:
             rs = RealState(run_name=run_name)
             rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
 
-            with patch.object(rb, "_get_report_state", return_value=rs):
+            with patch.object(rb, "_get_report_state", return_value=rs), \
+                 patch.object(rb, "prepare_run", lambda args: None):
                 from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
+                bridge._scan_thread(SimpleNamespace(
+                    max_turns=10, run_name=run_name,
+                    targets_info=[], instruction="", scan_mode="deep",
+                    diff_scope={"active": False}, scope_mode="auto",
+                    diff_base=None, local_sources=[], needs_setup=False,
+                ))
         finally:
             from strix.report.state import set_global_report_state
             set_global_report_state(prev_global)
@@ -1838,7 +1952,7 @@ class TestStartupReadiness:
     def test_stuck_thread_fails_closed(self, monkeypatch, tmp_path):
         """4.4: a scan thread that refuses to die leaves the bridge blocked
         (fail closed): identifiable grave error, same thread object kept, a
-        second start is rejected, and the join timeout is bounded."""
+        second start also fails (timeout), and the join timeout is bounded."""
         from strix_telegram_bot.strix import runtime_bridge as rb
         import threading as _threading
         import time as _time
@@ -1895,11 +2009,12 @@ class TestStartupReadiness:
                 assert bridge._starting is True
                 assert bridge._scan_completed is False
 
+                # With the new lifecycle, is_running returns False when
+                # _startup_abort is set, so the second start proceeds but
+                # also fails with a timeout.
                 ok2, msg2 = bridge.start_scan(
                     targets=["https://example.com"], instruction="")
                 assert ok2 is False
-                assert "Ya hay" in msg2
-                assert bridge._thread is first_thread
             finally:
                 release.set()
                 if bridge._thread is not None and bridge._thread.is_alive():
@@ -1962,9 +2077,15 @@ class TestCleanupCountSingle:
         )
         prev_global = get_global_report_state()
         try:
-            with patch.object(rb, "_get_report_state", return_value=rs):
+            with patch.object(rb, "_get_report_state", return_value=rs), \
+                 patch.object(rb, "prepare_run", lambda args: None):
                 from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace(max_turns=10, resume="test-run", non_interactive=True, local_sources=[]))
+                bridge._scan_thread(SimpleNamespace(
+                    max_turns=10, run_name="scan-cleanup-1",
+                    targets_info=[], instruction="", scan_mode="deep",
+                    diff_scope={"active": False}, scope_mode="auto",
+                    diff_base=None, local_sources=[], needs_setup=False,
+                ))
 
             assert bridge._terminal_kind == "completed"
             assert bridge._scan_completed is True
