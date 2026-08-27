@@ -177,6 +177,28 @@ class StrixRuntimeBridge:
         self._runtime: Any = None
         self._GoTuiRuntime: Any = GoTuiRuntime
 
+    # ── per-run report state (ownership) ───────────────────────
+    #
+    # The ONLY authority for the active run's state is the per-run
+    # ReportState owned by GoTuiRuntime (created during init_run_state()).
+    # The module-level global report state must never be used to decide
+    # lifecycle, vulnerabilities, or persistence of the active run.
+
+    def _report_state(self) -> Any:
+        """Return the current GoTuiRuntime per-run ReportState (or None)."""
+        runtime = self._runtime
+        if runtime is None:
+            return None
+        rs = getattr(runtime, "report_state", None)
+        if rs is None:
+            return None
+        # Guard against a per-run state belonging to a different run than the
+        # one this bridge is currently shepherding.
+        if getattr(rs, "run_name", None) is not None and self._run_name is not None:
+            if rs.run_name != self._run_name:
+                return None
+        return rs
+
     # ── lifecycle ──────────────────────────────────────────────
 
     @property
@@ -200,7 +222,7 @@ class StrixRuntimeBridge:
                     scan_state = getattr(ctrl, "scan_state", None)
                     if scan_state in ("running", "waiting"):
                         return True
-            rs = _get_report_state()
+            rs = self._report_state()
             if rs is not None and rs.run_record:
                 rr_status = rs.run_record.get("status")
                 if rr_status in ("running", "waiting"):
@@ -487,7 +509,7 @@ class StrixRuntimeBridge:
 
     def _derive_terminal_kind(self) -> str:
         root_status = self.get_root_status()
-        rs = _get_report_state()
+        rs = self._report_state()
         rr_status = (rs.run_record or {}).get("status") if rs else None
 
         if root_status == "completed" and rr_status == _FINAL_COMPLETED:
@@ -520,7 +542,7 @@ class StrixRuntimeBridge:
         return _FINAL_FAILED
 
     def _persist_final_state(self) -> None:
-        rs = _get_report_state()
+        rs = self._report_state()
         if rs is None:
             return
         try:
@@ -541,7 +563,7 @@ class StrixRuntimeBridge:
         run_name = self._run_name
         if not run_name or _run_dir_for is None:
             return
-        rs = _get_report_state()
+        rs = self._report_state()
         if rs is None or getattr(rs, "run_name", None) != run_name:
             return
         try:
@@ -841,7 +863,7 @@ class StrixRuntimeBridge:
         }
 
     def get_vulnerabilities(self) -> list[dict[str, Any]]:
-        rs = _get_report_state()
+        rs = self._report_state()
         if rs is None:
             return []
         return list(rs.vulnerability_reports)
@@ -877,7 +899,7 @@ class StrixRuntimeBridge:
                 if scan_state:
                     phase = scan_state
         if phase == "running":
-            rs = _get_report_state()
+            rs = self._report_state()
             if rs is not None and rs.run_record:
                 rr_status = rs.run_record.get("status")
                 if rr_status in ("completed", "failed", "stopped"):
