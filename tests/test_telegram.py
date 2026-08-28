@@ -406,3 +406,147 @@ class TestAwaitingUserFlow:
         bridge.send_message.assert_called_once_with("agent-1", "Hola")
         sent_text = mock_send.call_args[0][2]
         assert "No se pudo entregar tu respuesta" in sent_text
+
+
+class TestHandleDocumentUpload:
+    """FASE 6: Telegram upload flow (_handle_document) — robust + Spanish."""
+
+    def _make_bot(self, is_running=False, run_name=None, menu_state=None):
+        from strix_telegram_bot.bot import StrixBot
+        bot = StrixBot.__new__(StrixBot)
+        bridge = MagicMock()
+        bridge.is_running = is_running
+        bridge.run_name = run_name
+        bot._bridge = bridge
+        bot._launch_scan = MagicMock()
+        return bot, bridge
+
+    @patch("strix_telegram_bot.bot.get_panel_manager")
+    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
+    @patch("strix_telegram_bot.telegram.get_file")
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_document_upload_not_running_saves_and_prompts(
+        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+    ):
+        """A document upload while idle is saved and the user is told to scan."""
+        from strix_telegram_bot.models import MenuState
+
+        bot, _ = self._make_bot(is_running=False)
+        mock_get_file.return_value = b"file-bytes"
+        mock_vault = MagicMock()
+        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/f.txt"}
+        mock_vault_cls.return_value = mock_vault
+        mock_pm.return_value.current = MenuState.MAIN
+
+        update = {
+            "message": {"chat": {"id": 1}, "document": {"file_id": "fid", "file_name": "f.txt"}}
+        }
+        bot._handle_document(update)
+
+        mock_vault.store_bytes.assert_called_once()
+        sent = [c.args[2] for c in mock_send.call_args_list]
+        assert any("Archivo guardado" in t and "Escanear" in t for t in sent)
+
+    @patch("strix_telegram_bot.bot.get_panel_manager")
+    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
+    @patch("strix_telegram_bot.telegram.get_file")
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_document_upload_while_running_saves(
+        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+    ):
+        """A document upload while a scan runs is saved to the active run."""
+        from strix_telegram_bot.models import MenuState
+
+        bot, _ = self._make_bot(is_running=True, run_name="scan-abc")
+        mock_get_file.return_value = b"file-bytes"
+        mock_vault = MagicMock()
+        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/f.txt"}
+        mock_vault_cls.return_value = mock_vault
+        mock_pm.return_value.current = MenuState.MAIN
+
+        update = {
+            "message": {"chat": {"id": 1}, "document": {"file_id": "fid", "file_name": "f.txt"}}
+        }
+        bot._handle_document(update)
+
+        # Stored under the active run, not "upload"
+        mock_vault_cls.assert_called_once_with("scan-abc")
+        sent = [c.args[2] for c in mock_send.call_args_list]
+        assert any("Archivo guardado" in t for t in sent)
+
+    @patch("strix_telegram_bot.bot.get_panel_manager")
+    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
+    @patch("strix_telegram_bot.telegram.get_file")
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_document_upload_waiting_for_targets_launches_scan(
+        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+    ):
+        """A document upload while waiting for targets launches a scan on it."""
+        from strix_telegram_bot.models import MenuState
+
+        bot, _ = self._make_bot(is_running=False)
+        mock_get_file.return_value = b"file-bytes"
+        mock_vault = MagicMock()
+        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/f.txt"}
+        mock_vault_cls.return_value = mock_vault
+        mock_pm.return_value.current = MenuState.WAITING_FOR_TARGETS
+
+        update = {
+            "message": {"chat": {"id": 1}, "document": {"file_id": "fid", "file_name": "f.txt"}}
+        }
+        bot._handle_document(update)
+
+        bot._launch_scan.assert_called_once()
+        args = bot._launch_scan.call_args
+        assert args[0][1] == ["/tmp/x/f.txt"]
+
+    @patch("strix_telegram_bot.bot.get_panel_manager")
+    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
+    @patch("strix_telegram_bot.telegram.get_file")
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_photo_upload_uses_default_name(
+        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+    ):
+        """A photo upload (no file_name) is stored as photo.jpg."""
+        from strix_telegram_bot.models import MenuState
+
+        bot, _ = self._make_bot(is_running=False)
+        mock_get_file.return_value = b"img-bytes"
+        mock_vault = MagicMock()
+        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/photo.jpg"}
+        mock_vault_cls.return_value = mock_vault
+        mock_pm.return_value.current = MenuState.MAIN
+
+        update = {"message": {"chat": {"id": 1}, "photo": [{"file_id": "fid"}]}}
+        bot._handle_document(update)
+
+        stored_name = mock_vault.store_bytes.call_args[0][1]
+        assert stored_name == "photo.jpg"
+
+    @patch("strix_telegram_bot.telegram.get_file")
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_download_failure_reports_error(self, mock_send, mock_sca, mock_get_file):
+        """If get_file returns None, the user is told the download failed."""
+        bot, _ = self._make_bot(is_running=False)
+        mock_get_file.return_value = None
+        update = {
+            "message": {"chat": {"id": 1}, "document": {"file_id": "fid", "file_name": "f.txt"}}
+        }
+        bot._handle_document(update)
+        sent = [c.args[2] for c in mock_send.call_args_list]
+        assert any("Error al descargar" in t for t in sent)
+
+    @patch("strix_telegram_bot.telegram.send_chat_action")
+    @patch("strix_telegram_bot.bot.send_message")
+    def test_no_attachment_reports_error(self, mock_send, mock_sca):
+        """A message with neither document nor photo reports a read error."""
+        bot, _ = self._make_bot(is_running=False)
+        update = {"message": {"chat": {"id": 1}, "text": "hola"}}
+        bot._handle_document(update)
+        sent = [c.args[2] for c in mock_send.call_args_list]
+        assert any("No se pudo leer el archivo" in t for t in sent)
