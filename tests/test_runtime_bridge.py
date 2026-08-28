@@ -1179,9 +1179,12 @@ class TestFileHostingURLs:
         bridge._coordinator.statuses = {"root": "completed"}
         bridge._run_name = "scan-test"
         mock_rs = MagicMock()
+        mock_rs.run_name = "scan-test"
         mock_rs.run_record = {"status": "completed"}
-        with patch("strix_telegram_bot.strix.runtime_bridge._get_report_state", return_value=mock_rs), \
-             patch("strix_telegram_bot.strix.runtime_bridge._report_md_present", return_value=True):
+        runtime = MagicMock()
+        runtime.report_state = mock_rs
+        bridge._runtime = runtime
+        with patch("strix_telegram_bot.strix.runtime_bridge._report_md_present", return_value=True):
             kind = bridge._derive_terminal_kind()
         assert kind == "completed"
 
@@ -1293,9 +1296,12 @@ class TestWatcherBehavior:
         bridge._last_error = None
         bridge._run_name = "scan-test"
         mock_rs = MagicMock()
+        mock_rs.run_name = "scan-test"
         mock_rs.run_record = {"status": "completed"}
-        with patch("strix_telegram_bot.strix.runtime_bridge._get_report_state", return_value=mock_rs), \
-             patch("strix_telegram_bot.strix.runtime_bridge._report_md_present", return_value=True):
+        runtime = MagicMock()
+        runtime.report_state = mock_rs
+        bridge._runtime = runtime
+        with patch("strix_telegram_bot.strix.runtime_bridge._report_md_present", return_value=True):
             kind = bridge._derive_terminal_kind()
         assert kind == "completed"
 
@@ -1427,11 +1433,12 @@ class TestFinalizerSingleEvent:
         mock_runtime.coordinator.statuses = {"root": "completed"}
 
         rs = MagicMock()
+        rs.run_name = run_name
         rs.run_record = {"status": "completed"}
 
+        mock_runtime.report_state = rs
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
-        with patch.object(rb, "_get_report_state", return_value=rs), \
-             patch.object(rb, "_run_dir_for", lambda name: run_dir):
+        with patch.object(rb, "_run_dir_for", lambda name: run_dir):
             from types import SimpleNamespace
             bridge._scan_thread(SimpleNamespace(
                 max_turns=10, run_name="scan-ok",
@@ -1452,16 +1459,17 @@ class TestFinalizerSingleEvent:
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
 
         rs = MagicMock()
+        rs.run_name = run_name
         rs.run_record = {"status": "running"}
 
-        with patch.object(rb, "_get_report_state", return_value=rs):
-            from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace(
-                max_turns=10, run_name="scan-fail",
-                targets_info=[], instruction="", scan_mode="deep",
-                diff_scope={"active": False}, scope_mode="auto",
-                diff_base=None, local_sources=[], needs_setup=False,
-            ))
+        mock_runtime.report_state = rs
+        from types import SimpleNamespace
+        bridge._scan_thread(SimpleNamespace(
+            max_turns=10, run_name="scan-fail",
+            targets_info=[], instruction="", scan_mode="deep",
+            diff_scope={"active": False}, scope_mode="auto",
+            diff_base=None, local_sources=[], needs_setup=False,
+        ))
 
         assert bridge._terminal_kind == "failed"
         assert bridge._last_error == "provider boom"
@@ -1477,16 +1485,17 @@ class TestFinalizerSingleEvent:
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
 
         rs = MagicMock()
+        rs.run_name = run_name
         rs.run_record = {"status": "running"}
 
-        with patch.object(rb, "_get_report_state", return_value=rs):
-            from types import SimpleNamespace
-            bridge._scan_thread(SimpleNamespace(
-                max_turns=10, run_name="scan-stop",
-                targets_info=[], instruction="", scan_mode="deep",
-                diff_scope={"active": False}, scope_mode="auto",
-                diff_base=None, local_sources=[], needs_setup=False,
-            ))
+        mock_runtime.report_state = rs
+        from types import SimpleNamespace
+        bridge._scan_thread(SimpleNamespace(
+            max_turns=10, run_name="scan-stop",
+            targets_info=[], instruction="", scan_mode="deep",
+            diff_scope={"active": False}, scope_mode="auto",
+            diff_base=None, local_sources=[], needs_setup=False,
+        ))
 
         assert bridge._user_cancelled is True
         assert bridge._terminal_kind == "stopped"
@@ -1516,8 +1525,8 @@ class TestFinalizerSingleEvent:
             rs = RealState(run_name=run_name)
             rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
 
-            with patch.object(rb, "_get_report_state", return_value=rs), \
-                 patch.object(rb, "prepare_run", lambda args: None):
+            mock_runtime.report_state = rs
+            with patch.object(rb, "prepare_run", lambda args: None):
                 from types import SimpleNamespace
                 bridge._scan_thread(SimpleNamespace(
                     max_turns=10, run_name=run_name,
@@ -1558,8 +1567,8 @@ class TestFinalizerSingleEvent:
             rs = RealState(run_name=run_name)
             rs.set_scan_config({"targets": [{"type": "url", "url": "https://example.com"}]})
 
-            with patch.object(rb, "_get_report_state", return_value=rs), \
-                 patch.object(rb, "prepare_run", lambda args: None):
+            mock_runtime.report_state = rs
+            with patch.object(rb, "prepare_run", lambda args: None):
                 from types import SimpleNamespace
                 bridge._scan_thread(SimpleNamespace(
                     max_turns=10, run_name=run_name,
@@ -2146,29 +2155,23 @@ class TestCleanupCountSingle:
         bridge._GoTuiRuntime = MagicMock(return_value=mock_runtime)
 
         rs = MagicMock()
+        rs.run_name = run_name
         rs.run_record = {"status": "completed"}
 
-        from strix.report.state import (
-            get_global_report_state,
-            set_global_report_state,
-        )
-        prev_global = get_global_report_state()
-        try:
-            with patch.object(rb, "_get_report_state", return_value=rs), \
-                 patch.object(rb, "prepare_run", lambda args: None), \
-                 patch.object(rb, "_run_dir_for", lambda name: run_dir):
-                from types import SimpleNamespace
-                bridge._scan_thread(SimpleNamespace(
-                    max_turns=10, run_name="scan-cleanup-1",
-                    targets_info=[], instruction="", scan_mode="deep",
-                    diff_scope={"active": False}, scope_mode="auto",
-                    diff_base=None, local_sources=[], needs_setup=False,
-                ))
+        mock_runtime.report_state = rs
+
+        with patch.object(rb, "prepare_run", lambda args: None), \
+             patch.object(rb, "_run_dir_for", lambda name: run_dir):
+            from types import SimpleNamespace
+            bridge._scan_thread(SimpleNamespace(
+                max_turns=10, run_name="scan-cleanup-1",
+                targets_info=[], instruction="", scan_mode="deep",
+                diff_scope={"active": False}, scope_mode="auto",
+                diff_base=None, local_sources=[], needs_setup=False,
+            ))
 
             assert bridge._terminal_kind == "completed"
             assert bridge._scan_completed is True
-        finally:
-            set_global_report_state(prev_global)
 
 
 class TestArtifactHintRemoved:
@@ -2284,3 +2287,81 @@ class TestDiffScopeFailFast:
         _time.sleep(1.0)
         assert ok is False
         assert bridge._scan_completed is True
+
+
+class TestReportStatePerRunIsolation:
+    """Radamanthys resolves per-run ReportState from the active GoTuiRuntime,
+    NEVER from the module-level global. Run A must be immune to Run B's
+    global state, and a runtime whose run_name mismatches the bridge's
+    active run must be rejected."""
+
+    def _make_bridge(self, run_name="run-a"):
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
+        bridge = StrixRuntimeBridge()
+        bridge._run_name = run_name
+        bridge._coordinator = MagicMock()
+        bridge._root_agent_id = "root"
+        return bridge
+
+    def test_report_state_resolves_from_active_runtime_not_global(self):
+        from strix.report.state import ReportState as RealState
+        from strix.report.state import (
+            get_global_report_state,
+            set_global_report_state,
+        )
+        bridge = self._make_bridge("run-a")
+        run_a_state = RealState(run_name="run-a")
+        run_a_state.vulnerability_reports.append({"id": "A-1"})
+        runtime = MagicMock()
+        runtime.report_state = run_a_state
+        bridge._runtime = runtime
+
+        run_b_state = RealState(run_name="run-b")
+        run_b_state.vulnerability_reports.append({"id": "B-1"})
+
+        prev = get_global_report_state()
+        try:
+            set_global_report_state(run_b_state)
+            assert bridge._report_state() is run_a_state
+            assert bridge.get_vulnerabilities() == [{"id": "A-1"}]
+        finally:
+            set_global_report_state(prev)
+
+    def test_global_run_b_does_not_affect_run_a_terminal_kind(self):
+        from strix.report.state import ReportState as RealState
+        from strix.report.state import (
+            get_global_report_state,
+            set_global_report_state,
+        )
+        bridge = self._make_bridge("run-a")
+        bridge._coordinator.statuses = {"root": "completed"}
+        run_a_state = RealState(run_name="run-a")
+        run_a_state.run_record["status"] = "completed"
+        runtime = MagicMock()
+        runtime.report_state = run_a_state
+        bridge._runtime = runtime
+
+        run_b_state = RealState(run_name="run-b")
+        run_b_state.run_record["status"] = "completed"
+
+        prev = get_global_report_state()
+        try:
+            set_global_report_state(run_b_state)
+            with patch(
+                "strix_telegram_bot.strix.runtime_bridge._report_md_present",
+                return_value=True,
+            ):
+                kind = bridge._derive_terminal_kind()
+            assert kind == "completed"
+        finally:
+            set_global_report_state(prev)
+
+    def test_mismatched_run_rejected(self):
+        from strix.report.state import ReportState as RealState
+        bridge = self._make_bridge("run-a")
+        other_state = RealState(run_name="run-b")
+        runtime = MagicMock()
+        runtime.report_state = other_state
+        bridge._runtime = runtime
+        assert bridge._report_state() is None
+        assert bridge.get_vulnerabilities() == []
