@@ -65,9 +65,10 @@ def _store_upload_bytes(file_bytes: bytes, file_name: str) -> Optional[Path]:
         logger.warning("upload: could not create .bot-uploads dir")
         return None
 
-    # Sanitize: basename only (removes dir/absolute components), neutralize
+    # Sanitize (platform-independent): normalize BOTH separators (/ and \) to /,
+    # then take the basename (removes dir/absolute components), neutralize
     # '.'/'..', drop non-printable chars. Preserve the extension when present.
-    base = Path(file_name).name
+    base = Path(file_name.replace("\\", "/")).name
     if base in (".", "..", ""):
         base = "upload"
     base = "".join(c for c in base if c.isprintable()) or "upload"

@@ -630,3 +630,31 @@ class TestUploadStorageSeparation:
         # The file is inside .bot-uploads/ (the absolute path was neutralized)
         assert uploads in path.parents
         assert path.name.endswith("_foo.apk")
+
+    def test_backslash_traversal_neutralized(self, monkeypatch, tmp_path):
+        """E. ..\\..\\foo.apk -> backslash separator neutralized (no escape)."""
+        path = self._store(monkeypatch, tmp_path, "..\\..\\foo.apk")
+        assert path is not None
+        uploads = tmp_path / ".bot-uploads"
+        assert uploads in path.parents
+        # Backslash is NOT a valid separator in the stored name
+        assert "\\" not in path.name
+        assert path.name.endswith("_foo.apk")
+
+    def test_windows_absolute_path_neutralized(self, monkeypatch, tmp_path):
+        """F. C:\\temp\\foo.apk -> Windows absolute path neutralized (basename only)."""
+        path = self._store(monkeypatch, tmp_path, "C:\\temp\\foo.apk")
+        assert path is not None
+        uploads = tmp_path / ".bot-uploads"
+        assert uploads in path.parents
+        assert "\\" not in path.name
+        assert path.name.endswith("_foo.apk")
+
+    def test_backslash_dir_components_neutralized(self, monkeypatch, tmp_path):
+        """G. foo\\bar\\test.apk -> backslash dir components removed (basename only)."""
+        path = self._store(monkeypatch, tmp_path, "foo\\bar\\test.apk")
+        assert path is not None
+        uploads = tmp_path / ".bot-uploads"
+        assert uploads in path.parents
+        assert "\\" not in path.name
+        assert path.name.endswith("_test.apk")
