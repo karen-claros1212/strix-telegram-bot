@@ -550,11 +550,21 @@ class StrixBot:
             return
 
         pm = get_panel_manager(chat_id)
-        run_name = "upload"
-        if self._bridge.is_running:
-            run_name = self._bridge.run_name or "upload"
 
-        vault = EvidenceVault(run_name)
+        # During an active scan, reject new uploads: Strix already fixed its
+        # targets via prepare_run, so a new file won't enter the analysis.
+        # Rejecting (rather than saving to the run's evidence) keeps the mirror
+        # passive — no write into the official Strix run.
+        if self._bridge.is_running:
+            send_message(
+                self, chat_id,
+                "El análisis ya está en curso. Strix no puede incorporar "
+                "archivos nuevos a este run.\n"
+                "Envíalo antes de iniciar un nuevo análisis.",
+            )
+            return
+
+        vault = EvidenceVault("upload")
         artifact = vault.store_bytes(file_bytes, file_name, subdir="files", sensitive=False)
         if artifact is None:
             send_message(self, chat_id, "Error al guardar el archivo.")
@@ -564,12 +574,6 @@ class StrixBot:
 
         if pm.current == MenuState.WAITING_FOR_TARGETS:
             self._launch_scan(chat_id, [str(abs_path)])
-        elif self._bridge.is_running:
-            send_message(
-                self, chat_id,
-                f"Guardado en el vault del run: {abs_path.name}\n"
-                "El escaneo en curso no lo recibe como input.",
-            )
         else:
             send_message(
                 self, chat_id,

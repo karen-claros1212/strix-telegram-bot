@@ -463,17 +463,19 @@ class TestHandleDocumentUpload:
     @patch("strix_telegram_bot.telegram.get_file")
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
-    def test_document_upload_while_running_saves(
+    def test_document_upload_while_running_rejects(
         self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
     ):
-        """A document upload while a scan runs is saved to the active run."""
+        """A document upload while a scan runs is REJECTED (no write to the run).
+
+        Strix already fixed its targets via prepare_run, so a new file won't
+        enter the analysis. Rejecting keeps the mirror passive — no write into
+        the official Strix run's evidence dir.
+        """
         from strix_telegram_bot.models import MenuState
 
         bot, _ = self._make_bot(is_running=True, run_name="scan-abc")
         mock_get_file.return_value = b"file-bytes"
-        mock_vault = MagicMock()
-        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/f.txt"}
-        mock_vault_cls.return_value = mock_vault
         mock_pm.return_value.current = MenuState.MAIN
 
         update = {
@@ -481,13 +483,11 @@ class TestHandleDocumentUpload:
         }
         bot._handle_document(update)
 
-        # Stored under the active run, not "upload"
-        mock_vault_cls.assert_called_once_with("scan-abc")
+        # No vault created — the file is rejected before being written to the run
+        mock_vault_cls.assert_not_called()
         sent = [c.args[2] for c in mock_send.call_args_list]
-        # Honest message: saved to the run vault, but the running scan does not
-        # receive it as input (Strix already fixed its targets via prepare_run).
-        assert any("Guardado en el vault del run" in t for t in sent)
-        assert any("no lo recibe como input" in t for t in sent)
+        assert any("ya está en curso" in t for t in sent)
+        assert any("no puede incorporar" in t for t in sent)
 
     @patch("strix_telegram_bot.bot.get_panel_manager")
     @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
