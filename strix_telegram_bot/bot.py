@@ -58,6 +58,10 @@ class StrixBot:
         self._active_chat_message_id: Optional[int] = None
         self._active_chat_chat_id: Optional[int] = None
 
+        # AWAITING_USER state machine (RUNNING / AWAITING_USER / AWAITING_SELECTION / TERMINAL)
+        self._notified_waiting_agents: set[str] = set()
+        self._pending_reply_agent_id: Optional[str] = None
+
         self._final_reports_delivered: set[str] = set()
         self._terminal_notified: set[str] = set()
         self._report_delivered: set[str] = set()
@@ -170,6 +174,80 @@ class StrixBot:
         else:
             self._handle_text_message(update)
 
+    def _current_bot_state(self) -> tuple[str, list[dict]]:
+        """Explicit bot state machine.
+
+        RUNNING            — scan active, no agent waiting on the user
+        AWAITING_USER      — exactly one agent parked with wait_kind == 'user'
+        AWAITING_SELECTION — several agents parked with wait_kind == 'user'
+        TERMINAL           — no active scan
+
+        Only wait_kind == 'user' opens the reply channel; wait_kind 'agents'
+        (waiting for children) and 'stalled' do not.
+        """
+        if not self._bridge.is_running:
+            return "terminal", []
+        waiting = self._bridge.awaiting_user_agents()
+        if len(waiting) == 1:
+            return "awaiting_user", waiting
+        if len(waiting) > 1:
+            return "awaiting_selection", waiting
+        return "running", []
+
+    def _route_user_reply(self, chat_id: int, text: str) -> bool:
+        """Deliver a user text message to the waiting agent(s).
+
+        Returns True if the message was routed (state handled), False if the
+        caller should fall through to the default running-state reply.
+        """
+        state, waiting = self._current_bot_state()
+        if state == "awaiting_user":
+            target = waiting[0]
+            ok = self._bridge.send_message(target["id"], text)
+            if ok:
+                self._pending_reply_agent_id = None
+                send_message(
+                    self, chat_id,
+                    f"Respuesta enviada a {target['name']}.",
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
+            else:
+                send_message(
+                    self, chat_id,
+                    "No se pudo entregar tu respuesta al agente. Inténtalo de nuevo.",
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
+            return True
+        if state == "awaiting_selection":
+            if (
+                self._pending_reply_agent_id
+                and any(a["id"] == self._pending_reply_agent_id for a in waiting)
+            ):
+                target = next(
+                    a for a in waiting if a["id"] == self._pending_reply_agent_id)
+                ok = self._bridge.send_message(target["id"], text)
+                if ok:
+                    self._pending_reply_agent_id = None
+                    send_message(
+                        self, chat_id,
+                        f"Respuesta enviada a {target['name']}.",
+                        parse_mode=None,
+                        disable_web_page_preview=True,
+                    )
+                    return True
+            self._pending_reply_agent_id = None
+            send_message(
+                self, chat_id,
+                "Varios agentes esperan tu respuesta. Elige a cuál responder:",
+                reply_markup=agent_selector(waiting),
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
+            return True
+        return False
+
     def _handle_text_message(self, update: dict) -> None:
         msg = update.get("message", {})
         text = (msg.get("text") or "").strip()
@@ -179,14 +257,14 @@ class StrixBot:
         send_chat_action(self, chat_id)
 
         if self._bridge.is_running:
-            send_message(
-                self,
-                chat_id,
-                "El análisis está siendo ejecutado automáticamente por Strix.\n"
-                "El chat es de solo lectura hasta que termine este run.",
-                parse_mode=None,
-                disable_web_page_preview=True,
-            )
+            if not self._route_user_reply(chat_id, text):
+                send_message(
+                    self,
+                    chat_id,
+                    "El análisis está en curso. Ningún agente espera tu respuesta ahora.",
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
             return
 
         pm = get_panel_manager(chat_id)
@@ -422,6 +500,19 @@ class StrixBot:
         self._bridge._preferred_agent_id = agent_id
         name = agent.get("name", agent_id)
 
+        # AWAITING_SELECTION: if the selected agent is waiting for a user
+        # reply, route the user's next text message to it.
+        waiting_ids = {a["id"] for a in self._bridge.awaiting_user_agents()}
+        if agent_id in waiting_ids:
+            self._pending_reply_agent_id = agent_id
+            edit_message(
+                bot, chat_id, msg_id,
+                f"Seleccionado {name}. Escribe tu respuesta y se enviará a ese agente.",
+                reply_markup=back_to_menu(),
+                parse_mode=None,
+            )
+            return
+
         from .commands.jobs import _show_agent_chat
         _show_agent_chat(bot, chat_id, msg_id, self._bridge, agent_id)
 
@@ -640,10 +731,45 @@ class StrixBot:
         self._report_delivered.clear()
         self._report_pending.clear()
         self._report_pending_until.clear()
+        self._notified_waiting_agents.clear()
+        self._pending_reply_agent_id = None
+
+    def _notify_waiting_agents(self) -> None:
+        """Notify the user when an agent parks waiting for a user reply.
+
+        Only agents with wait_kind == 'user' qualify (see
+        StrixRuntimeBridge.awaiting_user_agents). The agent's last message is
+        included as the prompt. Re-notifies if the agent waits again later.
+        """
+        waiting = self._bridge.awaiting_user_agents()
+        waiting_ids = {a["id"] for a in waiting}
+        for a in waiting:
+            if a["id"] in self._notified_waiting_agents:
+                continue
+            self._notified_waiting_agents.add(a["id"])
+            chat_id = self._active_job_chat_id
+            if chat_id is None:
+                continue
+            question = self._sanitize_agent_content(
+                self._bridge.last_agent_message(a["id"]))
+            if len(question) > 1500:
+                question = question[:1500] + "…"
+            text = f"{a['name']} espera tu respuesta."
+            if question:
+                text += f"\n\n{question}"
+            send_message(
+                self, chat_id, text,
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
+        # Drop notifications for agents that are no longer waiting
+        self._notified_waiting_agents &= waiting_ids
 
     def _drain_update_queue(self) -> None:
         events = self._bridge.poll_events()
         self._process_scan_events(events)
+
+        self._notify_waiting_agents()
 
         status = self._bridge.to_status_dict()
         run_name = status.get("run_name")

@@ -2365,3 +2365,71 @@ class TestReportStatePerRunIsolation:
         bridge._runtime = runtime
         assert bridge._report_state() is None
         assert bridge.get_vulnerabilities() == []
+
+
+class TestAwaitingUserAgents:
+    """FASE 1: awaiting_user_agents() returns ONLY agents with
+    status == 'waiting' AND wait_kind == 'user'. wait_kind 'agents'
+    (waiting for children) and 'stalled' do not open the user channel."""
+
+    def _make_bridge(self, statuses, wait_kinds):
+        bridge = StrixRuntimeBridge()
+        bridge._run_name = "test-run"
+        bridge._coordinator = MagicMock()
+        bridge._coordinator.statuses = statuses
+
+        async def mock_wait_kind(agent_id):
+            return wait_kinds.get(agent_id, "user")
+
+        bridge._coordinator.wait_kind_of = mock_wait_kind
+
+        import threading as _threading
+        loop = asyncio.new_event_loop()
+        bridge._loop = loop
+        loop_thread = _threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+        return bridge, loop, loop_thread
+
+    def test_only_waiting_user_agents_returned(self):
+        bridge, loop, loop_thread = self._make_bridge(
+            {"root": "waiting", "a2": "waiting", "a3": "running"},
+            {"root": "user", "a2": "agents", "a3": "user"},
+        )
+        try:
+            result = bridge.awaiting_user_agents()
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
+            bridge._loop = None
+        ids = [a["id"] for a in result]
+        assert ids == ["root"]
+        assert result[0]["name"] == "root"
+
+    def test_no_coordinator_returns_empty(self):
+        bridge = StrixRuntimeBridge()
+        bridge._coordinator = None
+        assert bridge.awaiting_user_agents() == []
+
+    def test_wait_kind_agents_does_not_open_channel(self):
+        bridge, loop, loop_thread = self._make_bridge(
+            {"root": "waiting"}, {"root": "agents"})
+        try:
+            result = bridge.awaiting_user_agents()
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
+            bridge._loop = None
+        assert result == []
+
+    def test_last_agent_message_returns_last_assistant_content(self):
+        bridge = StrixRuntimeBridge()
+        lv = MagicMock()
+        lv.events_for_agent.return_value = [
+            {"type": "chat", "data": {"role": "assistant", "content": "primera"}},
+            {"type": "tool", "data": {}},
+            {"type": "chat", "data": {"role": "user", "content": "respuesta"}},
+            {"type": "chat", "data": {"role": "assistant", "content": "¿Continúo?"}},
+        ]
+        bridge._live_view = lv
+        assert bridge.last_agent_message("a1") == "¿Continúo?"
+        lv.events_for_agent.assert_called_with("a1")

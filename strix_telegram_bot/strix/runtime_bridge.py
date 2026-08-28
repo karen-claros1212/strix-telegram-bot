@@ -711,6 +711,60 @@ class StrixRuntimeBridge:
     def ack_waiting_notification(self) -> None:
         pass
 
+    def awaiting_user_agents(self) -> list[dict[str, Any]]:
+        """Agents with status == 'waiting' AND wait_kind == 'user'.
+
+        Only these agents open the user reply channel. wait_kind 'agents'
+        (waiting for children to finish) and 'stalled' do NOT.
+        """
+        if not self._coordinator or self._scan_completed:
+            return []
+        if self._loop is None or self._loop.is_closed():
+            return []
+        statuses = getattr(self._coordinator, "statuses", None)
+        if not statuses:
+            return []
+        result: list[dict[str, Any]] = []
+        for agent_id in list(statuses.keys()):
+            if str(statuses.get(agent_id, "")) != "waiting":
+                continue
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._coordinator.wait_kind_of(agent_id), self._loop)
+                wait_kind = future.result(timeout=2.0)
+            except Exception:
+                continue
+            if wait_kind != "user":
+                continue
+            name = agent_id
+            with self._lv_lock:
+                lv = self._live_view
+                if lv is not None and hasattr(lv, "agents") and agent_id in lv.agents:
+                    name = lv.agents[agent_id].get("name", agent_id)
+            result.append({"id": agent_id, "name": name})
+        return result
+
+    def last_agent_message(self, agent_id: str) -> str:
+        """Last assistant chat content from the agent's timeline (for prompts)."""
+        with self._lv_lock:
+            lv = self._live_view
+            if lv is None:
+                return ""
+            try:
+                events = list(lv.events_for_agent(agent_id))
+            except Exception:
+                return ""
+        for ev in reversed(events):
+            if ev.get("type") != "chat":
+                continue
+            data = ev.get("data", {})
+            if data.get("role") != "assistant":
+                continue
+            content = data.get("content", "")
+            if content:
+                return content
+        return ""
+
     def get_descendant_status_summary(self) -> dict[str, int]:
         if not self._coordinator:
             return {}
