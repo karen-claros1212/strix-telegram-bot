@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from strix_telegram_bot.telegram import (
@@ -432,21 +433,18 @@ class TestHandleDocumentUpload:
         return bot, bridge
 
     @patch("strix_telegram_bot.bot.get_panel_manager")
-    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
     @patch("strix_telegram_bot.telegram.get_file")
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
     def test_document_upload_not_running_saves_and_prompts(
-        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+        self, mock_send, mock_sca, mock_get_file, mock_pm, monkeypatch, tmp_path
     ):
-        """A document upload while idle is saved and the user is told to scan."""
+        """A document upload while idle is saved to .bot-uploads/ (not strix_runs)."""
         from strix_telegram_bot.models import MenuState
 
+        monkeypatch.setattr("strix_telegram_bot.config.settings.bot_dir", tmp_path)
         bot, _ = self._make_bot(is_running=False)
         mock_get_file.return_value = b"file-bytes"
-        mock_vault = MagicMock()
-        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/f.txt"}
-        mock_vault_cls.return_value = mock_vault
         mock_pm.return_value.current = MenuState.MAIN
 
         update = {
@@ -454,26 +452,34 @@ class TestHandleDocumentUpload:
         }
         bot._handle_document(update)
 
-        mock_vault.store_bytes.assert_called_once()
+        # File stored in .bot-uploads/ (OUTSIDE strix_runs)
+        uploads = tmp_path / ".bot-uploads"
+        assert uploads.is_dir()
+        files = list(uploads.iterdir())
+        assert len(files) == 1
+        assert files[0].name.endswith("_f.txt")
+        assert files[0].read_bytes() == b"file-bytes"
+        # Nothing written under strix_runs/upload/
+        assert not (tmp_path / "strix_runs" / "upload").exists()
         sent = [c.args[2] for c in mock_send.call_args_list]
         assert any("Archivo guardado" in t and "Escanear" in t for t in sent)
 
     @patch("strix_telegram_bot.bot.get_panel_manager")
-    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
     @patch("strix_telegram_bot.telegram.get_file")
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
     def test_document_upload_while_running_rejects(
-        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+        self, mock_send, mock_sca, mock_get_file, mock_pm, monkeypatch, tmp_path
     ):
-        """A document upload while a scan runs is REJECTED (no write to the run).
+        """A document upload while a scan runs is REJECTED (no write anywhere).
 
         Strix already fixed its targets via prepare_run, so a new file won't
         enter the analysis. Rejecting keeps the mirror passive — no write into
-        the official Strix run's evidence dir.
+        the official Strix run nor the bot's private upload dir.
         """
         from strix_telegram_bot.models import MenuState
 
+        monkeypatch.setattr("strix_telegram_bot.config.settings.bot_dir", tmp_path)
         bot, _ = self._make_bot(is_running=True, run_name="scan-abc")
         mock_get_file.return_value = b"file-bytes"
         mock_pm.return_value.current = MenuState.MAIN
@@ -483,28 +489,28 @@ class TestHandleDocumentUpload:
         }
         bot._handle_document(update)
 
-        # No vault created — the file is rejected before being written to the run
-        mock_vault_cls.assert_not_called()
+        # Rejected before any write — no .bot-uploads/ dir created
+        assert not (tmp_path / ".bot-uploads").exists()
         sent = [c.args[2] for c in mock_send.call_args_list]
         assert any("ya está en curso" in t for t in sent)
         assert any("no puede incorporar" in t for t in sent)
 
     @patch("strix_telegram_bot.bot.get_panel_manager")
-    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
     @patch("strix_telegram_bot.telegram.get_file")
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
     def test_document_upload_waiting_for_targets_launches_scan(
-        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+        self, mock_send, mock_sca, mock_get_file, mock_pm, monkeypatch, tmp_path
     ):
-        """A document upload while waiting for targets launches a scan on it."""
+        """A document upload while waiting for targets launches a scan on it.
+
+        The scan target is the bot-private .bot-uploads/ path (valid, absolute).
+        """
         from strix_telegram_bot.models import MenuState
 
+        monkeypatch.setattr("strix_telegram_bot.config.settings.bot_dir", tmp_path)
         bot, _ = self._make_bot(is_running=False)
         mock_get_file.return_value = b"file-bytes"
-        mock_vault = MagicMock()
-        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/f.txt"}
-        mock_vault_cls.return_value = mock_vault
         mock_pm.return_value.current = MenuState.WAITING_FOR_TARGETS
 
         update = {
@@ -514,31 +520,38 @@ class TestHandleDocumentUpload:
 
         bot._launch_scan.assert_called_once()
         args = bot._launch_scan.call_args
-        assert args[0][1] == ["/tmp/x/f.txt"]
+        target = args[0][1][0]
+        # The target is a valid absolute path inside .bot-uploads/ (not strix_runs)
+        uploads = tmp_path / ".bot-uploads"
+        assert uploads.is_dir()
+        assert target.startswith(str(uploads))
+        assert Path(target).is_file()
+        assert Path(target).read_bytes() == b"file-bytes"
 
     @patch("strix_telegram_bot.bot.get_panel_manager")
-    @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")
     @patch("strix_telegram_bot.telegram.get_file")
     @patch("strix_telegram_bot.telegram.send_chat_action")
     @patch("strix_telegram_bot.bot.send_message")
     def test_photo_upload_uses_default_name(
-        self, mock_send, mock_sca, mock_get_file, mock_vault_cls, mock_pm
+        self, mock_send, mock_sca, mock_get_file, mock_pm, monkeypatch, tmp_path
     ):
-        """A photo upload (no file_name) is stored as photo.jpg."""
+        """A photo upload (no file_name) is stored with the photo.jpg suffix."""
         from strix_telegram_bot.models import MenuState
 
+        monkeypatch.setattr("strix_telegram_bot.config.settings.bot_dir", tmp_path)
         bot, _ = self._make_bot(is_running=False)
         mock_get_file.return_value = b"img-bytes"
-        mock_vault = MagicMock()
-        mock_vault.store_bytes.return_value = {"absolute_path": "/tmp/x/photo.jpg"}
-        mock_vault_cls.return_value = mock_vault
         mock_pm.return_value.current = MenuState.MAIN
 
         update = {"message": {"chat": {"id": 1}, "photo": [{"file_id": "fid"}]}}
         bot._handle_document(update)
 
-        stored_name = mock_vault.store_bytes.call_args[0][1]
-        assert stored_name == "photo.jpg"
+        uploads = tmp_path / ".bot-uploads"
+        files = list(uploads.iterdir())
+        assert len(files) == 1
+        # Default name photo.jpg is preserved (with a unique prefix)
+        assert files[0].name.endswith("_photo.jpg")
+        assert files[0].read_bytes() == b"img-bytes"
 
     @patch("strix_telegram_bot.telegram.get_file")
     @patch("strix_telegram_bot.telegram.send_chat_action")
@@ -563,3 +576,57 @@ class TestHandleDocumentUpload:
         bot._handle_document(update)
         sent = [c.args[2] for c in mock_send.call_args_list]
         assert any("No se pudo leer el archivo" in t for t in sent)
+
+
+class TestUploadStorageSeparation:
+    """_store_upload_bytes: bot-private storage, sanitized, no collisions/traversal.
+
+    The destination is settings.bot_dir / ".bot-uploads" (OUTSIDE strix_runs,
+    which is reserved for Strix-produced runs/evidence).
+    """
+
+    def _store(self, monkeypatch, tmp_path, file_name, data=b"data"):
+        from strix_telegram_bot.bot import _store_upload_bytes
+        monkeypatch.setattr("strix_telegram_bot.config.settings.bot_dir", tmp_path)
+        return _store_upload_bytes(data, file_name)
+
+    def test_normal_upload_goes_to_bot_uploads(self, monkeypatch, tmp_path):
+        """A. document.pdf -> under .bot-uploads/, nothing under strix_runs/upload/."""
+        path = self._store(monkeypatch, tmp_path, "document.pdf")
+        assert path is not None
+        uploads = tmp_path / ".bot-uploads"
+        assert uploads.is_dir()
+        assert path.parent == uploads
+        assert path.name.endswith("_document.pdf")
+        assert path.read_bytes() == b"data"
+        # Nothing written under strix_runs/upload/
+        assert not (tmp_path / "strix_runs" / "upload").exists()
+
+    def test_same_filename_twice_no_overwrite(self, monkeypatch, tmp_path):
+        """B. same filename twice -> both survive (two distinct files)."""
+        p1 = self._store(monkeypatch, tmp_path, "document.pdf")
+        p2 = self._store(monkeypatch, tmp_path, "document.pdf")
+        assert p1 != p2
+        assert p1.exists() and p2.exists()
+        assert p1.read_bytes() == b"data"
+        assert p2.read_bytes() == b"data"
+        files = list((tmp_path / ".bot-uploads").iterdir())
+        assert len(files) == 2
+
+    def test_malicious_filename_no_traversal(self, monkeypatch, tmp_path):
+        """C. ../../foo.apk -> never escapes .bot-uploads/."""
+        path = self._store(monkeypatch, tmp_path, "../../foo.apk")
+        assert path is not None
+        uploads = tmp_path / ".bot-uploads"
+        # The file is inside .bot-uploads/ (the ../.. was neutralized)
+        assert uploads in path.parents
+        assert path.name.endswith("_foo.apk")
+
+    def test_absolute_filename_no_escape(self, monkeypatch, tmp_path):
+        """D. /tmp/foo.apk -> never writes to /tmp (basename used, in .bot-uploads/)."""
+        path = self._store(monkeypatch, tmp_path, "/tmp/foo.apk")
+        assert path is not None
+        uploads = tmp_path / ".bot-uploads"
+        # The file is inside .bot-uploads/ (the absolute path was neutralized)
+        assert uploads in path.parents
+        assert path.name.endswith("_foo.apk")

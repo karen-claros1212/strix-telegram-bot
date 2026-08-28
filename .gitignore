@@ -19,6 +19,9 @@ build/
 strix_runs/
 test_strix_runs/
 
+# Bot-private pre-scan uploads (outside strix_runs)
+.bot-uploads/
+
 # Logs
 *.log
 logs/

@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -40,6 +41,44 @@ _GITHUB_RE = re.compile(r"github\.com[:/][^\s,>\]\)]+")
 # Delivery retry policy (per-run, persisted via ReportDeliveryTracker)
 _DELIVERY_COOLDOWN = 60.0        # seconds between delivery retries
 _MAX_DELIVERY_ATTEMPTS = 5       # after this many, notify "no pudo enviarse"
+
+
+def _store_upload_bytes(file_bytes: bytes, file_name: str) -> Optional[Path]:
+    """Store a Telegram upload in the bot-private .bot-uploads/ dir.
+
+    The destination is OUTSIDE ``strix_runs`` (which is reserved for
+    Strix-produced runs/evidence). The file is named ``<uuid>_<safe_name>`` so
+    two uploads with the same original name never collide, and the sanitized
+    name (basename only, no directory/absolute components, no ``..``) prevents
+    path traversal. Returns the absolute path on success, ``None`` on failure.
+    """
+    from .config import settings
+
+    upload_dir = settings.bot_dir / ".bot-uploads"
+    try:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            upload_dir.chmod(0o700)  # best-effort private perms
+        except OSError:
+            pass
+    except OSError:
+        logger.warning("upload: could not create .bot-uploads dir")
+        return None
+
+    # Sanitize: basename only (removes dir/absolute components), neutralize
+    # '.'/'..', drop non-printable chars. Preserve the extension when present.
+    base = Path(file_name).name
+    if base in (".", "..", ""):
+        base = "upload"
+    base = "".join(c for c in base if c.isprintable()) or "upload"
+
+    target = (upload_dir / f"{uuid.uuid4().hex}_{base}").resolve()
+    try:
+        target.write_bytes(file_bytes)
+    except OSError:
+        logger.warning("upload: could not write file")
+        return None
+    return target
 
 
 class StrixBot:
@@ -538,7 +577,6 @@ class StrixBot:
             send_message(self, chat_id, "No se pudo leer el archivo.")
             return
 
-        from .strix.evidence_vault import EvidenceVault
         from .telegram import get_file
 
         file_id = doc.get("file_id", "")
@@ -553,8 +591,8 @@ class StrixBot:
 
         # During an active scan, reject new uploads: Strix already fixed its
         # targets via prepare_run, so a new file won't enter the analysis.
-        # Rejecting (rather than saving to the run's evidence) keeps the mirror
-        # passive — no write into the official Strix run.
+        # Rejecting (rather than saving) keeps the mirror passive — no write
+        # into the official Strix run.
         if self._bridge.is_running:
             send_message(
                 self, chat_id,
@@ -564,13 +602,12 @@ class StrixBot:
             )
             return
 
-        vault = EvidenceVault("upload")
-        artifact = vault.store_bytes(file_bytes, file_name, subdir="files", sensitive=False)
-        if artifact is None:
+        # Pre-scan upload: store in the bot-private .bot-uploads/ dir (OUTSIDE
+        # strix_runs, which is reserved for Strix-produced runs/evidence).
+        abs_path = _store_upload_bytes(file_bytes, file_name)
+        if abs_path is None:
             send_message(self, chat_id, "Error al guardar el archivo.")
             return
-
-        abs_path = Path(artifact["absolute_path"])
 
         if pm.current == MenuState.WAITING_FOR_TARGETS:
             self._launch_scan(chat_id, [str(abs_path)])
