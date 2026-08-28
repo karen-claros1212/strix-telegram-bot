@@ -1005,6 +1005,70 @@ class TestHandleTerminalDelivery:
         mock_send_doc.assert_not_called()
 
 
+class TestPhaseFallbackHonesty:
+    """The phase fallback must NOT invent COMPLETED from 'not active + no error'.
+
+    The official Strix phase (mapped via _PHASE_MAP) is the source of truth.
+    The fallback only escalates to FAILED when Strix reports an error; otherwise
+    it leaves the official phase as-is (honest, no invention).
+    """
+
+    def _make_job(self, bot, run_name, phase):
+        from strix_telegram_bot.models import JobState, ScanMode
+        job = JobState(
+            run_name=run_name, target=["https://example.com"],
+            mode=ScanMode.QUICK, phase=phase,
+        )
+        bot._job_store.save(job)
+        return job
+
+    def test_no_error_non_terminal_phase_stays_scanning(
+        self, bot, mock_telegram, mock_send_doc
+    ):
+        """phase='initializing' + is_active=False + no error -> stays SCANNING.
+
+        No invented COMPLETED (the official phase is the source of truth).
+        """
+        from strix_telegram_bot.models import JobPhase
+
+        run_name = "scan-honest-1"
+        self._make_job(bot, run_name, JobPhase.SCANNING)
+        bot._active_job_run_name = run_name
+        bot._bridge._run_name = run_name
+        bot._bridge._coordinator = MagicMock()
+
+        status_dict = {"run_name": run_name, "phase": "initializing", "is_active": False,
+                       "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                       "awaiting_input": False, "input_prompt": ""}
+        with patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
+            bot._drain_update_queue()
+
+        job = bot._job_store.get(run_name)
+        assert job.phase == JobPhase.SCANNING  # NOT COMPLETED (no invention)
+
+    def test_error_non_terminal_phase_marks_failed(
+        self, bot, mock_telegram, mock_send_doc
+    ):
+        """phase='running' + is_active=False + error -> FAILED (honest error escalation)."""
+        from strix_telegram_bot.models import JobPhase
+
+        run_name = "scan-honest-2"
+        self._make_job(bot, run_name, JobPhase.SCANNING)
+        bot._active_job_run_name = run_name
+        bot._bridge._run_name = run_name
+        bot._bridge._coordinator = MagicMock()
+
+        status_dict = {"run_name": run_name, "phase": "running", "is_active": False,
+                       "error": "boom", "target": [], "mode": "deep", "elapsed": "0s",
+                       "awaiting_input": False, "input_prompt": ""}
+        with patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
+            bot._drain_update_queue()
+
+        job = bot._job_store.get(run_name)
+        assert job.phase == JobPhase.FAILED
+        assert job.error == "boom"
+
+
 class TestSendFragmented:
     """Tests for the _send_fragmented helper in reports.py."""
 

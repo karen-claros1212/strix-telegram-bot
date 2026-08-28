@@ -484,7 +484,10 @@ class TestHandleDocumentUpload:
         # Stored under the active run, not "upload"
         mock_vault_cls.assert_called_once_with("scan-abc")
         sent = [c.args[2] for c in mock_send.call_args_list]
-        assert any("Archivo guardado" in t for t in sent)
+        # Honest message: saved to the run vault, but the running scan does not
+        # receive it as input (Strix already fixed its targets via prepare_run).
+        assert any("Guardado en el vault del run" in t for t in sent)
+        assert any("no lo recibe como input" in t for t in sent)
 
     @patch("strix_telegram_bot.bot.get_panel_manager")
     @patch("strix_telegram_bot.strix.evidence_vault.EvidenceVault")

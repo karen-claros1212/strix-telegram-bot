@@ -565,7 +565,11 @@ class StrixBot:
         if pm.current == MenuState.WAITING_FOR_TARGETS:
             self._launch_scan(chat_id, [str(abs_path)])
         elif self._bridge.is_running:
-            send_message(self, chat_id, f"Archivo guardado: {abs_path.name}")
+            send_message(
+                self, chat_id,
+                f"Guardado en el vault del run: {abs_path.name}\n"
+                "El escaneo en curso no lo recibe como input.",
+            )
         else:
             send_message(
                 self, chat_id,
@@ -777,12 +781,14 @@ class StrixBot:
 
             if not status.get("is_active"):
                 if job and job.is_active:
+                    # Only mark FAILED when Strix reports an error. Do NOT invent
+                    # COMPLETED from "not active + no error": the official phase is
+                    # already mapped above (_PHASE_MAP). If Strix hasn't reported a
+                    # terminal phase yet, keep it as-is (honest, no invention).
                     if status.get("error"):
                         job.phase = JobPhase.FAILED
-                    else:
-                        job.phase = JobPhase.COMPLETED
-                    job.error = status.get("error")
-                    self._job_store.save(job)
+                        job.error = status.get("error")
+                        self._job_store.save(job)
 
                 chat_id = self._active_job_chat_id
                 if run_name and chat_id is not None:
