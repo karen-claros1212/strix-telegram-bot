@@ -127,3 +127,38 @@ class TestPrepareScanTargetsCopiesAsRegularFile:
                 assert target_path.is_file()
                 assert not target_path.is_symlink()
                 assert target_path.read_bytes() == original_apk.read_bytes()
+
+
+class TestPrepareScanTargetsDelegatesCloneToOfficial:
+    """FASE 2: the bot no longer pre-clones GitHub repos. The URL is passed
+    through uncloned; the official build_targets_info + prepare_run own the
+    classification and the cloning."""
+
+    def test_github_url_passes_through_uncloned(self):
+        from strix_telegram_bot.bot import StrixBot
+        bot = StrixBot()
+        url = "https://github.com/facebook/zstd"
+        prepared_targets, local_sources = bot._prepare_scan_targets([url])
+        # The URL is passed through as-is (not converted to a local path)
+        assert prepared_targets == [url]
+        # No local_sources for a repository target (official collect_local_sources
+        # builds them from cloned_repo_path after prepare_run clones it)
+        assert local_sources == []
+
+    def test_github_url_no_local_path_created(self, tmp_path, monkeypatch):
+        """No local clone dir is created by the bot for a GitHub URL target."""
+        from strix_telegram_bot.bot import StrixBot
+        bot = StrixBot()
+
+        test_runs_dir = tmp_path / "strix_runs"
+        test_runs_dir.mkdir()
+        with patch("strix_telegram_bot.config.settings") as mock_settings:
+            mock_settings.strix_runs_dir = test_runs_dir
+            prepared_targets, _ = bot._prepare_scan_targets(
+                ["https://github.com/facebook/zstd"])
+        # URL passed through, no local path substituted
+        assert prepared_targets == ["https://github.com/facebook/zstd"]
+        # No clone dir created under repos/
+        repos_dir = test_runs_dir / "repos"
+        if repos_dir.exists():
+            assert not (repos_dir / "facebook" / "zstd").exists()

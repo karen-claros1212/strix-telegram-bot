@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -568,8 +567,18 @@ class StrixBot:
             )
 
     def _prepare_scan_targets(self, targets: list[str]) -> tuple[list[str], list[dict[str, str]]]:
+        """Prepare targets for the official Strix flow.
+
+        Strix owns target setup: ``build_targets_info`` classifies each target
+        and ``prepare_run`` clones repositories and collects local sources.
+        The bot only handles what the official flow cannot:
+          - resolve local directories to absolute paths
+          - wrap uploaded files in a directory (Telegram uploads are files,
+            but the official ``local_code`` target must be a directory)
+        GitHub URLs are passed through UNCLONED — the official prepare_run
+        clones them (no bot pre-clone).
+        """
         from strix_telegram_bot.config import settings
-        from strix_telegram_bot.strix.runtime_bridge import clone_repository
 
         final_targets: list[str] = []
         local_sources: list[dict[str, str]] = []
@@ -628,40 +637,9 @@ class StrixBot:
                     _add_local(wrap_dir, p.stem)
                 continue
 
-            m = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$', t)
-            if m:
-                repo_full = m.group(1).rstrip("/")
-                clone_dir = repos_dir / repo_full
-                should_clone = not clone_dir.exists()
-
-                try:
-                    if should_clone and clone_repository:
-                        clone_dir.parent.mkdir(parents=True, exist_ok=True)
-                        clone_repository(
-                            repo_url=f"https://github.com/{repo_full}.git",
-                            clone_dir=str(clone_dir),
-                        )
-                    elif should_clone:
-                        subprocess.run(
-                            ["git", "clone", f"https://github.com/{repo_full}.git", str(clone_dir)],
-                            capture_output=True, text=True, timeout=120, check=True,
-                        )
-                    if clone_dir.exists():
-                        git_dir = clone_dir / ".git"
-                        if (git_dir / "shallow").exists():
-                            (git_dir / "shallow").unlink()
-                            fetch_dir = git_dir / "fetch"
-                            if fetch_dir.exists():
-                                fetch_dir.rmdir()
-                except Exception as e:
-                    logger.warning("Failed to clone %s: %s", t, e)
-                    final_targets.append(t)
-                    continue
-
-                final_targets.append(str(clone_dir))
-                _add_local(clone_dir, repo_full.split("/")[-1].removesuffix(".git"))
-                continue
-
+            # GitHub URL, domain, IP, or anything else: pass through uncloned.
+            # The official build_targets_info + prepare_run own classification
+            # and cloning.
             final_targets.append(t)
 
         return final_targets, local_sources
