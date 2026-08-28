@@ -73,21 +73,15 @@ class TestCaidoPanel:
         assert "Active" in panel
         assert "http://127.0.0.1:8080" in panel
 
-    def test_collect_caido_artifacts(self, tmp_path):
+    def test_collect_caido_artifacts(self, tmp_path, monkeypatch):
+        """FASE 3: artifacts are resolved via the official run_dir_for()
+        (Path.cwd() / strix_runs / run_name), so the test chdir's to tmp_path."""
         caido_dir = tmp_path / "strix_runs" / "test-run" / "caido"
         caido_dir.mkdir(parents=True)
         (caido_dir / "capture.json").write_text("{}")
 
         cp = CaidoPanel()
+        monkeypatch.chdir(tmp_path)
         artifacts = cp.collect_caido_artifacts("test-run")
-        assert len(artifacts) == 0
-
-        from strix_telegram_bot.config import settings
-        old_dir = settings.strix_runs_dir
-        settings.strix_runs_dir = tmp_path / "strix_runs"
-
-        try:
-            artifacts = cp.collect_caido_artifacts("test-run")
-            assert len(artifacts) == 1
-        finally:
-            settings.strix_runs_dir = old_dir
+        assert len(artifacts) == 1
+        assert artifacts[0]["name"] == "capture.json"

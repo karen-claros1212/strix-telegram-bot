@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Optional
 
-from strix_telegram_bot.config import settings
+from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
 
 
 class CaidoPanel:
@@ -86,9 +85,10 @@ class CaidoPanel:
             return "Inactive"
 
     def detect_caido_from_logs(self, run_name: str) -> bool:
+        if _run_dir_for is None:
+            return False
         for candidate in [
-            settings.strix_runs_dir / run_name / "logs",
-            Path.cwd() / "strix_runs" / run_name / "logs",
+            _run_dir_for(run_name) / "logs",
         ]:
             if not candidate.exists():
                 continue
@@ -103,9 +103,10 @@ class CaidoPanel:
         return False
 
     def detect_caido_from_events(self, run_name: str) -> bool:
+        if _run_dir_for is None:
+            return False
         for candidate in [
-            settings.strix_runs_dir / run_name / "events.jsonl",
-            Path.cwd() / "strix_runs" / run_name / "events.jsonl",
+            _run_dir_for(run_name) / "events.jsonl",
         ]:
             if not candidate.exists():
                 continue
@@ -167,11 +168,12 @@ class CaidoPanel:
         return "\n".join(lines)
 
     def collect_caido_artifacts(self, run_name: str) -> list[dict]:
+        if _run_dir_for is None:
+            return []
         artifacts = []
         for candidate in [
-            settings.strix_runs_dir / run_name / "caido",
-            Path.cwd() / "strix_runs" / run_name / "caido",
-            settings.strix_runs_dir / run_name / "evidence" / "caido",
+            _run_dir_for(run_name) / "caido",
+            _run_dir_for(run_name) / "evidence" / "caido",
         ]:
             if not candidate.exists():
                 continue

@@ -4,13 +4,13 @@ import json as _json
 from pathlib import Path
 from typing import Any
 
-from strix_telegram_bot.config import settings
 from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
 from strix_telegram_bot.ui.keyboards import reports_list, back_to_menu, parse_callback, report_detail_menu
 from strix_telegram_bot.ui.messages import escape_md
 from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.strix.report_delivery import deliver_report_document
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
+from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
 from strix_telegram_bot.jobs.job_store import JobStore
 from strix_telegram_bot.models import JobPhase
 
@@ -18,9 +18,15 @@ _MAX_MSG = 4000
 
 
 def _is_run_json_completed(run_name: str) -> bool:
-    """Check that run.json exists and has status == 'completed'."""
+    """Check that run.json exists and has status == 'completed'.
+
+    Uses the official run_dir_for() as the single path authority for run
+    artifacts (not settings.strix_runs_dir / run_name).
+    """
     try:
-        run_dir = settings.strix_runs_dir / run_name
+        if _run_dir_for is None:
+            return False
+        run_dir = _run_dir_for(run_name)
         run_json = run_dir / "run.json"
         if run_json.exists():
             data = _json.loads(run_json.read_text())

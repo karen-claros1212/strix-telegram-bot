@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from strix_telegram_bot.config import settings
+from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
 from strix_telegram_bot.safety.redaction import redact_text
 
 
@@ -21,19 +21,20 @@ class EvidenceVault:
         self._vault_dir: Optional[Path] = None
 
     def _resolve_vault(self) -> Optional[Path]:
-        for candidate in [
-            settings.strix_runs_dir / self.run_name / "evidence",
-            Path.cwd() / "strix_runs" / self.run_name / "evidence",
-        ]:
-            if candidate.exists() or candidate.parent.exists():
-                return candidate
+        if _run_dir_for is None:
+            return None
+        candidate = _run_dir_for(self.run_name) / "evidence"
+        if candidate.exists() or candidate.parent.exists():
+            return candidate
         return None
 
     def _ensure_vault(self) -> Path:
         if self._vault_dir is None:
             self._vault_dir = self._resolve_vault()
         if self._vault_dir is None:
-            self._vault_dir = settings.strix_runs_dir / self.run_name / "evidence"
+            if _run_dir_for is None:
+                raise RuntimeError("run_dir_for unavailable (strix not installed)")
+            self._vault_dir = _run_dir_for(self.run_name) / "evidence"
         self._vault_dir.mkdir(parents=True, exist_ok=True)
         return self._vault_dir
 
@@ -137,8 +138,8 @@ class EvidenceVault:
 
     def _manifest_path(self) -> Optional[Path]:
         vault = self._vault_dir or self._resolve_vault()
-        if vault is None:
-            vault = settings.strix_runs_dir / self.run_name / "evidence"
+        if vault is None and _run_dir_for is not None:
+            vault = _run_dir_for(self.run_name) / "evidence"
         return vault / _MANIFEST_NAME if vault else None
 
     def _append_to_manifest(self, artifact: dict) -> None:
