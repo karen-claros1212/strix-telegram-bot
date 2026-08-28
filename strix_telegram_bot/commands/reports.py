@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json as _json
-from pathlib import Path
 from typing import Any
 
-from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
-from strix_telegram_bot.ui.keyboards import reports_list, back_to_menu, parse_callback, report_detail_menu
-from strix_telegram_bot.ui.messages import escape_md
-from strix_telegram_bot.strix.report_collector import ReportCollector
-from strix_telegram_bot.strix.report_delivery import deliver_report_document
-from strix_telegram_bot.strix.evidence_vault import EvidenceVault
-from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
 from strix_telegram_bot.jobs.job_store import JobStore
 from strix_telegram_bot.models import JobPhase
+from strix_telegram_bot.strix.evidence_vault import EvidenceVault
+from strix_telegram_bot.strix.report_collector import ReportCollector
+from strix_telegram_bot.strix.report_delivery import deliver_report_document
+from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
+from strix_telegram_bot.telegram import edit_message, send_message
+from strix_telegram_bot.ui.keyboards import (
+    back_to_menu,
+    parse_callback,
+    report_detail_menu,
+    reports_list,
+)
+from strix_telegram_bot.ui.messages import escape_md
 
 _MAX_MSG = 4000
 
@@ -174,7 +178,9 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
             and j.run_name != "pending"
             and _is_run_json_completed(j.run_name)]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu()
+        )
         return
 
     # Resolve ONE canonical run: the most recent completed run (no cross-run fallback)
@@ -189,7 +195,9 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
         )
         return
 
-    edit_message(bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu())
+    edit_message(
+        bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu()
+    )
     ok = _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
     status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
     edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
@@ -202,7 +210,9 @@ def _send_executive_summary(bot, chat_id, msg_id) -> None:
             and j.run_name != "pending"
             and _is_run_json_completed(j.run_name)]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu()
+        )
         return
 
     for job in jobs:
@@ -218,7 +228,9 @@ def _send_executive_summary(bot, chat_id, msg_id) -> None:
 def _show_report_history(bot, chat_id, msg_id) -> None:
     jobs = ReportCollector.list_jobs_with_reports(limit=8)
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No hay historial de reportes.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "No hay historial de reportes.", reply_markup=back_to_menu()
+        )
         return
     lines = ["Historial de reportes:"]
     for j in jobs:
@@ -233,7 +245,9 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
             and j.run_name != "pending"
             and _is_run_json_completed(j.run_name)]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu()
+        )
         return
 
     label = rtype.upper()
@@ -250,13 +264,19 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
                 content = _json.dumps(events[:50], indent=2)
 
         if content and content.strip():
-            edit_message(bot, chat_id, msg_id, f"Enviando reporte {label}…", reply_markup=back_to_menu())
+            edit_message(
+                bot, chat_id, msg_id, f"Enviando reporte {label}…", reply_markup=back_to_menu()
+            )
             ok = _send_fragmented(bot, chat_id, f"Reporte {label}:\n\n{content}")
-            status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
+            status = (
+                "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
+            )
             edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
             return
 
-    edit_message(bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu())
+    edit_message(
+        bot, chat_id, msg_id, f"No hay reporte {label} disponible.", reply_markup=back_to_menu()
+    )
 
 
 def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
@@ -265,7 +285,11 @@ def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
     No fallback: the run_name must come from the report detail callback.
     """
     if not run_name:
-        edit_message(bot, chat_id, msg_id, "Informe no disponible: falta el escaneo seleccionado.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id,
+            "Informe no disponible: falta el escaneo seleccionado.",
+            reply_markup=back_to_menu(),
+        )
         return
 
     if not _is_run_json_completed(run_name):
@@ -280,9 +304,15 @@ def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
     edit_message(bot, chat_id, msg_id, "Descargando informe completo…", reply_markup=back_to_menu())
     result = deliver_report_document(bot, chat_id, run_name)
     if result == "delivered":
-        edit_message(bot, chat_id, msg_id, "Informe completo enviado como archivo Markdown.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id,
+            "Informe completo enviado como archivo Markdown.",
+            reply_markup=back_to_menu(),
+        )
     elif result in ("send_transient", "send_permanent"):
-        edit_message(bot, chat_id, msg_id, "Error al enviar el informe.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "Error al enviar el informe.", reply_markup=back_to_menu()
+        )
     else:
         edit_message(bot, chat_id, msg_id, "Informe no disponible.", reply_markup=back_to_menu())
 
@@ -294,7 +324,9 @@ def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:
             and j.run_name != "pending"
             and _is_run_json_completed(j.run_name)]
     if not jobs:
-        edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu()
+        )
         return
 
     for job in jobs:
@@ -304,7 +336,9 @@ def _show_evidence_for_latest(bot, chat_id, msg_id) -> None:
             edit_message(bot, chat_id, msg_id, ev_summary, reply_markup=back_to_menu())
             return
 
-    edit_message(bot, chat_id, msg_id, "No se encontró evidencia válida.", reply_markup=back_to_menu())
+    edit_message(
+        bot, chat_id, msg_id, "No se encontró evidencia válida.", reply_markup=back_to_menu()
+    )
 
 
 def _chat_id(update: dict) -> int:

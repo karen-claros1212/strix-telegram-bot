@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from strix_telegram_bot.strix.report_collector import ReportCollector
 from strix_telegram_bot.models import JobPhase, JobState, ScanMode
+from strix_telegram_bot.strix.report_collector import ReportCollector
 
 
 class TestReportCollector:
@@ -130,7 +129,7 @@ class TestSendLatestReportFilter:
         monkeypatch.setattr(reports_mod, "ReportCollector", lambda run: mock_rc)
 
         with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
-             patch.object(reports_mod, "edit_message") as mock_edit:
+             patch.object(reports_mod, "edit_message"):
             reports_mod._send_latest_report(fake_bot, 123, 456)
             mock_frag.assert_called_once()
             call_text = mock_frag.call_args[0][2]
@@ -263,7 +262,7 @@ class TestSendLatestReportFilter:
 
         fake_bot = MagicMock()
         with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
-             patch.object(reports_mod, "edit_message") as mock_edit:
+             patch.object(reports_mod, "edit_message"):
             reports_mod._send_latest_report(fake_bot, 123, 456)
             mock_frag.assert_called_once()
             call_text = mock_frag.call_args[0][2]
@@ -328,7 +327,7 @@ class TestSendLatestReportFilter:
 
         fake_bot = MagicMock()
         with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
-             patch.object(reports_mod, "edit_message") as mock_edit:
+             patch.object(reports_mod, "edit_message"):
             reports_mod._send_report_type(fake_bot, 123, 456, "csv")
             mock_frag.assert_called_once()
             call_text = mock_frag.call_args[0][2]
@@ -397,7 +396,10 @@ class TestRunBasedMenu:
 
         mock_deliver = MagicMock(return_value="delivered")
         monkeypatch.setattr(reports_mod, "deliver_report_document", mock_deliver)
-        monkeypatch.setattr(reports_mod, "_is_run_json_completed", lambda run: run in ("scan-aaa", "scan-bbb"))
+        monkeypatch.setattr(
+            reports_mod, "_is_run_json_completed",
+            lambda run: run in ("scan-aaa", "scan-bbb"),
+        )
 
         update = {
             "callback_query": {

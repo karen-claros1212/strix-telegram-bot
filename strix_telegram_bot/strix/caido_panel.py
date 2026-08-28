@@ -154,7 +154,7 @@ class CaidoPanel:
             )
 
         lines = ["Caido Proxy"]
-        lines.append(f"Status: Active")
+        lines.append("Status: Active")
         if status["url"]:
             lines.append(f"URL: {status['url']}")
         if status["port"]:

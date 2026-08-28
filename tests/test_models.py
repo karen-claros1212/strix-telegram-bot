@@ -1,6 +1,6 @@
 from strix_telegram_bot.models import (
-    JobState,
     JobPhase,
+    JobState,
     ScanMode,
 )
 

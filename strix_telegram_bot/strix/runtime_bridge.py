@@ -65,8 +65,6 @@ clone_repository: Any = None
 resolve_diff_scope_context: Any = None
 rewrite_localhost_targets: Any = None
 build_diff_scope_instruction: Any = None
-DiffScopeResult: Any = None
-RepoDiffScope: Any = None
 _load_settings: Any = None
 _run_dir_for: Any = None
 send_user_message_to_agent: Any = None
@@ -76,27 +74,38 @@ _build_targets_info_official: Any = None
 try:
     from strix.config import load_settings as _ls
     from strix.core.agents import AgentCoordinator as _AC
+    from strix.core.paths import run_dir_for as _rdir
     from strix.core.runner import run_strix_scan as _rss
+    from strix.interface.scan_setup import build_targets_info as _bti
+    from strix.interface.scan_setup import prepare_run as _prepare_run
+    from strix.interface.tui.backend.messages import send_user_message_to_agent as _send_umta
     from strix.interface.tui.live_view import TuiLiveView as _TLV
-    from strix.runtime import session_manager
+    from strix.interface.tui.runtime import GoTuiRuntime as _GTR
     from strix.interface.utils import (
         assign_workspace_subdirs as _aws,
-        infer_target_type as _itt,
-        collect_local_sources as _cls,
-        clone_repository as _clone,
-        resolve_diff_scope_context as _resolve_diff,
-        rewrite_localhost_targets as _rewrite,
-        build_diff_scope_instruction as _build_diff_instr,
-        DiffScopeResult,
-        RepoDiffScope,
     )
-    from strix.report.state import ReportState as _RS, set_global_report_state as _sgrs
+    from strix.interface.utils import (
+        build_diff_scope_instruction as _build_diff_instr,
+    )
+    from strix.interface.utils import (
+        clone_repository as _clone,
+    )
+    from strix.interface.utils import (
+        collect_local_sources as _cls,
+    )
+    from strix.interface.utils import (
+        infer_target_type as _itt,
+    )
+    from strix.interface.utils import (
+        resolve_diff_scope_context as _resolve_diff,
+    )
+    from strix.interface.utils import (
+        rewrite_localhost_targets as _rewrite,
+    )
+    from strix.report.state import ReportState as _RS
     from strix.report.state import get_global_report_state as _ggrs
-    from strix.interface.tui.backend.messages import send_user_message_to_agent as _send_umta
-    from strix.core.paths import run_dir_for as _rdir
-    from strix.interface.tui.runtime import GoTuiRuntime as _GTR
-    from strix.interface.scan_setup import prepare_run as _prepare_run
-    from strix.interface.scan_setup import build_targets_info as _bti
+    from strix.report.state import set_global_report_state as _sgrs
+    from strix.runtime import session_manager  # noqa: F401 (availability + cleanup)
 
     AgentCoordinator = _AC
     run_strix_scan = _rss
@@ -383,7 +392,11 @@ class StrixRuntimeBridge:
 
     # ── scan thread ────────────────────────────────────────────
 
-    def _scan_thread(self, args: SimpleNamespace, user_local_sources: Optional[list[dict[str, str]]] = None) -> None:
+    def _scan_thread(
+        self,
+        args: SimpleNamespace,
+        user_local_sources: Optional[list[dict[str, str]]] = None,
+    ) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
 

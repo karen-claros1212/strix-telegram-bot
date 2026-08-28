@@ -2,19 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from strix_telegram_bot.telegram import send_message, edit_message
+from strix_telegram_bot.jobs.job_store import JobStore
+from strix_telegram_bot.telegram import edit_message, send_message
 from strix_telegram_bot.ui.keyboards import (
-    job_panel,
-    back_to_menu,
-    parse_callback,
-    main_menu,
-    build_inline_keyboard,
     _btn,
     _cb,
+    back_to_menu,
+    build_inline_keyboard,
+    job_panel,
+    parse_callback,
 )
-from strix_telegram_bot.ui.messages import job_status_text, main_menu_text, escape_md
-from strix_telegram_bot.jobs.job_store import JobStore
-from strix_telegram_bot.models import JobPhase
+from strix_telegram_bot.ui.messages import escape_md, job_status_text
 
 _PAGE_SIZE = 10
 
@@ -74,7 +72,10 @@ def callback_jobs(bot: Any, update: dict) -> None:
             agents = bridge.list_agents()
             if agents:
                 from strix_telegram_bot.ui.keyboards import agent_selector
-                edit_message(bot, chat_id, msg_id, "Selecciona un agente:", reply_markup=agent_selector(agents))
+                edit_message(
+                    bot, chat_id, msg_id, "Selecciona un agente:",
+                    reply_markup=agent_selector(agents),
+                )
             else:
                 edit_message(bot, chat_id, msg_id, "No hay agentes.", reply_markup=back_to_menu())
         else:
@@ -87,7 +88,9 @@ def callback_jobs(bot: Any, update: dict) -> None:
             edit_message(bot, chat_id, msg_id, "Deteniendo escaneo...", reply_markup=back_to_menu())
             bridge.stop_scan_async()
         else:
-            edit_message(bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu())
+            edit_message(
+                bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu()
+            )
 
     elif action == "chat":
         bridge = getattr(bot, "_bridge", None)
@@ -98,7 +101,10 @@ def callback_jobs(bot: Any, update: dict) -> None:
                     _show_agent_chat(bot, chat_id, msg_id, bridge, agents[0]["id"])
                 else:
                     from strix_telegram_bot.ui.keyboards import agent_selector
-                    edit_message(bot, chat_id, msg_id, "Selecciona un agente:", reply_markup=agent_selector(agents))
+                edit_message(
+                    bot, chat_id, msg_id, "Selecciona un agente:",
+                    reply_markup=agent_selector(agents),
+                )
             else:
                 edit_message(bot, chat_id, msg_id, "No hay agentes.", reply_markup=back_to_menu())
         else:
@@ -109,14 +115,18 @@ def callback_jobs(bot: Any, update: dict) -> None:
         if bridge and bridge.is_running:
             _show_agent_tree(bot, chat_id, msg_id, bridge)
         else:
-            edit_message(bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu())
+            edit_message(
+                bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu()
+            )
 
     elif action == "vulns":
         bridge = getattr(bot, "_bridge", None)
         if bridge and bridge.is_running:
             _show_vulnerabilities(bot, chat_id, msg_id, bridge)
         else:
-            edit_message(bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu())
+            edit_message(
+                bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu()
+            )
 
     elif action == "vulndetail":
         if len(parts) < 3:
@@ -178,11 +188,17 @@ def callback_jobs(bot: Any, update: dict) -> None:
         bridge = getattr(bot, "_bridge", None)
         if bridge and bridge.is_running:
             ok = bridge.stop_agent(agent_id)
-            edit_message(bot, chat_id, msg_id,
-                        f"Agente {agent_id[:8]} detenido." if ok else f"No se pudo detener {agent_id[:8]}.",
-                        reply_markup=back_to_menu())
+            msg = (
+                f"Agente {agent_id[:8]} detenido." if ok
+                else f"No se pudo detener {agent_id[:8]}."
+            )
+            edit_message(
+                bot, chat_id, msg_id, msg, reply_markup=back_to_menu()
+            )
         else:
-            edit_message(bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu())
+            edit_message(
+                bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu()
+            )
 
 
 def _list_jobs(bot, chat_id, msg_id=None) -> None:
@@ -194,7 +210,9 @@ def _list_jobs(bot, chat_id, msg_id=None) -> None:
     else:
         lines = ["Trabajos recientes:"]
         for j in jobs:
-            lines.append(f"{j.phase.value} {escape_md(j.run_name[:30])} [{j.mode.value}] {j.elapsed}")
+            lines.append(
+                f"{j.phase.value} {escape_md(j.run_name[:30])} [{j.mode.value}] {j.elapsed}"
+            )
         text = "\n".join(lines)
         kb = back_to_menu()
     if msg_id:
@@ -304,13 +322,13 @@ def _show_agent_chat(bot: Any, chat_id: str, msg_id: str, bridge, agent_id: str,
                 content = data.get("content", "")
                 streaming = data.get("metadata", {}).get("streaming", False)
                 if streaming:
-                    chunk.append(f">> STRIX (escribiendo)")
+                    chunk.append(">> STRIX (escribiendo)")
                     chunk.append(f"   {content}")
                 elif role == "user":
-                    chunk.append(f">> Tu")
+                    chunk.append(">> Tu")
                     chunk.append(f"   {content}")
                 elif role == "assistant":
-                    chunk.append(f">> STRIX")
+                    chunk.append(">> STRIX")
                     chunk.append(f"   {content}")
             elif ev_type == "tool":
                 from strix_telegram_bot.strix.telegram_renderers import render_tool_event
@@ -331,7 +349,6 @@ def _show_agent_chat(bot: Any, chat_id: str, msg_id: str, bridge, agent_id: str,
     # Navigation: cursor-based pagination
     nav_buttons = []
     first_in_page = page[0] if page else None
-    last_in_timeline = timeline[-1] if timeline else None
 
     if first_in_page and (before_event_id != "__latest__" or len(timeline) > _PAGE_SIZE):
         prev_id = first_in_page.get("id", "")
@@ -374,7 +391,10 @@ def _show_agent_tree(bot: Any, chat_id: str, msg_id: str, bridge) -> None:
         prefix = "  " * depth + ("└ " if depth > 0 else "")
         name = info.get("name", aid)[:20]
         status = info.get("status", "?")
-        icon = {"running": "▶", "waiting": "⏳", "completed": "✅", "stopped": "⏹", "failed": "❌"}.get(status, "?")
+        icon = {
+            "running": "▶", "waiting": "⏳", "completed": "✅",
+            "stopped": "⏹", "failed": "❌",
+        }.get(status, "?")
         result = [f"{prefix}{icon} {name} ({status})"]
         children = [k for k, v in agents.items() if v.get("parent_id") == aid and k != aid]
         for child in children:
@@ -416,7 +436,10 @@ def _show_vulnerabilities(bot: Any, chat_id: str, msg_id: str, bridge,
                          before_vuln_id: str = "__latest__") -> None:
     vulns = bridge.get_vulnerabilities()
     if not vulns:
-        edit_message(bot, chat_id, msg_id, "Sin vulnerabilidades detectadas.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "Sin vulnerabilidades detectadas.",
+            reply_markup=back_to_menu(),
+        )
         return
 
     per_page = 5
@@ -473,7 +496,10 @@ def _show_vuln_detail(bot: Any, chat_id: str, msg_id: str, bridge, vuln_id: str,
     vulns = bridge.get_vulnerabilities()
     vuln = next((v for v in vulns if v.get("id") == vuln_id), None)
     if not vuln:
-        edit_message(bot, chat_id, msg_id, "Vulnerabilidad no encontrada.", reply_markup=back_to_menu())
+        edit_message(
+            bot, chat_id, msg_id, "Vulnerabilidad no encontrada.",
+            reply_markup=back_to_menu(),
+        )
         return
 
     # Build sections for long content
@@ -548,7 +574,9 @@ def _show_vuln_detail(bot: Any, chat_id: str, msg_id: str, bridge, vuln_id: str,
         dep_name = dep.get("name", "")
         dep_version = dep.get("version", "")
         if dep_name:
-            sections.append(f"DEPENDENCIA: {dep_name}" + (f" v{dep_version}" if dep_version else ""))
+            sections.append(
+                f"DEPENDENCIA: {dep_name}" + (f" v{dep_version}" if dep_version else "")
+            )
 
     # Code locations
     locations = vuln.get("code_locations", []) or []

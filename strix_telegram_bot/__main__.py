@@ -36,8 +36,9 @@ def _normalize_strix_environment() -> None:
 
 _normalize_strix_environment()
 
-from .config import settings
-from .bot import StrixBot
+# Imports after env normalization (intentional ordering)
+from .bot import StrixBot  # noqa: E402
+from .config import settings  # noqa: E402
 
 
 def _check() -> None:

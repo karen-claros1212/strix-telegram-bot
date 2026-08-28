@@ -51,8 +51,9 @@ class TestVersionWarning:
 class TestVersionUsesPackageMetadata:
     def test_cmd_version_uses_pkg_version(self, monkeypatch):
         """cmd_version should call importlib.metadata.version, not subprocess."""
-        import strix_telegram_bot.commands.health as health_mod
         from unittest.mock import MagicMock, patch
+
+        import strix_telegram_bot.commands.health as health_mod
 
         calls = []
         def fake_pkg_version(pkg):
@@ -73,8 +74,9 @@ class TestVersionUsesPackageMetadata:
 
     def test_cmd_version_shows_module_path(self, monkeypatch):
         """cmd_version output should include the module path."""
-        import strix_telegram_bot.commands.health as health_mod
         from unittest.mock import MagicMock, patch
+
+        import strix_telegram_bot.commands.health as health_mod
 
         monkeypatch.setattr(health_mod, "_pkg_version", lambda pkg: "1.1.0")
         monkeypatch.setattr(health_mod, "_get_strix_module_path", lambda: "/path/to/strix")
@@ -90,8 +92,9 @@ class TestVersionUsesPackageMetadata:
 
     def test_cmd_version_shows_min_version(self, monkeypatch):
         """cmd_version output should include the minimum required version."""
-        import strix_telegram_bot.commands.health as health_mod
         from unittest.mock import MagicMock, patch
+
+        import strix_telegram_bot.commands.health as health_mod
 
         monkeypatch.setattr(health_mod, "_pkg_version", lambda pkg: "1.3.1")
 
@@ -106,8 +109,9 @@ class TestVersionUsesPackageMetadata:
 
     def test_send_health_uses_pkg_version(self, monkeypatch):
         """_send_health should call importlib.metadata.version, not subprocess."""
-        import strix_telegram_bot.commands.health as health_mod
         from unittest.mock import MagicMock, patch
+
+        import strix_telegram_bot.commands.health as health_mod
 
         monkeypatch.setattr(health_mod, "_pkg_version", lambda pkg: "1.1.0")
 
@@ -120,7 +124,8 @@ class TestVersionUsesPackageMetadata:
 
     def test_no_subprocess_import(self):
         """health.py should NOT import subprocess."""
-        import strix_telegram_bot.commands.health as health_mod
         import inspect
+
+        import strix_telegram_bot.commands.health as health_mod
         source = inspect.getsource(health_mod)
         assert "subprocess.run" not in source or "strix.*--version" not in source

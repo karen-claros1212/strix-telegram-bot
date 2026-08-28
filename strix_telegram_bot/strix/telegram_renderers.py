@@ -8,7 +8,6 @@ See: strix/interface/tui/renderers/ for the official TUI renderers.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -226,7 +225,10 @@ def _render_view_image(status: str, args: dict, result: Any) -> str:
             lines.append(f"   {_truncate_str(path, 60)}")
         if isinstance(result, str) and result.strip():
             err = result.strip()
-            if any(err.lower().startswith(p) for p in ("image path", "unable to read", "not a supported")):
+            if any(
+                err.lower().startswith(p)
+                for p in ("image path", "unable to read", "not a supported")
+            ):
                 lines.append(f"   error: {err[:100]}")
             else:
                 lines.append("   OK")

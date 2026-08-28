@@ -59,7 +59,9 @@ def deliver_report_document(
 
     # 2. Verify penetration_test_report.md exists and is non-empty
     if not report_path.is_file() or report_path.stat().st_size == 0:
-        logger.warning("deliver_report: penetration_test_report.md missing or empty for %s", run_name)
+        logger.warning(
+            "deliver_report: penetration_test_report.md missing or empty for %s", run_name
+        )
         return "missing"
 
     # 3. Send via sendDocument
@@ -75,7 +77,9 @@ def deliver_report_document(
     )
 
     if outcome.ok:
-        logger.info("deliver_report: delivered for %s (message_id=%s)", run_name, outcome.message_id)
+        logger.info(
+            "deliver_report: delivered for %s (message_id=%s)", run_name, outcome.message_id
+        )
         return "delivered"
 
     if outcome.kind == "permanent":

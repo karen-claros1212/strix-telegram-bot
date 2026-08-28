@@ -90,7 +90,11 @@ def _request(
                 )
                 return None
             # Other permanent errors
-            if "message is not modified" in body or "message to edit not found" in body or "message can't be edited" in body:
+            if (
+                "message is not modified" in body
+                or "message to edit not found" in body
+                or "message can't be edited" in body
+            ):
                 return None
             logger.warning(
                 "HTTP %d on %s (attempt %d/%d): %s — body: %s",
@@ -343,7 +347,10 @@ def send_document(
                     continue
                 return SendOutcome.transient()
             if e.code == 408 or e.code >= 500:
-                logger.warning("HTTP %d on sendDocument (attempt %d/%d): retrying", e.code, attempt + 1, _MAX_RETRIES)
+                logger.warning(
+                    "HTTP %d on sendDocument (attempt %d/%d): retrying",
+                    e.code, attempt + 1, _MAX_RETRIES,
+                )
                 if attempt < _MAX_RETRIES - 1:
                     time.sleep(_RETRY_DELAY * (2 ** attempt))
                     continue

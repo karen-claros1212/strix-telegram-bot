@@ -6,7 +6,7 @@ Mocks only urllib.request.urlopen — NOT send_document itself.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -33,7 +33,9 @@ class TestSanitizeFilename:
 
     def test_keeps_safe_chars(self):
         from strix_telegram_bot.telegram import _sanitize_filename
-        assert _sanitize_filename("STRIX_scan-123_INFORME_COMPLETO.md") == "STRIX_scan-123_INFORME_COMPLETO.md"
+        assert _sanitize_filename(
+            "STRIX_scan-123_INFORME_COMPLETO.md"
+        ) == "STRIX_scan-123_INFORME_COMPLETO.md"
 
     def test_fallback_when_empty(self):
         from strix_telegram_bot.telegram import _sanitize_filename
@@ -141,7 +143,8 @@ class TestBuildMultipartForm:
         )
         assert content_type.startswith("multipart/form-data; boundary=")
         assert body.startswith(b"------strixFormBoundary")
-        assert body.rstrip().endswith(b"------strixFormBoundary" + body.split(b"------strixFormBoundary")[1].split(b"\r\n")[0].split(b"--")[0] + b"--")
+        boundary = body.split(b"------strixFormBoundary")[1].split(b"\r\n")[0].split(b"--")[0]
+        assert body.rstrip().endswith(b"------strixFormBoundary" + boundary + b"--")
 
     def test_safe_filename_used(self):
         from strix_telegram_bot.telegram import _build_multipart_form
@@ -173,7 +176,9 @@ class TestSendDocument:
         p.write_text("# Report\n\nBody")
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": True, "result": {"message_id": 42}}).encode()
+        mock_resp.read.return_value = json.dumps(
+            {"ok": True, "result": {"message_id": 42}}
+        ).encode()
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = send_document(None, 12345, str(p))
@@ -218,7 +223,10 @@ class TestSendDocument:
         mock_resp.read.return_value = json.dumps({"ok": True, "result": {"message_id": 1}}).encode()
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
-        send_document(None, 12345, str(p), reply_markup={"inline_keyboard": [[{"text": "OK", "callback_data": "ok"}]]})
+        send_document(
+            None, 12345, str(p),
+            reply_markup={"inline_keyboard": [[{"text": "OK", "callback_data": "ok"}]]},
+        )
         sent_data = mock_urlopen.call_args[0][0].data
         assert b"inline_keyboard" in sent_data
 
@@ -228,7 +236,9 @@ class TestSendDocument:
         p.write_text("data")
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"ok": False, "error_code": 400, "description": "Bad Request"}).encode()
+        mock_resp.read.return_value = json.dumps(
+            {"ok": False, "error_code": 400, "description": "Bad Request"}
+        ).encode()
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = send_document(None, 12345, str(p))

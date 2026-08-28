@@ -5,11 +5,10 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
 from strix_telegram_bot.safety.redaction import redact_text
-
+from strix_telegram_bot.strix.runtime_bridge import _run_dir_for
 
 _MANIFEST_NAME = "manifest.json"
 _CHUNK_SIZE = 65536

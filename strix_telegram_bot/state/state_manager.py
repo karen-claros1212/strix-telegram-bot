@@ -7,7 +7,6 @@ from typing import Any, Optional
 
 from strix_telegram_bot.config import settings
 
-
 _STATE_FILE = "bot_state.json"
 
 
@@ -91,4 +90,7 @@ class StateManager:
 
 
 _state_manager = StateManager()
-get_state_manager = lambda: _state_manager
+
+
+def get_state_manager() -> StateManager:
+    return _state_manager

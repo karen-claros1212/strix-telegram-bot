@@ -7,10 +7,6 @@ from unittest.mock import MagicMock, patch
 from strix_telegram_bot.telegram import (
     _api_url,
     _request,
-    send_message,
-    edit_message,
-    answer_callback,
-    send_chat_action,
 )
 
 
@@ -34,6 +30,7 @@ def test_request_has_request_timeout():
 def test_get_updates_uses_single_retry():
     """get_updates calls _request with retries=1."""
     import inspect
+
     from strix_telegram_bot.telegram import get_updates
     source = inspect.getsource(get_updates)
     assert "retries=1" in source
@@ -42,6 +39,7 @@ def test_get_updates_uses_single_retry():
 def test_get_updates_request_timeout_greater_than_long_poll():
     """get_updates passes request_timeout = long_poll_timeout + 10."""
     import inspect
+
     from strix_telegram_bot.telegram import get_updates
     source = inspect.getsource(get_updates)
     assert "timeout + 10" in source
@@ -56,14 +54,22 @@ class TestSanitizeAgentContent:
         return StrixBot._sanitize_agent_content(content)
 
     def test_strips_data_image_url(self):
-        content = "Here is a screenshot: data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        content = (
+            "Here is a screenshot: data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+            "2mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
         result = self._sanitize(content)
         assert "data:image" not in result
         assert "[imagen]" in result
         assert "iVBOR" not in result
 
     def test_strips_data_url(self):
-        content = "Binary: data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+        content = (
+            "Binary: data:application/octet-stream;base64,"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+        )
         result = self._sanitize(content)
         assert "data:" not in result
         assert "[datos binarios]" in result
@@ -96,6 +102,7 @@ class TestUpdatesOffsetPersistence:
     def test_load_offset_from_existing_file(self, tmp_path):
         """Should load offset from strix_runs/.bot-state/telegram_offset.json."""
         import json as _json
+
         from strix_telegram_bot.bot import StrixBot
         state_dir = tmp_path / "strix_runs" / ".bot-state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +145,7 @@ class TestUpdatesOffsetPersistence:
     def test_load_offset_returns_none_for_invalid_content(self, tmp_path):
         """Should return None for non-JSON or missing offset key."""
         import json as _json
+
         from strix_telegram_bot.bot import StrixBot
         from strix_telegram_bot.config import settings
         state_dir = tmp_path / "strix_runs" / ".bot-state"
@@ -156,6 +164,7 @@ class TestUpdatesOffsetPersistence:
     def test_save_offset_creates_atomic_file_with_fsync(self, tmp_path):
         """Should persist offset atomically via tmp + fsync + replace."""
         import json as _json
+
         from strix_telegram_bot.bot import StrixBot
         from strix_telegram_bot.config import settings
         old_dir = settings.strix_runs_dir
@@ -216,8 +225,9 @@ class TestReadOnlyChatDuringScan:
     and nothing is forwarded to Strix."""
 
     def _make_bot_with_active_scan(self, targets):
-        from strix_telegram_bot.bot import StrixBot
         from unittest.mock import MagicMock
+
+        from strix_telegram_bot.bot import StrixBot
         bot = StrixBot.__new__(StrixBot)
         bridge = MagicMock()
         bridge.is_running = True

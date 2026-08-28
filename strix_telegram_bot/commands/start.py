@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from strix_telegram_bot.telegram import send_message, edit_message
-from strix_telegram_bot.ui.keyboards import main_menu, scan_mode_menu, parse_callback, back_to_menu
-from strix_telegram_bot.ui.messages import main_menu_text, help_text
-from strix_telegram_bot.ui.panels import get_panel_manager
 from strix_telegram_bot.models import MenuState, ScanMode
+from strix_telegram_bot.telegram import edit_message, send_message
+from strix_telegram_bot.ui.keyboards import back_to_menu, main_menu, parse_callback, scan_mode_menu
+from strix_telegram_bot.ui.messages import help_text, main_menu_text
+from strix_telegram_bot.ui.panels import get_panel_manager
 
 
 def cmd_start(bot: Any, update: dict) -> None:

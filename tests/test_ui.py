@@ -1,21 +1,21 @@
+from strix_telegram_bot.models import MenuState
 from strix_telegram_bot.ui.keyboards import (
-    main_menu,
-    scan_mode_menu,
-    job_panel,
-    parse_callback,
     back_to_menu,
-    reports_main_menu,
+    job_panel,
+    main_menu,
+    parse_callback,
     report_detail_menu,
+    reports_main_menu,
+    scan_mode_menu,
 )
 from strix_telegram_bot.ui.messages import (
-    main_menu_text,
-    job_status_text,
+    escape_md,
     health_text,
     help_text,
-    escape_md,
+    job_status_text,
+    main_menu_text,
 )
 from strix_telegram_bot.ui.panels import get_panel_manager
-from strix_telegram_bot.models import MenuState
 
 
 class TestKeyboards:

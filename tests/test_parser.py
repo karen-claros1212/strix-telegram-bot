@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from strix_telegram_bot.bot import StrixBot
 
 

@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import shutil
-import time
 from pathlib import Path
-from typing import Optional
 
 
 def classify_attachment(

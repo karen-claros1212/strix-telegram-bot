@@ -1,5 +1,4 @@
 import re
-from typing import Optional
 
 _PATTERNS: list[tuple[str, str, re.Pattern, str]] = [
     ("api_key", "API Key", re.compile(

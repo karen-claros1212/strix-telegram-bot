@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault, _classify_evidence

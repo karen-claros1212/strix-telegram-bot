@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from strix_telegram_bot.telegram import SendOutcome
 
 
-def _make_chat_event(event_id="chat_1", version=0, content="hello", streaming=False, run_name="test-run"):
+def _make_chat_event(
+    event_id="chat_1", version=0, content="hello", streaming=False, run_name="test-run"
+):
     return {
         "id": event_id,
         "type": "chat",
@@ -26,7 +28,10 @@ def _make_chat_event(event_id="chat_1", version=0, content="hello", streaming=Fa
     }
 
 
-def _make_tool_event(call_id="call_1", tool_name="test_tool", status="running", args=None, result=None, run_name="test-run"):
+def _make_tool_event(
+    call_id="call_1", tool_name="test_tool", status="running",
+    args=None, result=None, run_name="test-run",
+):
     return {
         "id": f"tool_{call_id}",
         "type": "tool",
@@ -223,7 +228,9 @@ class TestScanCompleteCycle:
         bot._process_scan_events([ev])
         assert mock_send.call_count == 0
 
-    def test_terminal_completed_via_drain_delivers_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
+    def test_terminal_completed_via_drain_delivers_report(
+        self, bot, mock_telegram, mock_send_doc, tmp_path
+    ):
         """Terminal state detected via _drain_update_queue triggers report delivery."""
         mock_send, _, _ = mock_telegram
         mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
@@ -387,7 +394,9 @@ class TestTelegramRenderers:
 
     def test_shell_failed_shows_error(self):
         from strix_telegram_bot.strix.telegram_renderers import render_tool_event
-        text = render_tool_event("execute_command", "failed", {"command": "bad"}, "connection refused")
+        text = render_tool_event(
+            "execute_command", "failed", {"command": "bad"}, "connection refused"
+        )
         assert "Failed" in text
         assert "connection refused" in text
 
@@ -412,14 +421,19 @@ class TestTelegramRenderers:
 
     def test_no_raw_sdk_event_in_output(self):
         from strix_telegram_bot.strix.telegram_renderers import render_tool_event
-        text = render_tool_event("execute_command", "completed", {"command": "ls"}, {"exit_code": 0, "output": "ok"})
+        text = render_tool_event(
+            "execute_command", "completed", {"command": "ls"},
+            {"exit_code": 0, "output": "ok"},
+        )
         assert "tool_id" not in text
         assert "call_id" not in text
         assert "streaming" not in text
 
     def test_technical_chars_safe(self):
         from strix_telegram_bot.strix.telegram_renderers import render_tool_event
-        text = render_tool_event("execute_command", "completed", {"command": "echo <>&\"'" }, "done")
+        text = render_tool_event(
+            "execute_command", "completed", {"command": "echo <>&\"'"}, "done"
+        )
         assert "echo" in text
         assert "done" in text
 
@@ -456,41 +470,47 @@ class TestInteractiveMirror:
     """The bridge always runs interactive and never injects Spanish instructions."""
 
     def test_start_scan_has_no_non_interactive_parameter(self):
-        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
+
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         sig = inspect.signature(StrixRuntimeBridge.start_scan)
         assert "non_interactive" not in sig.parameters
 
     def test_scan_config_forces_non_interactive_false(self):
-        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
+
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         src = inspect.getsource(StrixRuntimeBridge.start_scan)
         assert "non_interactive=False" in src
 
     def test_scan_thread_always_interactive(self):
-        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         import inspect
+
+        from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
         assert "non_interactive" not in src
         assert "interactive = not non_interactive" not in src
 
     def test_bot_no_language_injection(self):
-        from strix_telegram_bot.bot import StrixBot
         import inspect
+
+        from strix_telegram_bot.bot import StrixBot
         src = inspect.getsource(StrixBot._launch_scan)
         assert "_LANGUAGE_INSTRUCTION" not in src
         assert "Responde siempre al usuario en español" not in src
         assert "non_interactive" not in src
 
     def test_bot_passes_exact_instruction(self):
-        from strix_telegram_bot.bot import StrixBot
         import inspect
+
+        from strix_telegram_bot.bot import StrixBot
         src = inspect.getsource(StrixBot._launch_scan)
         assert "exact_instruction" in src
 
     def test_strix_not_modified(self):
-        import strix
         from pathlib import Path
+
+        import strix
         strix_path = Path(strix.__file__).parent
         runner = strix_path / "core" / "runner.py"
         assert runner.exists()
@@ -587,7 +607,10 @@ class TestShellRendererSDKString:
 
     def test_dict_result_still_works(self):
         from strix_telegram_bot.strix.telegram_renderers import render_tool_event
-        text = render_tool_event("execute_command", "completed", {"command": "ls"}, {"exit_code": 0, "output": "file.txt"})
+        text = render_tool_event(
+            "execute_command", "completed", {"command": "ls"},
+            {"exit_code": 0, "output": "file.txt"},
+        )
         assert "exit: 0" in text
         assert "file.txt" in text
 
@@ -622,14 +645,14 @@ class TestFallbackTruncation:
         from strix_telegram_bot.strix.telegram_renderers import render_tool_event
         long_val = "A" * 300
         text = render_tool_event("curl", "completed", {"url": long_val}, "ok")
-        assert len([l for l in text.split("\n") if "url:" in l][0]) < 250
+        assert len([line for line in text.split("\n") if "url:" in line][0]) < 250
         assert "..." in text
 
     def test_long_result_truncated(self):
         from strix_telegram_bot.strix.telegram_renderers import render_tool_event
         long_result = "B" * 600
         text = render_tool_event("curl", "completed", {}, long_result)
-        result_line = [l for l in text.split("\n") if "Result:" in l][0]
+        result_line = [line for line in text.split("\n") if "Result:" in line][0]
         assert len(result_line) < 550
         assert "..." in result_line
 
@@ -707,7 +730,9 @@ class TestToolCardMaxLimit:
             "Process exited with code 0\n"
             f"Output:\n{huge_output}"
         )
-        text = render_tool_event("execute_command", "completed", {"command": "cat huge"}, sdk_result)
+        text = render_tool_event(
+            "execute_command", "completed", {"command": "cat huge"}, sdk_result
+        )
         assert len(text) <= 4000
 
     def test_many_args_capped(self):
@@ -734,7 +759,9 @@ class TestToolCardMaxLimit:
 class TestDeliverFinalReport:
     """Tests for _deliver_final_report and scan_complete handler."""
 
-    def _setup_run_dir(self, tmp_path, run_name, status="completed", report_body="# Report\n\nBody"):
+    def _setup_run_dir(
+        self, tmp_path, run_name, status="completed", report_body="# Report\n\nBody"
+    ):
         run_dir = tmp_path / run_name
         run_dir.mkdir()
         with open(run_dir / "run.json", "w") as f:
@@ -844,7 +871,9 @@ class TestDeliverFinalReport:
         assert result == "not_completed"
         mock_send_doc.assert_not_called()
 
-    def test_terminal_completed_with_delivered_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
+    def test_terminal_completed_with_delivered_report(
+        self, bot, mock_telegram, mock_send_doc, tmp_path
+    ):
         """Successful delivery sends document, then confirmation text."""
         mock_send, _, _ = mock_telegram
         mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
@@ -870,7 +899,8 @@ class TestDeliverFinalReport:
         assert any("Informe completo enviado" in t for t in calls)
 
     def test_all_messages_use_parse_mode_none(self, bot, mock_telegram, mock_send_doc, tmp_path):
-        """Every send_message call (from _drain_update_queue terminal handler) must use parse_mode=None."""
+        """Every send_message call (from _drain_update_queue terminal handler)
+        must use parse_mode=None."""
         mock_send, _, _ = mock_telegram
         mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
         bot._active_job_run_name = "scan-parse"

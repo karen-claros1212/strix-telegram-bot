@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from strix_telegram_bot.config import settings
 
 

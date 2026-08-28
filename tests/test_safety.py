@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from strix_telegram_bot.safety.redaction import redact_text, redact_json
-from strix_telegram_bot.safety.scope_policy import classify_target
 from strix_telegram_bot.safety.attachment_policy import classify_attachment, sanitize_target
+from strix_telegram_bot.safety.redaction import redact_json, redact_text
+from strix_telegram_bot.safety.scope_policy import classify_target
 
 
 class TestRedaction:

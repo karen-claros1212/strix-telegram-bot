@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from strix_telegram_bot.jobs.job_store import JobStore
-from strix_telegram_bot.models import JobState, JobPhase, ScanMode
+from strix_telegram_bot.models import JobPhase, JobState
 
 
 class TestJobHistory:

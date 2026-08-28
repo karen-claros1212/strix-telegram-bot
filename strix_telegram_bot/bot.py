@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -9,26 +8,29 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .telegram import get_updates, send_message, send_document, edit_message, delete_message, answer_callback
-from .security import is_authorized
+from .jobs.job_store import JobStore
 from .models import JobPhase, JobState, MenuState, ScanMode
+from .security import is_authorized
+from .strix.delivery_state import DeliveryState, ReportDeliveryTracker
+from .strix.runtime_bridge import StrixRuntimeBridge
+from .telegram import (
+    answer_callback,
+    delete_message,
+    edit_message,
+    get_updates,
+    send_message,
+)
 from .ui.keyboards import (
-    main_menu,
-    job_panel,
-    back_to_menu,
     agent_selector,
+    back_to_menu,
+    job_panel,
+    main_menu,
     parse_callback,
 )
 from .ui.messages import (
     job_status_text,
-    main_menu_text,
-    escape_md,
 )
 from .ui.panels import get_panel_manager
-from .jobs.job_store import JobStore
-from .strix.runtime_bridge import StrixRuntimeBridge
-from .strix.telegram_renderers import render_tool_event
-from .strix.delivery_state import ReportDeliveryTracker, DeliveryState
 
 logger = logging.getLogger("strix_bot")
 
@@ -78,11 +80,11 @@ class StrixBot:
         self._register_handlers()
 
     def _register_handlers(self) -> None:
-        from .commands.start import cmd_start, cmd_help, callback_menu
-        from .commands.health import cmd_health, cmd_version, cmd_uptime, callback_health
-        from .commands.jobs import cmd_jobs, cmd_status, cmd_stop, callback_jobs
-        from .commands.reports import cmd_reports, callback_reports
-        from .commands.config import cmd_config, callback_config
+        from .commands.config import callback_config, cmd_config
+        from .commands.health import callback_health, cmd_health, cmd_uptime, cmd_version
+        from .commands.jobs import callback_jobs, cmd_jobs, cmd_status, cmd_stop
+        from .commands.reports import callback_reports, cmd_reports
+        from .commands.start import callback_menu, cmd_help, cmd_start
 
         self._command_handlers = {
             "/start": cmd_start,
@@ -127,6 +129,7 @@ class StrixBot:
         try:
             if self._updates_offset is not None:
                 import json as _json
+
                 from .config import settings
                 state_dir = settings.strix_runs_dir / ".bot-state"
                 state_dir.mkdir(parents=True, exist_ok=True)
@@ -319,7 +322,7 @@ class StrixBot:
 
         Returns the cleaned URL if valid, empty string if rejected.
         """
-        from urllib.parse import urlparse, urlsplit
+        from urllib.parse import urlsplit
 
         url = url.rstrip(".,;:!?)]}>")
 
@@ -535,8 +538,8 @@ class StrixBot:
             send_message(self, chat_id, "No se pudo leer el archivo.")
             return
 
-        from .telegram import get_file
         from .strix.evidence_vault import EvidenceVault
+        from .telegram import get_file
 
         file_id = doc.get("file_id", "")
         file_name = doc.get("file_name", "upload.bin") if "file_name" in doc else "photo.jpg"
@@ -699,7 +702,10 @@ class StrixBot:
         status = self._bridge.to_status_dict()
         text = job_status_text(status) if self._bridge.run_name else "STRIX — Inicializando…"
         agent_count = len(self._bridge.list_agents() or [])
-        resp = send_message(self, chat_id, text, reply_markup=job_panel(running=True, agent_count=agent_count))
+        resp = send_message(
+            self, chat_id, text,
+            reply_markup=job_panel(running=True, agent_count=agent_count),
+        )
         panel_msg_id = resp.get("message_id") if isinstance(resp, dict) else None
 
         self._active_job_chat_id = chat_id
@@ -796,7 +802,9 @@ class StrixBot:
                         self._active_job_chat_id,
                         self._active_job_message_id,
                         text,
-                        reply_markup=job_panel(running=status.get("is_active", False), agent_count=agent_count),
+                        reply_markup=job_panel(
+                            running=status.get("is_active", False), agent_count=agent_count
+                        ),
                         parse_mode=None,
                         disable_web_page_preview=True,
                     )
@@ -849,7 +857,9 @@ class StrixBot:
         import re
         content = re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]{80,}', '[imagen]', content)
         content = re.sub(r'data:[^;]+;base64,[A-Za-z0-9+/=]{80,}', '[datos binarios]', content)
-        content = re.sub(r'/(home|tmp|root|strix|sandbox)/[^ ]*/(scan-[a-f0-9]+)', r'[sandbox]/\2', content)
+        content = re.sub(
+            r'/(home|tmp|root|strix|sandbox)/[^ ]*/(scan-[a-f0-9]+)', r'[sandbox]/\2', content
+        )
         content = re.sub(r'/sandbox/[^ ]{20,}', '[ruta interna]', content)
         return content
 
@@ -1127,7 +1137,11 @@ class StrixBot:
                 logger.error(f"Drain error: {e}")
             now = time.time()
             # Keepalive: send typing indicator only while actively working (not waiting)
-            if self._active_job_chat_id is not None and self._bridge.is_actively_working and now - _last_typing > 4.0:
+            if (
+                self._active_job_chat_id is not None
+                and self._bridge.is_actively_working
+                and now - _last_typing > 4.0
+            ):
                 try:
                     from .telegram import send_chat_action
                     send_chat_action(self, self._active_job_chat_id)

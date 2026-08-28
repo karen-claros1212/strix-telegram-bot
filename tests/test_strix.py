@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from strix_telegram_bot.strix.caido_panel import CaidoPanel
 from strix_telegram_bot.strix.report_collector import ReportCollector
 

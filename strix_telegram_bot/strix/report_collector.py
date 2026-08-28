@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Optional
 
-from strix_telegram_bot.safety.redaction import redact_text
 from strix_telegram_bot.strix import report_delivery
 from strix_telegram_bot.strix.evidence_vault import EvidenceVault
 

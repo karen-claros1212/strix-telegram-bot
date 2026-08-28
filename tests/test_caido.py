@@ -20,7 +20,7 @@ class TestCaidoPanel:
 
     def test_update_from_text_port(self):
         cp = CaidoPanel()
-        url = cp.update_from_text("Caido listening on port 8080")
+        cp.update_from_text("Caido listening on port 8080")
         assert cp.port == 8080
         assert cp.active is True
 

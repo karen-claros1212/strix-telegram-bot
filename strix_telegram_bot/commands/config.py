@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from strix_telegram_bot.telegram import send_message, edit_message, answer_callback
-from strix_telegram_bot.ui.keyboards import config_menu, back_to_menu, parse_callback
-from strix_telegram_bot.ui.messages import config_text, escape_md
 from strix_telegram_bot.config import settings
+from strix_telegram_bot.telegram import edit_message, send_message
+from strix_telegram_bot.ui.keyboards import back_to_menu, config_menu, parse_callback
+from strix_telegram_bot.ui.messages import config_text, escape_md
+
+
 def cmd_config(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     _show_config(bot, chat_id)
@@ -63,8 +65,12 @@ def callback_config(bot: Any, update: dict) -> None:
 def _show_config(bot, chat_id, msg_id=None) -> None:
     d = {
         "Modelo LLM": settings.llm_model,
-        "Usuarios permitidos": ", ".join(settings.allowed_users) if settings.allowed_users else "todos",
-        "Chats permitidos": ", ".join(settings.allowed_chats) if settings.allowed_chats else "todos",
+        "Usuarios permitidos": (
+            ", ".join(settings.allowed_users) if settings.allowed_users else "todos"
+        ),
+        "Chats permitidos": (
+            ", ".join(settings.allowed_chats) if settings.allowed_chats else "todos"
+        ),
         "Token API": "***" + settings.tg_token[-4:] if settings.tg_token else "no configurado",
     }
     text = config_text(d)

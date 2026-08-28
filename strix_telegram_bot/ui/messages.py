@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
-
-from strix_telegram_bot.models import JobPhase, ScanMode, BridgePhase
+from strix_telegram_bot.models import ScanMode
 
 _PHASE_LABELS = {
     "initializing": "inicializando",
@@ -21,7 +19,10 @@ _MODE_LABELS = {
 
 
 def escape_md(text: str) -> str:
-    for ch in ("_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
+    for ch in (
+        "_", "*", "[", "]", "(", ")", "~", "`", ">", "#",
+        "+", "-", "=", "|", "{", "}", ".", "!",
+    ):
         text = text.replace(ch, "\\" + ch)
     return text
 
@@ -54,8 +55,6 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
     target = status.get("target", [])
     elapsed = status.get("elapsed", "0s")
     error = status.get("error")
-    awaiting = status.get("awaiting_input", False)
-    prompt = status.get("input_prompt")
 
     lines = [
         f"STRIX {mode_label} — {phase_label.capitalize()}",
@@ -159,7 +158,11 @@ def describe_tool_activity(tool_name: str, args: dict | None = None) -> tuple[st
         return ("HTTP", action)
     if "create_vulnerability_report" in name_lower or "report_vulnerability" in name_lower:
         return ("Reporte", "Registrando vulnerabilidad")
-    if "exec_command" in name_lower or "execute_command" in name_lower or "run_command" in name_lower:
+    if (
+        "exec_command" in name_lower
+        or "execute_command" in name_lower
+        or "run_command" in name_lower
+    ):
         cmd = args.get("cmd", "") or args.get("command", "") or ""
         exe = str(cmd).split()[0] if cmd else "comando"
         return ("Ejecutar", f"{exe[:40]}")
