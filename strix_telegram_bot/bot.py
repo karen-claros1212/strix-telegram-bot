@@ -28,11 +28,16 @@ from .ui.panels import get_panel_manager
 from .jobs.job_store import JobStore
 from .strix.runtime_bridge import StrixRuntimeBridge
 from .strix.telegram_renderers import render_tool_event
+from .strix.delivery_state import ReportDeliveryTracker, DeliveryState
 
 logger = logging.getLogger("strix_bot")
 
 _URL_RE = re.compile(r"https?://[^\s,>\]\)]+")
 _GITHUB_RE = re.compile(r"github\.com[:/][^\s,>\]\)]+")
+
+# Delivery retry policy (per-run, persisted via ReportDeliveryTracker)
+_DELIVERY_COOLDOWN = 60.0        # seconds between delivery retries
+_MAX_DELIVERY_ATTEMPTS = 5       # after this many, notify "no pudo enviarse"
 
 
 class StrixBot:
@@ -61,11 +66,10 @@ class StrixBot:
         self._notified_waiting_agents: set[str] = set()
         self._pending_reply_agent_id: Optional[str] = None
 
-        self._final_reports_delivered: set[str] = set()
         self._terminal_notified: set[str] = set()
-        self._report_delivered: set[str] = set()
-        self._report_pending: set[str] = set()
-        self._report_pending_until: dict[str, float] = {}
+        # Per-run, persisted delivery state machine (replaces in-memory sets)
+        self._delivery_tracker = ReportDeliveryTracker()
+        self._delivery_tracker.recover()
 
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
@@ -704,11 +708,7 @@ class StrixBot:
         self._chat_fragments.clear()
         self._chat_event_version.clear()
         self._tool_message_ids.clear()
-        self._final_reports_delivered.clear()
         self._terminal_notified.clear()
-        self._report_delivered.clear()
-        self._report_pending.clear()
-        self._report_pending_until.clear()
         self._notified_waiting_agents.clear()
         self._pending_reply_agent_id = None
 
@@ -779,104 +779,8 @@ class StrixBot:
                     self._job_store.save(job)
 
                 chat_id = self._active_job_chat_id
-                if (
-                    run_name
-                    and chat_id is not None
-                    and run_name not in self._report_delivered
-                    and run_name not in self._terminal_notified
-                ):
-                    phase_str = status.get("phase", "running")
-
-                    if phase_str == "completed":
-                        result = self._deliver_final_report(chat_id, run_name)
-                        if result == "delivered":
-                            self._report_delivered.add(run_name)
-                            send_message(
-                                self, chat_id,
-                                "Informe completo enviado como archivo Markdown.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                        elif result == "not_completed":
-                            now = time.time()
-                            pending_until = self._report_pending_until.get(run_name, 0.0)
-                            if pending_until == 0.0:
-                                self._report_pending_until[run_name] = now + 60.0
-                                self._report_pending.add(run_name)
-                            elif now < pending_until:
-                                return
-                            else:
-                                send_message(
-                                    self, chat_id,
-                                    "Strix emitió una señal de finalización, "
-                                    "pero el run todavía no está marcado como "
-                                    "completed. No se envió ningún informe.",
-                                    reply_markup=main_menu(),
-                                    parse_mode=None,
-                                )
-                                self._terminal_notified.add(run_name)
-                                self._report_pending.discard(run_name)
-                                self._report_pending_until.pop(run_name, None)
-                        elif result == "missing":
-                            now = time.time()
-                            pending_until = self._report_pending_until.get(run_name, 0.0)
-                            if pending_until == 0.0:
-                                self._report_pending_until[run_name] = now + 60.0
-                                self._report_pending.add(run_name)
-                            elif now < pending_until:
-                                return
-                            else:
-                                send_message(
-                                    self, chat_id,
-                                    "Escaneo completado.\n"
-                                    "El informe final no fue generado por Strix.",
-                                    reply_markup=main_menu(),
-                                    parse_mode=None,
-                                )
-                                self._terminal_notified.add(run_name)
-                                self._report_pending.discard(run_name)
-                                self._report_pending_until.pop(run_name, None)
-                        elif result == "send_transient":
-                            now = time.time()
-                            pending_until = self._report_pending_until.get(run_name, 0.0)
-                            if pending_until == 0.0:
-                                self._report_pending_until[run_name] = now + 60.0
-                                self._report_pending.add(run_name)
-                            elif now >= pending_until:
-                                send_message(
-                                    self, chat_id,
-                                    "Escaneo completado.\n"
-                                    "El informe fue generado pero no pudo enviarse tras varios intentos. "
-                                    "Disponible en Reportes.",
-                                    reply_markup=main_menu(),
-                                    parse_mode=None,
-                                )
-                                self._terminal_notified.add(run_name)
-                                self._report_pending.discard(run_name)
-                                self._report_pending_until.pop(run_name, None)
-                        elif result == "send_permanent":
-                            send_message(
-                                self, chat_id,
-                                "Escaneo completado.\n"
-                                "El informe fue generado pero no pudo enviarse (error permanente). "
-                                "Disponible en Reportes.",
-                                reply_markup=main_menu(),
-                                parse_mode=None,
-                            )
-                            self._terminal_notified.add(run_name)
-                    elif phase_str in ("failed", "stopped"):
-                        send_message(
-                            self, chat_id,
-                            "El análisis terminó con error antes de generar el informe oficial. "
-                            "No se produjo ningún archivo Markdown para este run.",
-                            reply_markup=main_menu(),
-                            parse_mode=None,
-                        )
-                        self._terminal_notified.add(run_name)
-                    else:
-                        if run_name not in self._report_pending:
-                            self._report_pending.add(run_name)
-                            self._report_pending_until[run_name] = time.time() + 60.0
+                if run_name and chat_id is not None:
+                    self._handle_terminal_delivery(chat_id, run_name, status)
 
         if self._active_job_chat_id is not None and self._active_job_message_id is not None:
             tool_state = self._bridge.get_tool_state()
@@ -902,7 +806,13 @@ class StrixBot:
                     pass  # Panel edit is best-effort; don't crash drain loop
 
             if not status.get("is_active") and run_name:
-                if run_name in self._report_pending:
+                _rec = self._delivery_tracker.get(run_name)
+                _needs_delivery = (
+                    _rec is not None
+                    and not _rec.state.is_terminal
+                    and _rec.state != DeliveryState.NOT_ELIGIBLE
+                )
+                if _needs_delivery:
                     pass  # Keep chat_id alive for retry
                 else:
                     self._active_job_chat_id = None
@@ -1096,14 +1006,91 @@ class StrixBot:
         self._chat_fragments[ev_id] = ids
         self._chat_event_version[ev_id] = ev_version
 
+    def _handle_terminal_delivery(self, chat_id: int, run_name: str, status: dict) -> None:
+        """Terminal notification + report delivery for a run.
+
+        Driven by the persisted per-run delivery tracker (no cross-run fallback,
+        survives restarts). Returns from this method only — never aborts the
+        drain loop.
+        """
+        tracker = self._delivery_tracker
+        rec = tracker.get_or_create(run_name, chat_id)
+        phase_str = status.get("phase", "running")
+
+        # Terminal phases that never produce an official report
+        if phase_str in ("failed", "stopped"):
+            if not rec.state.is_terminal and run_name not in self._terminal_notified:
+                send_message(
+                    self, chat_id,
+                    "El análisis terminó con error antes de generar el informe oficial. "
+                    "No se produjo ningún archivo Markdown para este run.",
+                    reply_markup=main_menu(),
+                    parse_mode=None,
+                )
+                self._terminal_notified.add(run_name)
+                tracker.set_state(run_name, DeliveryState.PERMANENT_FAILURE, chat_id)
+            return
+
+        # Still running (not yet terminal) — mark pending so we retry on completion
+        if phase_str != "completed":
+            if rec.state == DeliveryState.NOT_ELIGIBLE:
+                tracker.set_state(run_name, DeliveryState.PENDING, chat_id)
+            return
+
+        # phase_str == "completed": attempt delivery
+        if rec.state.is_terminal:
+            return
+
+        # Backoff: don't retry more often than the cooldown after any attempt
+        now = time.time()
+        if rec.last_attempt > 0 and now - rec.last_attempt < _DELIVERY_COOLDOWN:
+            return
+
+        tracker.set_state(run_name, DeliveryState.DELIVERING, chat_id)
+        result = self._deliver_final_report(chat_id, run_name)
+
+        if result == "delivered":
+            tracker.record_attempt(run_name, "success", chat_id)
+            send_message(
+                self, chat_id,
+                "Informe completo enviado como archivo Markdown.",
+                reply_markup=main_menu(),
+                parse_mode=None,
+            )
+        elif result == "send_permanent":
+            tracker.record_attempt(run_name, "permanent", chat_id)
+            send_message(
+                self, chat_id,
+                "Escaneo completado.\n"
+                "El informe fue generado pero no pudo enviarse (error permanente). "
+                "Disponible en Reportes.",
+                reply_markup=main_menu(),
+                parse_mode=None,
+            )
+        elif result == "send_transient":
+            tracker.record_attempt(run_name, "transient", chat_id)
+            if rec.attempt_count >= _MAX_DELIVERY_ATTEMPTS:
+                send_message(
+                    self, chat_id,
+                    "Escaneo completado.\n"
+                    "El informe fue generado pero no pudo enviarse tras varios intentos. "
+                    "Disponible en Reportes.",
+                    reply_markup=main_menu(),
+                    parse_mode=None,
+                )
+                self._terminal_notified.add(run_name)
+        else:
+            # "missing" / "not_completed": report not ready yet — wait, don't count
+            rec = tracker.get_or_create(run_name, chat_id)
+            rec.state = DeliveryState.PENDING
+            rec.last_attempt = time.time()
+            tracker.save(rec)
+
     def _deliver_final_report(self, chat_id: int, run_name: str) -> str:
-        """Delegate to deliver_report_document and track delivered runs."""
+        """Delegate to deliver_report_document (state tracked by the delivery tracker)."""
         from .strix.report_delivery import deliver_report_document
 
-        result = deliver_report_document(self, chat_id, run_name)
-        if result == "delivered":
-            self._final_reports_delivered.add(run_name)
-        return result
+        return deliver_report_document(self, chat_id, run_name)
 
     @staticmethod
     def _sanitize_tool_args(args: dict) -> str:

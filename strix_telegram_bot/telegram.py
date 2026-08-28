@@ -9,6 +9,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from .config import settings
@@ -18,6 +19,37 @@ _RETRY_DELAY = 0.5
 _MAX_RETRIES = 3
 
 logger = logging.getLogger("strix_telegram")
+
+
+@dataclass(frozen=True)
+class SendOutcome:
+    """Typed result of a sendDocument call.
+
+    kind is one of:
+        "success"   — document delivered, .result holds the API result (message_id)
+        "transient" — network/server hiccup, worth retrying later
+        "permanent" — client/file error, retrying the same payload won't help
+    """
+
+    ok: bool
+    kind: str
+    result: Optional[dict] = None
+
+    @property
+    def message_id(self) -> Optional[int]:
+        return self.result.get("message_id") if self.result else None
+
+    @classmethod
+    def success(cls, result: Optional[dict]) -> "SendOutcome":
+        return cls(ok=True, kind="success", result=result)
+
+    @classmethod
+    def transient(cls) -> "SendOutcome":
+        return cls(ok=False, kind="transient")
+
+    @classmethod
+    def permanent(cls) -> "SendOutcome":
+        return cls(ok=False, kind="permanent")
 
 
 def _api_url(method: str) -> str:
@@ -237,17 +269,17 @@ def send_document(
     filename: Optional[str] = None,
     caption: Optional[str] = None,
     reply_markup: Optional[dict] = None,
-) -> Optional[dict]:
+) -> SendOutcome:
     """Send a file as a document using Telegram's sendDocument API (multipart/form-data).
 
-    Returns the API result dict (with message_id) on success, or None on failure.
-    Never raises.
+    Returns a SendOutcome whose .kind is "success", "transient", or "permanent".
+    On success, .result holds the API result (with message_id). Never raises.
     """
     url = _api_url("sendDocument")
 
     if not os.path.isfile(file_path):
         logger.warning("send_document: file not found — %s", file_path)
-        return None
+        return SendOutcome.permanent()
 
     display_name = _sanitize_filename(filename or os.path.basename(file_path))
 
@@ -256,11 +288,11 @@ def send_document(
             file_bytes = f.read()
     except OSError as e:
         logger.error("send_document: cannot read %s — %s", file_path, e)
-        return None
+        return SendOutcome.permanent()
 
     if not file_bytes:
         logger.warning("send_document: empty file — %s", file_path)
-        return None
+        return SendOutcome.permanent()
 
     fields: dict[str, str] = {"chat_id": str(chat_id)}
     if caption:
@@ -282,18 +314,21 @@ def send_document(
                 raw = resp.read().decode("utf-8", errors="replace")
                 result = json.loads(raw)
                 if result.get("ok"):
-                    return result.get("result")
+                    return SendOutcome.success(result.get("result"))
+                error_code = result.get("error_code", 0)
                 logger.warning(
                     "Telegram API error [sendDocument]: %s — %s",
-                    result.get("error_code", "?"),
+                    error_code,
                     result.get("description", "?"),
                 )
-                return None
+                if isinstance(error_code, int) and 400 <= error_code < 500:
+                    return SendOutcome.permanent()
+                return SendOutcome.transient()
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
             if _is_permanent_client_error(e.code):
                 logger.debug("HTTP %d on sendDocument (not retried): %s", e.code, err_body[:300])
-                return None
+                return SendOutcome.permanent()
             if e.code == 429:
                 delay = _RETRY_DELAY * (2 ** attempt)
                 try:
@@ -306,18 +341,19 @@ def send_document(
                 if attempt < _MAX_RETRIES - 1:
                     time.sleep(delay)
                     continue
-                return None
+                return SendOutcome.transient()
             if e.code == 408 or e.code >= 500:
                 logger.warning("HTTP %d on sendDocument (attempt %d/%d): retrying", e.code, attempt + 1, _MAX_RETRIES)
                 if attempt < _MAX_RETRIES - 1:
                     time.sleep(_RETRY_DELAY * (2 ** attempt))
                     continue
-                return None
-            return None
+                return SendOutcome.transient()
+            return SendOutcome.permanent()
         except (urllib.error.URLError, OSError) as e:
             reason = str(e.reason) if hasattr(e, "reason") else str(e)
             if "Network is unreachable" in reason or "Name or service not known" in reason:
-                return None
+                logger.warning("send_document: network unreachable/DNS — %s", reason)
+                return SendOutcome.transient()
             logger.warning(
                 "Connection error on sendDocument (attempt %d/%d): %s",
                 attempt + 1, _MAX_RETRIES, reason,
@@ -325,9 +361,9 @@ def send_document(
             if attempt < _MAX_RETRIES - 1:
                 time.sleep(_RETRY_DELAY * (2 ** attempt))
                 continue
-            return None
+            return SendOutcome.transient()
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
             logger.error("send_document: invalid response — %s", e)
-            return None
+            return SendOutcome.transient()
 
-    return None
+    return SendOutcome.transient()

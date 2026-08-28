@@ -153,17 +153,19 @@ class TestBuildMultipartForm:
 
 
 class TestSendDocument:
-    def test_file_not_found_returns_none(self):
+    def test_file_not_found_is_permanent(self):
         from strix_telegram_bot.telegram import send_document
         result = send_document(None, 12345, "/nonexistent/file.md")
-        assert result is None
+        assert result.ok is False
+        assert result.kind == "permanent"
 
-    def test_empty_file_returns_none(self, tmp_path):
+    def test_empty_file_is_permanent(self, tmp_path):
         from strix_telegram_bot.telegram import send_document
         p = tmp_path / "empty.md"
         p.write_text("")
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.ok is False
+        assert result.kind == "permanent"
 
     def test_success_returns_message_id(self, tmp_path, mock_urlopen):
         from strix_telegram_bot.telegram import send_document
@@ -175,7 +177,10 @@ class TestSendDocument:
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = send_document(None, 12345, str(p))
-        assert result == {"message_id": 42}
+        assert result.ok is True
+        assert result.kind == "success"
+        assert result.result == {"message_id": 42}
+        assert result.message_id == 42
         mock_urlopen.assert_called_once()
 
     def test_caption_included(self, tmp_path, mock_urlopen):
@@ -227,7 +232,8 @@ class TestSendDocument:
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.ok is False
+        assert result.kind == "permanent"
 
     def test_http_400_not_retried(self, tmp_path, mock_urlopen):
         from strix_telegram_bot.telegram import send_document
@@ -239,7 +245,7 @@ class TestSendDocument:
         )
 
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "permanent"
         assert mock_urlopen.call_count == 1
 
     def test_http_401_not_retried(self, tmp_path, mock_urlopen):
@@ -252,7 +258,7 @@ class TestSendDocument:
         )
 
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "permanent"
         assert mock_urlopen.call_count == 1
 
     def test_http_403_not_retried(self, tmp_path, mock_urlopen):
@@ -261,7 +267,7 @@ class TestSendDocument:
         p.write_text("data")
         mock_urlopen.side_effect = HTTPError("http://ex.com", 403, "Forbidden", {}, None)
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "permanent"
         assert mock_urlopen.call_count == 1
 
     def test_http_500_retried_once(self, tmp_path, mock_urlopen):
@@ -274,7 +280,7 @@ class TestSendDocument:
         )
 
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "transient"
         assert mock_urlopen.call_count == 3  # max retries
 
     def test_http_408_retried(self, tmp_path, mock_urlopen):
@@ -283,7 +289,7 @@ class TestSendDocument:
         p.write_text("data")
         mock_urlopen.side_effect = HTTPError("http://ex.com", 408, "Timeout", {}, None)
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "transient"
         assert mock_urlopen.call_count == 3
 
     def test_network_unreachable_not_retried(self, tmp_path, mock_urlopen):
@@ -292,7 +298,7 @@ class TestSendDocument:
         p.write_text("data")
         mock_urlopen.side_effect = URLError("Network is unreachable")
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "transient"
         assert mock_urlopen.call_count == 1
 
     def test_dns_failure_not_retried(self, tmp_path, mock_urlopen):
@@ -301,7 +307,7 @@ class TestSendDocument:
         p.write_text("data")
         mock_urlopen.side_effect = URLError("Name or service not known")
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "transient"
         assert mock_urlopen.call_count == 1
 
     def test_json_decode_error_returns_none(self, tmp_path, mock_urlopen):
@@ -314,7 +320,7 @@ class TestSendDocument:
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = send_document(None, 12345, str(p))
-        assert result is None
+        assert result.kind == "transient"
 
     def test_content_type_header_is_multipart(self, tmp_path, mock_urlopen):
         from strix_telegram_bot.telegram import send_document

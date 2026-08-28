@@ -21,10 +21,11 @@ def deliver_report_document(
         - penetration_test_report.md must exist and be non-empty
 
     Returns one of:
-        "delivered"       — file sent successfully via sendDocument
-        "missing"         — report file missing or empty / run.json missing
-        "not_completed"   — run.json status != "completed"
-        "send_failed"     — sendDocument call failed (no message_id)
+        "delivered"        — file sent successfully via sendDocument
+        "missing"          — report file missing or empty / run.json missing
+        "not_completed"    — run.json status != "completed"
+        "send_transient"   — sendDocument failed transiently (retry later)
+        "send_permanent"   — sendDocument failed permanently (stop retrying)
     """
     from strix_telegram_bot.telegram import send_document
 
@@ -65,7 +66,7 @@ def deliver_report_document(
     display_name = f"STRIX_{run_name}_INFORME_COMPLETO.md"
     caption = f"Informe completo oficial de Strix\nRun: {run_name}"
 
-    resp = send_document(
+    outcome = send_document(
         bot,
         chat_id,
         str(report_path),
@@ -73,27 +74,13 @@ def deliver_report_document(
         caption=caption,
     )
 
-    if not resp:
-        logger.error(
-            "deliver_report: send_document returned None for %s",
-            run_name,
-        )
-        return "send_transient"
+    if outcome.ok:
+        logger.info("deliver_report: delivered for %s (message_id=%s)", run_name, outcome.message_id)
+        return "delivered"
 
-    if not resp.get("message_id"):
-        error_code = resp.get("error_code", 0)
-        if 400 <= error_code < 500:
-            logger.error(
-                "deliver_report: send_document permanent failure for %s"
-                " — error_code=%s",
-                run_name, error_code,
-            )
-            return "send_permanent"
-        logger.error(
-            "deliver_report: send_document transient failure for %s — %s",
-            run_name, resp,
-        )
-        return "send_transient"
+    if outcome.kind == "permanent":
+        logger.error("deliver_report: send_document permanent failure for %s", run_name)
+        return "send_permanent"
 
-    logger.info("deliver_report: delivered for %s (message_id=%s)", run_name, resp.get("message_id"))
-    return "delivered"
+    logger.error("deliver_report: send_document transient failure for %s", run_name)
+    return "send_transient"

@@ -7,6 +7,8 @@ import json
 
 import pytest
 
+from strix_telegram_bot.telegram import SendOutcome
+
 
 def _make_chat_event(event_id="chat_1", version=0, content="hello", streaming=False, run_name="test-run"):
     return {
@@ -70,7 +72,7 @@ def mock_telegram():
 @pytest.fixture
 def mock_send_doc():
     with patch("strix_telegram_bot.telegram.send_document") as mock_doc:
-        mock_doc.return_value = {"message_id": 200}
+        mock_doc.return_value = SendOutcome.success({"message_id": 200})
         yield mock_doc
 
 
@@ -224,7 +226,7 @@ class TestScanCompleteCycle:
     def test_terminal_completed_via_drain_delivers_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Terminal state detected via _drain_update_queue triggers report delivery."""
         mock_send, _, _ = mock_telegram
-        mock_send_doc.return_value = {"message_id": 200}
+        mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
         run_name = "scan-terminal-test"
         bot._active_job_run_name = run_name
         bot._bridge._run_name = run_name
@@ -757,7 +759,7 @@ class TestDeliverFinalReport:
     def test_sends_confirmation_after_document(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Confirmation message must appear after send_document."""
         mock_send, _, _ = mock_telegram
-        mock_send_doc.return_value = {"message_id": 200}
+        mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
         bot._active_job_run_name = "scan-confirm"
         bot._bridge._run_name = "scan-confirm"
         bot._bridge._scan_completed = True
@@ -782,7 +784,7 @@ class TestDeliverFinalReport:
     def test_two_drain_cycles_only_one_delivery(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Two _drain_update_queue cycles for the same run must only deliver once."""
         mock_send, _, _ = mock_telegram
-        mock_send_doc.return_value = {"message_id": 200}
+        mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
         bot._active_job_run_name = "scan-idempotent"
         bot._bridge._run_name = "scan-idempotent"
         bot._bridge._scan_completed = True
@@ -807,15 +809,14 @@ class TestDeliverFinalReport:
         assert count_second == 1
 
     def test_send_document_failure(self, bot, mock_telegram, mock_send_doc, tmp_path):
-        """If send_document returns None, result is send_transient."""
-        mock_send_doc.return_value = None
+        """If send_document fails transiently, result is send_transient."""
+        mock_send_doc.return_value = SendOutcome.transient()
         run_dir = self._setup_run_dir(tmp_path, "scan-doc-fail")
 
         with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir):
             result = bot._deliver_final_report(12345, "scan-doc-fail")
 
         assert result == "send_transient"
-        assert "scan-doc-fail" not in bot._final_reports_delivered
 
     def test_missing_report_returns_missing(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """When no report file exists, result is 'missing'."""
@@ -846,7 +847,7 @@ class TestDeliverFinalReport:
     def test_terminal_completed_with_delivered_report(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Successful delivery sends document, then confirmation text."""
         mock_send, _, _ = mock_telegram
-        mock_send_doc.return_value = {"message_id": 200}
+        mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
         bot._active_job_run_name = "scan-delivered"
         bot._bridge._run_name = "scan-delivered"
         bot._bridge._scan_completed = True
@@ -871,7 +872,7 @@ class TestDeliverFinalReport:
     def test_all_messages_use_parse_mode_none(self, bot, mock_telegram, mock_send_doc, tmp_path):
         """Every send_message call (from _drain_update_queue terminal handler) must use parse_mode=None."""
         mock_send, _, _ = mock_telegram
-        mock_send_doc.return_value = {"message_id": 200}
+        mock_send_doc.return_value = SendOutcome.success({"message_id": 200})
         bot._active_job_run_name = "scan-parse"
         bot._bridge._run_name = "scan-parse"
         bot._bridge._scan_completed = True
@@ -891,6 +892,87 @@ class TestDeliverFinalReport:
 
         for call in mock_send.call_args_list:
             assert call.kwargs.get("parse_mode") is None
+
+
+class TestHandleTerminalDelivery:
+    """Tests for _handle_terminal_delivery: cooldown, terminal, no drain abort."""
+
+    def _completed_status(self, run_name):
+        return {"run_name": run_name, "phase": "completed", "is_active": False,
+                "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                "awaiting_input": False, "input_prompt": ""}
+
+    def test_transient_failure_cooldown_blocks_retry(
+        self, bot, mock_telegram, mock_send_doc, tmp_path
+    ):
+        """A second drain within the cooldown must not re-attempt delivery."""
+        mock_send_doc.return_value = SendOutcome.transient()
+        run_name = "scan-cooldown"
+        bot._active_job_run_name = run_name
+        bot._bridge._run_name = run_name
+        bot._bridge._scan_completed = True
+        bot._bridge._terminal_kind = "completed"
+        bot._bridge._coordinator = MagicMock()
+        bot._bridge._coordinator.statuses = {"root": "completed"}
+        bot._bridge._coordinator.parent_of = {"root": None}
+        bot._bridge._root_agent_id = "root"
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({"status": "completed", "run_name": run_name}))
+        (run_dir / "penetration_test_report.md").write_text("# Report\n")
+
+        status_dict = self._completed_status(run_name)
+        with patch("strix_telegram_bot.strix.report_delivery.run_dir_for", return_value=run_dir), \
+             patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
+            bot._drain_update_queue()
+            first = mock_send_doc.call_count
+            bot._drain_update_queue()
+            second = mock_send_doc.call_count
+
+        assert first == 1
+        assert second == 1  # cooldown blocked the retry
+        rec = bot._delivery_tracker.get(run_name)
+        assert rec.state.name == "TRANSIENT_FAILURE"
+
+    def test_failed_phase_sets_permanent_and_notifies(self, bot, mock_telegram, mock_send_doc):
+        """A failed/stopped run sends the terminal notification and is PERMANENT_FAILURE."""
+        mock_send, _, _ = mock_telegram
+        run_name = "scan-failed"
+        bot._active_job_run_name = run_name
+        bot._bridge._run_name = run_name
+        bot._bridge._coordinator = MagicMock()
+
+        status_dict = {"run_name": run_name, "phase": "failed", "is_active": False,
+                       "error": "boom", "target": [], "mode": "deep", "elapsed": "0s",
+                       "awaiting_input": False, "input_prompt": ""}
+        with patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
+            bot._drain_update_queue()
+
+        rec = bot._delivery_tracker.get(run_name)
+        assert rec.state.name == "PERMANENT_FAILURE"
+        texts = [c.args[2] for c in mock_send.call_args_list]
+        assert any("terminó con error" in t for t in texts)
+        mock_send_doc.assert_not_called()
+
+    def test_non_completed_terminal_marks_pending_no_delivery(
+        self, bot, mock_telegram, mock_send_doc
+    ):
+        """A terminal run that is not 'completed' (e.g. initializing) is PENDING, no delivery."""
+        run_name = "scan-init"
+        bot._active_job_run_name = run_name
+        bot._bridge._run_name = run_name
+        bot._bridge._coordinator = MagicMock()
+
+        status_dict = {"run_name": run_name, "phase": "initializing", "is_active": False,
+                       "error": None, "target": [], "mode": "deep", "elapsed": "0s",
+                       "awaiting_input": False, "input_prompt": ""}
+        with patch.object(bot._bridge, "to_status_dict", return_value=status_dict):
+            bot._drain_update_queue()
+
+        rec = bot._delivery_tracker.get(run_name)
+        assert rec is not None
+        assert rec.state.name == "PENDING"
+        mock_send_doc.assert_not_called()
 
 
 class TestSendFragmented:

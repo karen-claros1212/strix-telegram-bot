@@ -109,7 +109,6 @@ class TestUpdatesOffsetPersistence:
         bot._active_chat_agent_id = None
         bot._active_chat_message_id = None
         bot._active_chat_chat_id = None
-        bot._final_reports_delivered = set()
         bot._command_handlers = {}
         bot._callback_handlers = {}
         bot._last_panel_text = ""
@@ -235,7 +234,6 @@ class TestReadOnlyChatDuringScan:
         bot._active_chat_agent_id = None
         bot._active_chat_message_id = None
         bot._active_chat_chat_id = None
-        bot._final_reports_delivered = set()
         bot._notified_waiting_agents = set()
         bot._pending_reply_agent_id = None
         bot._command_handlers = {}
@@ -334,7 +332,6 @@ class TestAwaitingUserFlow:
         bot._active_chat_agent_id = None
         bot._active_chat_message_id = None
         bot._active_chat_chat_id = None
-        bot._final_reports_delivered = set()
         bot._notified_waiting_agents = set()
         bot._pending_reply_agent_id = None
         bot._command_handlers = {}

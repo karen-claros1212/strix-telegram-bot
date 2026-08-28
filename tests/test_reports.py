@@ -176,8 +176,8 @@ class TestSendLatestReportFilter:
             sent_text = mock_edit.call_args[0][3]
             assert "No hay trabajos completados" in sent_text
 
-    def test_send_latest_report_fallback_to_next_job_with_content(self, monkeypatch):
-        """Should loop through jobs — first has empty report, second has content."""
+    def test_send_latest_report_no_cross_run_fallback(self, monkeypatch):
+        """ONE canonical run: the most recent completed run, even if its report is empty."""
         from strix_telegram_bot.commands import reports as reports_mod
         from strix_telegram_bot.jobs.job_store import JobStore
 
@@ -205,12 +205,13 @@ class TestSendLatestReportFilter:
         with patch.object(reports_mod, "_send_fragmented", return_value=True) as mock_frag, \
              patch.object(reports_mod, "edit_message") as mock_edit:
             reports_mod._send_latest_report(fake_bot, 123, 456)
-            mock_frag.assert_called_once()
-            call_text = mock_frag.call_args[0][2]
-            assert "scan-good" in call_text
+            # Canonical run is scan-empty (most recent); empty → no fallback to scan-good
+            mock_frag.assert_not_called()
+            sent_text = mock_edit.call_args[0][3]
+            assert "No se encontró un reporte válido" in sent_text
 
     def test_send_latest_report_all_empty_shows_no_valid(self, monkeypatch):
-        """All completed jobs have empty reports → 'No se encontraron reportes válidos'."""
+        """All completed jobs have empty reports → 'No se encontró un reporte válido...'."""
         from strix_telegram_bot.commands import reports as reports_mod
         from strix_telegram_bot.jobs.job_store import JobStore
 
@@ -232,7 +233,7 @@ class TestSendLatestReportFilter:
         with patch.object(reports_mod, "edit_message") as mock_edit:
             reports_mod._send_latest_report(fake_bot, 123, 456)
             sent_text = mock_edit.call_args[0][3]
-            assert "No se encontraron reportes válidos" in sent_text
+            assert "No se encontró un reporte válido" in sent_text
 
     def test_send_latest_report_skips_run_json_not_completed(self, monkeypatch):
         """Jobs with run.json status != completed should be skipped."""

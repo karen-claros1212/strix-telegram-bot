@@ -177,18 +177,22 @@ def _send_latest_report(bot, chat_id, msg_id) -> None:
         edit_message(bot, chat_id, msg_id, "No hay trabajos completados.", reply_markup=back_to_menu())
         return
 
-    for job in jobs:
-        rc = ReportCollector(job.run_name)
-        content = rc.get_full_markdown_report()
-        if not content or not content.strip():
-            continue
-        edit_message(bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu())
-        ok = _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
-        status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
-        edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
+    # Resolve ONE canonical run: the most recent completed run (no cross-run fallback)
+    job = jobs[0]
+    rc = ReportCollector(job.run_name)
+    content = rc.get_full_markdown_report()
+    if not content or not content.strip():
+        edit_message(
+            bot, chat_id, msg_id,
+            "No se encontró un reporte válido para el escaneo más reciente.",
+            reply_markup=back_to_menu(),
+        )
         return
 
-    edit_message(bot, chat_id, msg_id, "No se encontraron reportes válidos.", reply_markup=back_to_menu())
+    edit_message(bot, chat_id, msg_id, f"Enviando reporte de {job.run_name}…", reply_markup=back_to_menu())
+    ok = _send_fragmented(bot, chat_id, f"Reporte de {job.run_name}:\n\n{content}")
+    status = "Reporte enviado." if ok else "Error al enviar reporte. Intentá desde Reportes."
+    edit_message(bot, chat_id, msg_id, status, reply_markup=back_to_menu())
 
 
 def _send_executive_summary(bot, chat_id, msg_id) -> None:
@@ -277,7 +281,7 @@ def _deliver_report_document(bot, chat_id, msg_id, run_name: str = "") -> None:
     result = deliver_report_document(bot, chat_id, run_name)
     if result == "delivered":
         edit_message(bot, chat_id, msg_id, "Informe completo enviado como archivo Markdown.", reply_markup=back_to_menu())
-    elif result == "send_failed":
+    elif result in ("send_transient", "send_permanent"):
         edit_message(bot, chat_id, msg_id, "Error al enviar el informe.", reply_markup=back_to_menu())
     else:
         edit_message(bot, chat_id, msg_id, "Informe no disponible.", reply_markup=back_to_menu())
