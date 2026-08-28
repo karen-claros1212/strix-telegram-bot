@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from strix_telegram_bot.jobs.job_store import JobStore
-from strix_telegram_bot.models import JobState, JobPhase
+from strix_telegram_bot.models import JobPhase, JobState
 
 
 class TestJobStore:
@@ -34,6 +34,47 @@ class TestJobStore:
             store.save(JobState(run_name=f"run-{i}", target=["x"]))
         recent = store.list_recent(limit=3)
         assert len(recent) == 3
+
+
+class TestCmdStop:
+    """FASE 5: cmd_stop is non-blocking (async) and honest ('Deteniendo...')."""
+
+    def test_cmd_stop_running_sends_deteniendo_and_uses_async(self):
+        from unittest.mock import MagicMock, patch
+
+        from strix_telegram_bot.commands import jobs as jobs_mod
+
+        bot = MagicMock()
+        bridge = MagicMock()
+        bridge.is_running = True
+        bot._bridge = bridge
+        update = {"message": {"chat": {"id": 123}}}
+
+        with patch.object(jobs_mod, "send_message") as mock_send:
+            jobs_mod.cmd_stop(bot, update)
+
+        sent = mock_send.call_args
+        assert "Deteniendo escaneo" in sent[0][2]
+        bridge.stop_scan_async.assert_called_once()
+        bridge.stop_scan.assert_not_called()
+
+    def test_cmd_stop_not_running(self):
+        from unittest.mock import MagicMock, patch
+
+        from strix_telegram_bot.commands import jobs as jobs_mod
+
+        bot = MagicMock()
+        bridge = MagicMock()
+        bridge.is_running = False
+        bot._bridge = bridge
+        update = {"message": {"chat": {"id": 123}}}
+
+        with patch.object(jobs_mod, "send_message") as mock_send:
+            jobs_mod.cmd_stop(bot, update)
+
+        sent = mock_send.call_args
+        assert "No hay escaneo activo" in sent[0][2]
+        bridge.stop_scan_async.assert_not_called()
 
 
 

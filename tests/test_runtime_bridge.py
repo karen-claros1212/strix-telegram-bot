@@ -321,6 +321,71 @@ class TestStrixRuntimeBridge:
         assert bridge.stop_scan() is True
         assert bridge.is_running is False
 
+
+    # ── FASE 5: deterministic stop ─────────────────────────────
+
+    @patch("strix_telegram_bot.strix.runtime_bridge._STRIX_AVAILABLE", True)
+    def test_start_scan_rejected_when_thread_alive(self, *_):
+        """A live previous thread must block a new run (deterministic guard)."""
+        import threading as _th
+
+        bridge = StrixRuntimeBridge()
+        # A live thread simulating a scan that is still finishing
+        stop = _th.Event()
+
+        def _worker():
+            stop.wait(timeout=5)
+
+        t = _th.Thread(target=_worker, daemon=True)
+        t.start()
+        bridge._thread = t
+        try:
+            ok, msg = bridge.start_scan(["https://github.com/foo/bar"])
+            assert ok is False
+            assert "finalizando" in msg
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+    def test_stop_scan_async_noop_when_not_running(self):
+        bridge = StrixRuntimeBridge()
+        assert bridge.stop_scan_async() is False
+
+    def test_stop_scan_async_runs_in_background_and_reports(self):
+        """stop_scan_async returns immediately and reports the honest result via on_done."""
+        import time as _time
+
+        bridge = StrixRuntimeBridge()
+        # Make is_running True via a live scan task
+        loop = asyncio.new_event_loop()
+
+        async def _long():
+            await asyncio.sleep(30)
+
+        bridge._scan_task = loop.create_task(_long())
+        bridge._loop = loop
+        bridge._runtime = None  # stop_scan returns True quickly (no quit/join)
+        bridge._thread = None
+
+        result = []
+        started = _time.monotonic()
+        try:
+            assert bridge.is_running is True
+            initiated = bridge.stop_scan_async(on_done=lambda ok: result.append(ok))
+            elapsed = _time.monotonic() - started
+            assert initiated is True
+            # Non-blocking: returned well before the 30s sleep / any join
+            assert elapsed < 2.0
+            # Wait for the background worker to report
+            deadline = _time.monotonic() + 5.0
+            while not result and _time.monotonic() < deadline:
+                _time.sleep(0.05)
+            assert result == [True]
+        finally:
+            bridge._scan_task.cancel()
+            loop.run_until_complete(asyncio.gather(bridge._scan_task, return_exceptions=True))
+            loop.close()
+
     def test_is_actively_working_reads_coordinator(self):
         bridge = StrixRuntimeBridge()
         bridge._coordinator = MagicMock()

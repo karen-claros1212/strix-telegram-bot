@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +276,9 @@ class StrixRuntimeBridge:
             return False, "STRIX no esta instalado (strix package not found)"
         if self.is_running:
             return False, "Ya hay un escaneo en ejecucion"
+        # Deterministic guard: never start a 2nd run while the previous thread is alive
+        if self._thread is not None and self._thread.is_alive():
+            return False, "El escaneo anterior todavía está finalizando"
 
         ctx = ScanContext(original_instruction=instruction or "")
         run_name = f"scan-{uuid.uuid4().hex[:8]}"
@@ -648,6 +651,27 @@ class StrixRuntimeBridge:
             return False
 
         return quit_done
+
+    def stop_scan_async(self, on_done: Optional[Callable[[bool], None]] = None) -> bool:
+        """Run stop_scan in a background thread so the polling loop is not blocked.
+
+        Returns True if a stop was initiated. The (possibly slow) quit()+join()
+        happens off the caller's thread; the honest result is reported via on_done.
+        """
+        if not self.is_running:
+            return False
+
+        def _worker() -> None:
+            ok = self.stop_scan()
+            logger.info("stop_scan_async: completed (ok=%s)", ok)
+            if on_done is not None:
+                try:
+                    on_done(ok)
+                except Exception as exc:
+                    logger.warning("stop_scan_async: on_done callback failed: %s", exc)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
 
     def stop_agent(self, agent_id: str) -> bool:
         if not self._coordinator or not self._loop or self._loop.is_closed():

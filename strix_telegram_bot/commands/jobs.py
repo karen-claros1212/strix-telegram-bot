@@ -46,15 +46,9 @@ def cmd_stop(bot: Any, update: dict) -> None:
     chat_id = _chat_id(update)
     bridge = getattr(bot, "_bridge", None)
     if bridge and bridge.is_running:
-        ok = bridge.stop_scan()
-        if ok:
-            send_message(bot, chat_id, "Deteniendo escaneo...", reply_markup=back_to_menu())
-        else:
-            send_message(
-                bot, chat_id,
-                "No se pudo detener limpiamente.",
-                reply_markup=back_to_menu(),
-            )
+        # Non-blocking: stop runs in a background thread; result is logged honestly.
+        send_message(bot, chat_id, "Deteniendo escaneo...", reply_markup=back_to_menu())
+        bridge.stop_scan_async()
     else:
         send_message(bot, chat_id, "No hay escaneo activo.", reply_markup=back_to_menu())
 
@@ -89,8 +83,9 @@ def callback_jobs(bot: Any, update: dict) -> None:
     elif action == "stop":
         bridge = getattr(bot, "_bridge", None)
         if bridge and bridge.is_running:
-            bridge.stop_scan()
-            edit_message(bot, chat_id, msg_id, "Escaneo detenido.", reply_markup=back_to_menu())
+            # Non-blocking + honest: "Deteniendo..." (in progress), not "Detenido" (done).
+            edit_message(bot, chat_id, msg_id, "Deteniendo escaneo...", reply_markup=back_to_menu())
+            bridge.stop_scan_async()
         else:
             edit_message(bot, chat_id, msg_id, "No hay escaneo activo.", reply_markup=back_to_menu())
 
