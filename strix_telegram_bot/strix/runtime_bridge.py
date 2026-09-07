@@ -1080,13 +1080,14 @@ class StrixRuntimeBridge:
                 pass
 
         # Full Strix 1.6.2 projection: official MCP roster + LLM usage + agent
-        # count, all read from the engine (no synthetic values).
+        # count + findings count, all read from the engine (no synthetic values).
         mcp_connections = self.get_mcp_connections()
         llm_usage = self.get_llm_usage()
         agent_tree = self.get_agent_tree()
         agent_count = (
             len(agent_tree["agents"]) if agent_tree else 0
         )
+        findings_count = len(self.get_vulnerabilities())
 
         state: dict[str, Any] = {
             "run_name": status.get("run_name", "pending"),
@@ -1102,6 +1103,7 @@ class StrixRuntimeBridge:
             "mcp_count": len(mcp_connections),
             "llm_usage": llm_usage,
             "agent_count": agent_count,
+            "findings_count": findings_count,
         }
         if not self.is_running:
             state["is_active"] = False

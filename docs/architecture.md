@@ -106,3 +106,19 @@ menu offers Markdown / CSV / SARIF / JSON.
 The bridge projects the controller's `scan_state`
 (`preparing`/`running`/`waiting`/`completed`/`failed`/`stopped`). Display text is
 mapped in `ui/messages.py`.
+
+## Updating Strix
+
+Because Radamanthys delegates to the official runtime, a Strix bump is bounded:
+
+1. Bump the pin in `pyproject.toml` (`strix-agent==X.Y.Z`).
+2. `pip install -e .`
+3. Run the contract suite — `tests/test_strix_162_compat.py` guards every
+   Strix symbol the bot imports (lifecycle, coordinator, MCP projection,
+   workspace_files, SARIF, `wait_kind` semantics, `quit`/cleanup).
+4. Run the full suite + `python -m strix_telegram_bot --check`.
+5. If a contract test fails, adapt **only** the contract that genuinely
+   changed. The tests exist to catch real incompatibilities, not to block
+   legitimate updates.
+
+The baseline is frozen at `strix-agent==1.6.2` (tag `premium-mirror-1.6.2`).

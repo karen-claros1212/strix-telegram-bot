@@ -57,6 +57,51 @@ class TestPrepareScanTargetsWorkspaceFiles:
             attachments_dir = test_runs_dir / "repos" / "_attachments"
             assert not attachments_dir.exists()
 
+    def test_multiple_workspace_files(self):
+        """Several uploaded files all route to workspace_files, each keeping
+        its own basename as the workspace_path (no collision, no copy)."""
+        bot = StrixBot()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            openapi = Path(tmp) / "openapi.json"
+            openapi.write_bytes(b"{}")
+            har = Path(tmp) / "capture.har"
+            har.write_bytes(b"[]")
+
+            prepared_targets, local_sources, workspace_files = (
+                bot._prepare_scan_targets([str(openapi), str(har)])
+            )
+
+            assert prepared_targets == []
+            assert local_sources == []
+            assert len(workspace_files) == 2
+            paths = {wf["workspace_path"] for wf in workspace_files}
+            assert paths == {"openapi.json", "capture.har"}
+            # Each source path points at the original file (no copy).
+            for wf in workspace_files:
+                assert Path(wf["source_path"]).is_file()
+
+    def test_traversal_in_filename_is_flattened(self):
+        """A filename with path separators is flattened to its basename so it
+        cannot escape the workspace (no bot-side path traversal)."""
+        bot = StrixBot()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Simulate an upload whose stored name contains separators.
+            tricky = Path(tmp) / "sub" / "notes.txt"
+            tricky.parent.mkdir(parents=True, exist_ok=True)
+            tricky.write_bytes(b"hello")
+
+            prepared_targets, local_sources, workspace_files = (
+                bot._prepare_scan_targets([str(tricky)])
+            )
+
+            assert len(workspace_files) == 1
+            # workspace_path is the basename only — no '/' or '..'.
+            assert workspace_files[0]["workspace_path"] == "notes.txt"
+            assert "/" not in workspace_files[0]["workspace_path"]
+            assert ".." not in workspace_files[0]["workspace_path"]
+
 
 class TestPrepareScanTargetsLocalDir:
     """A local directory is a code target (mounted by the official flow)."""

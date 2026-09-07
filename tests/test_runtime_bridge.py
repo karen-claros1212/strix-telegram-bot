@@ -2309,6 +2309,47 @@ class TestStartupReadiness:
         assert not bridge._thread.is_alive()
         assert bridge.is_running is False
 
+    def test_stop_during_waiting(self, monkeypatch, tmp_path):
+        """STOP matrix: a scan parked in the 'waiting' state (an agent is
+        waiting for user input) must still reach the terminal 'stopped' state
+        cleanly when the user hits STOP — no hang, no false 'completed'."""
+        import threading as _threading
+
+        from strix_telegram_bot.strix import runtime_bridge as rb
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+        release = _threading.Event()
+
+        bridge = rb.StrixRuntimeBridge()
+        factory = self._make_mock_runtime_factory(release=release)
+        bridge._GoTuiRuntime = factory
+        try:
+            ok, msg = bridge.start_scan(
+                targets=["https://example.com"], instruction="",
+            )
+            assert ok is True
+            assert bridge.is_running is True
+
+            # Park the scan in the 'waiting' state (agent waiting for user).
+            bridge._root_agent_id = "root"
+            bridge._coordinator.statuses = {"root": "waiting"}
+            assert bridge.get_root_status() == "waiting"
+
+            # STOP while waiting → terminal 'stopped', not 'completed'/'failed'.
+            stopped = bridge.stop_scan()
+            assert stopped is True
+            assert bridge._terminal_kind == "stopped"
+            assert bridge._user_cancelled is True
+            assert bridge._last_error is None
+        finally:
+            release.set()
+            if bridge._thread is not None and bridge._thread.is_alive():
+                bridge._thread.join(timeout=10)
+            self._restore_global_report_state()
+
+        assert not bridge._thread.is_alive()
+        assert bridge.is_running is False
+
 
 class TestCleanupCountSingle:
     """Spec 8.9: the official runner owns cleanup; the bridge never calls

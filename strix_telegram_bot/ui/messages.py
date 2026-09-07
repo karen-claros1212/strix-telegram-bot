@@ -105,6 +105,20 @@ def job_status_text(status: dict, tool_state: dict | None = None) -> str:
 
     lines.append(f"Tiempo: {elapsed}")
 
+    # Official Strix 1.6.2 projection (only when the engine has reported it).
+    findings = status.get("findings_count", 0)
+    if findings:
+        lines.append(f"Findings: {findings}")
+    mcp_count = status.get("mcp_count", 0)
+    if mcp_count:
+        mcp_dead = sum(
+            1 for c in status.get("mcp_connections", []) if c.get("dead")
+        )
+        mcp_ok = mcp_count - mcp_dead
+        lines.append(f"MCP: {mcp_ok}/{mcp_count} conectados")
+    if status.get("awaiting_input"):
+        lines.append("Estado: Esperando tu respuesta")
+
     if error:
         lines.append("")
         lines.append(f"⚠ Error: {error}")

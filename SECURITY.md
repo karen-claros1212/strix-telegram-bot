@@ -7,6 +7,12 @@
 | Current (HEAD) | ✅ Active development |
 | Older commits | ❌ Not supported |
 
+**Stable Strix baseline: `strix-agent==1.6.2`** (pinned in `pyproject.toml`).
+Radamanthys is the Telegram transport/projection layer; Strix 1.6.2 is the
+execution authority (runtime, agents, lifecycle, sandbox, MCP, targets,
+reports). See `docs/architecture.md` for the ownership split and the contract
+tests in `tests/test_strix_162_compat.py` that guard the 1.6.2 surface.
+
 ## Threat Model
 
 ### Trust Boundary
@@ -40,7 +46,7 @@
 | **Resource exhaustion** | Medium | Medium | Rate limiting (max concurrent jobs), job timeout (2h default) |
 | **Orphaned containers** | Low | Medium | Cleanup at startup + periodic cleanup every hour |
 | **Path traversal via filename** | Low | Medium | `_safe_filename()` strips `/`, `\`, `..`, null bytes |
-| **Dependency vulnerability** | Medium | Medium | Minimal deps (`python-telegram-bot` only), Strix runs isolated |
+| **Dependency vulnerability** | Medium | Medium | Minimal deps (raw HTTP polling, no Telegram SDK), Strix 1.6.2 runs isolated |
 
 ### Security Controls by Layer
 
@@ -49,9 +55,12 @@
 - Docker container has no inbound ports exposed
 - No webhook — polling only (no public endpoint needed)
 
-#### Authentication
+#### Authentication (fail-closed)
 - Telegram Bot Token as API credential
-- `AccessPolicy` whitelist enforces user + chat level
+- `AccessPolicy` is **fail-closed**: an empty user allowlist FATALs at boot
+  (`AccessPolicy.validate()`), so a misconfigured bot never serves everyone
+- In group/supergroup chats the user **and** the chat must be allowlisted
+  (allowing only a `chat_id` does not make every group member an operator)
 - No secrets in git history (`.env_bot` in `.gitignore`)
 
 #### Execution

@@ -2,8 +2,9 @@
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.12+
 - [Strix CLI](https://github.com/usestrix/strix-agent) installed in PATH
+  (pinned to `strix-agent==1.6.2` — the stable baseline)
 - Docker (Colima or Docker Desktop)
 - Telegram Bot Token from [@BotFather](https://t.me/botfather)
 
@@ -12,7 +13,7 @@
 ```bash
 git clone https://github.com/karen-claros1212/strix-telegram-bot.git
 cd strix-telegram-bot
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ## 2. Configure
@@ -39,6 +40,11 @@ Optional but recommended:
 | `STRIX_MAX_CONCURRENT_JOBS` | 3 | Max simultaneous scans |
 
 > **Note:** The bot loads `.env_bot` automatically inside Python. No need to source it in a shell — this keeps credentials out of `ps aux`.
+
+> **Fail-closed:** `STRIX_TG_ALLOWED_USERS` is effectively required. If the
+> allowlist is empty the bot FATALs at boot with a clear configuration message
+> instead of serving everyone. In group chats, also set `STRIX_TG_ALLOWED_CHATS`
+> (a user **and** the chat must be allowlisted).
 
 ## 3. Run
 
@@ -102,6 +108,28 @@ launchctl list com.strix.telegram-bot
 ls -lt strix_runs/
 ```
 
+## Updating Strix
+
+Radamanthys is a passive projection of the official Strix runtime, so a Strix
+bump is a small, bounded change:
+
+```bash
+# 1. Bump the pin in pyproject.toml (strix-agent==X.Y.Z)
+# 2. Reinstall
+pip install -e .
+# 3. Run the contract suite — it guards every Strix symbol the bot uses
+python -m pytest tests/test_strix_162_compat.py -q
+# 4. Run the full suite
+python -m pytest tests/ -q
+# 5. Smoke check
+python -m strix_telegram_bot --check
+```
+
+If a contract test fails, adapt **only** the contract that genuinely changed
+(the contract tests exist to catch real incompatibilities, not to block
+legitimate updates). The full update cadence is documented in
+`docs/architecture.md`.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -110,3 +138,4 @@ ls -lt strix_runs/
 | `STRIX_TG_TOKEN requerido` | `.env_bot` not found or wrong format | Check file exists and uses `export KEY="val"` format |
 | `Docker not available` | Docker not in PATH | Add `PATH` to plist EnvironmentVariables |
 | Bot not responding | Duplicate instance | Kill all processes, restart via LaunchAgent |
+| Bot FATALs: "empty allowlist" | `STRIX_TG_ALLOWED_USERS` unset | Set at least one user ID (fail-closed) |
