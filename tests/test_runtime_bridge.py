@@ -2092,6 +2092,14 @@ class TestStartupReadiness:
             worker.start()
             try:
                 assert runner_started.wait(timeout=10)
+                # _thread and _scan_task are wired by the bridge AFTER the
+                # runtime is created, so runner_started can be set before they
+                # are populated. Poll briefly to avoid a CI race.
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    if bridge._thread is not None and bridge._scan_task is not None:
+                        break
+                    time.sleep(0.01)
                 first_thread = bridge._thread
                 first_task = bridge._scan_task
                 assert first_thread is not None and first_thread.is_alive()
