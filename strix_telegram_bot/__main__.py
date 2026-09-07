@@ -39,6 +39,7 @@ _normalize_strix_environment()
 # Imports after env normalization (intentional ordering)
 from .bot import StrixBot  # noqa: E402
 from .config import settings  # noqa: E402
+from .security import AccessPolicy  # noqa: E402
 
 
 def _check() -> None:
@@ -108,6 +109,14 @@ def main() -> None:
     logger.info(f"Allowed users: {settings.allowed_users}")
     logger.info(f"Allowed chats: {settings.allowed_chats}")
     logger.info(f"LLM: {settings.llm_model}")
+
+    # Fail-closed: an empty allowlist means the bot serves nobody, so stop at
+    # boot instead of running with a dead (or accidentally open) policy.
+    policy_errors = AccessPolicy().validate()
+    if policy_errors:
+        for err in policy_errors:
+            logger.error("FATAL: %s", err)
+        sys.exit(1)
 
     bot = StrixBot()
     try:

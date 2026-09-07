@@ -1,17 +1,20 @@
-# Strix Telegram Bot
+# Strix Telegram Bot (Radamanthys)
 
 > A Telegram bot interface for Strix — autonomous AI security scanning agent.
 
-Send a URL, domain, or file to the bot, and Strix runs a full penetration test. Get real-time updates, vulnerability reports, and CSV exports — all from Telegram.
+Send a URL, domain, or file to the bot, and Strix runs a full penetration test. Get real-time updates, vulnerability reports, and SARIF/CSV/Markdown exports — all from Telegram.
+
+Radamanthys is a **passive premium mirror** of the official Strix 1.6.2 TUI runtime: it delegates the scan lifecycle, MCP roster, usage, and report artifacts to `GoTuiRuntime`, and projects them — no parallel event queue, no synthetic state, no regenerated reports.
 
 ## Features
 
-- Send URLs, domains, IPs, or files as targets
-- Real-time scan progress updates
+- Send URLs, domains, IPs, or files as targets (files via official `workspace_files`)
+- Real-time scan progress updates (projected from the official `TuiLiveView`)
 - STOP button always visible on status message throughout the scan
-- Auto-generated Markdown report + CSV on completion
+- Official outputs on completion: Markdown report + CSV + SARIF 2.1.0
 - Interactive mode — Strix agent asks questions, you answer in the chat
-- User/chat whitelist for access control
+- MCP connection roster + LLM usage projected from the engine (no synthesis)
+- Fail-closed user/chat whitelist (group chats require user **and** chat)
 - Rate limiting (max concurrent jobs configurable)
 - Auto-cleanup of Docker containers, orphaned runs, and old data
 - Prompt injection protection — user input isolated from system directives
@@ -22,7 +25,7 @@ Send a URL, domain, or file to the bot, and Strix runs a full penetration test. 
 ### Prerequisites
 
 - Python 3.12+
-- Strix CLI installed (strix-agent >= 1.0.4)
+- Strix CLI installed (strix-agent == 1.6.2, pinned in `pyproject.toml`)
 - Docker (via Colima or Docker Desktop)
 - Telegram Bot Token (from @BotFather)
 
@@ -73,10 +76,16 @@ If using Colima, ensure `~/.colima/default/docker.sock` exists, or set `DOCKER_H
 ## Architecture
 
 ```
-Telegram ──→ HTTP Polling ──→ StrixRuntimeBridge ──→ AgentCoordinator ──→ Docker Sandbox
+Telegram ──→ HTTP Polling ──→ StrixBot ──→ StrixRuntimeBridge ──→ GoTuiRuntime (Strix 1.6.2)
+                                                                          ├── AgentCoordinator
+                                                                          ├── TuiLiveView / TuiController
+                                                                          └── ReportState (usage, vulns, SARIF)
 ```
 
-See [docs/architecture.md](docs/architecture.md) for details.
+The bot projects the official runtime state (MCP roster, LLM usage, agent tree,
+scan phase) and reads the official outputs (`findings.sarif`,
+`penetration_test_report.md`, `vulnerabilities.csv`). See
+[docs/architecture.md](docs/architecture.md) for the full workstream breakdown.
 
 ## Deployment
 

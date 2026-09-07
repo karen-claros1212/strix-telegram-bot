@@ -113,6 +113,9 @@ def callback_reports(bot: Any, update: dict) -> None:
     elif action == "csv":
         _send_report_type(bot, chat_id, msg_id, "csv")
 
+    elif action == "sarif":
+        _send_report_type(bot, chat_id, msg_id, "sarif")
+
     elif action == "json":
         _send_report_type(bot, chat_id, msg_id, "json")
 
@@ -258,6 +261,8 @@ def _send_report_type(bot, chat_id, msg_id, rtype: str) -> None:
             content = rc.get_full_markdown_report()
         elif rtype == "csv":
             content = rc.get_report_content("vulnerabilities.csv", max_chars=None)
+        elif rtype == "sarif":
+            content = rc.get_sarif_report()
         elif rtype == "json":
             events = rc.get_json_events()
             if events:

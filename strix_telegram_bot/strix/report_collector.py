@@ -33,7 +33,7 @@ class ReportCollector:
         else:
             search_dir = self._run_dir
 
-        for ext in ("*.md", "*.csv", "*.json", "*.html", "*.txt"):
+        for ext in ("*.md", "*.csv", "*.json", "*.html", "*.txt", "*.sarif"):
             for fpath in search_dir.glob(ext):
                 if fpath.is_file() and fpath.stat().st_size > 0:
                     found.append({
@@ -79,6 +79,10 @@ class ReportCollector:
 
     def get_csv_report(self) -> Optional[str]:
         return self.get_report_content("vulnerabilities.csv")
+
+    def get_sarif_report(self) -> Optional[str]:
+        """Official Strix 2.1.0 SARIF (findings.sarif) — read, never regenerated."""
+        return self.get_report_content("findings.sarif")
 
     def get_json_events(self) -> Optional[list[dict]]:
         if self._run_dir is None:

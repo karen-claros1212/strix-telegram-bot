@@ -22,6 +22,9 @@ test_strix_runs/
 # Bot-private pre-scan uploads (outside strix_runs)
 .bot-uploads/
 
+# Bot runtime state (pid, offsets, state)
+.bot-state/
+
 # Logs
 *.log
 logs/

@@ -114,6 +114,7 @@ def reports_main_menu() -> dict:
         [
             _btn("Markdown", _cb("report", "markdown")),
             _btn("CSV", _cb("report", "csv")),
+            _btn("SARIF", _cb("report", "sarif")),
             _btn("JSON", _cb("report", "json")),
         ],
         [_btn("Limpiar viejos", _cb("report", "cleanup"))],

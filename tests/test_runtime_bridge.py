@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -941,6 +942,11 @@ class TestDiffScopeOfficialAPI:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            from strix_telegram_bot.strix import runtime_bridge as _rb
+            async def _pas():
+                _rb.prepare_run(args)
+            mock_runtime.prepare_and_start = _pas
+            mock_runtime.controller = MagicMock()
 
             async def blocking_task():
                 while not release_scan.is_set():
@@ -1372,22 +1378,22 @@ class TestTuiAlignment:
         assert "non_interactive=False" in src
 
     def test_diff_scope_instruction_prepend(self):
-        """_scan_thread delegates diff resolution to prepare_run."""
+        """_scan_thread delegates preparation (incl. diff resolution) to the
+        official prepare_and_start choreography."""
         import inspect
 
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
-        assert "prepare_run(" in src
+        assert "prepare_and_start" in src
 
     def test_scan_thread_uses_gotuiruntime(self):
-        """_scan_thread creates GoTuiRuntime and calls init_run_state + start_scan."""
+        """_scan_thread creates GoTuiRuntime and delegates to prepare_and_start."""
         import inspect
 
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
         assert "_GoTuiRuntime(" in src
-        assert "init_run_state()" in src
-        assert "start_scan()" in src
+        assert "prepare_and_start" in src
 
     def test_scan_thread_polls_root(self):
         """_scan_thread polls coordinator for root agent discovery."""
@@ -1511,6 +1517,8 @@ class TestFinalizerSingleEvent:
         mock_runtime.live_view = MagicMock()
         mock_runtime.live_view.events = []
         mock_runtime.live_view._next_event_id = 0
+        mock_runtime.prepare_and_start = AsyncMock()
+        mock_runtime.controller = MagicMock()
 
         _error = error
         _scan_task_coro = scan_task_coro
@@ -1741,6 +1749,20 @@ class TestStartupReadiness:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            mock_runtime.prepare_and_start = AsyncMock()
+            mock_runtime.controller = MagicMock()
+
+            async def _mock_quit():
+                # Replicate the official GoTuiRuntime.quit(): cancel and await
+                # the scan task so the runner thread can finish.
+                st = mock_runtime.scan_task
+                if st is not None and not st.done():
+                    st.cancel()
+                if st is not None:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await st
+
+            mock_runtime.quit = _mock_quit
 
             if error:
                 async def failing_task():
@@ -2046,6 +2068,8 @@ class TestStartupReadiness:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            mock_runtime.prepare_and_start = AsyncMock()
+            mock_runtime.controller = MagicMock()
 
             async def blocking_task():
                 runner_started.set()
@@ -2118,6 +2142,8 @@ class TestStartupReadiness:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            mock_runtime.prepare_and_start = AsyncMock()
+            mock_runtime.controller = MagicMock()
 
             async def blocking_task():
                 runner_started.set()
@@ -2186,6 +2212,8 @@ class TestStartupReadiness:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            mock_runtime.prepare_and_start = AsyncMock()
+            mock_runtime.controller = MagicMock()
 
             async def blocking_task():
                 runner_started.set()
@@ -2240,6 +2268,47 @@ class TestStartupReadiness:
         assert bridge._starting is False
         assert elapsed < 40
 
+    def test_integral_stop_flow(self, monkeypatch, tmp_path):
+        """Integral STOP: start a scan, stop it via the official quit(), and
+        verify the bridge reaches the terminal 'stopped' state end-to-end."""
+        import threading as _threading
+
+        from strix_telegram_bot.strix import runtime_bridge as rb
+
+        self._patch_scan_path(monkeypatch, tmp_path)
+        release = _threading.Event()
+
+        bridge = rb.StrixRuntimeBridge()
+        factory = self._make_mock_runtime_factory(release=release)
+        bridge._GoTuiRuntime = factory
+        try:
+            ok, msg = bridge.start_scan(
+                targets=["https://example.com"], instruction="",
+            )
+            assert ok is True
+            assert bridge._scan_task is not None
+
+            # The scan is running before the stop.
+            assert bridge.is_running is True
+
+            # Stop via the official lifecycle (runtime.quit()).
+            stopped = bridge.stop_scan()
+            assert stopped is True
+
+            # Terminal state: stopped, not failed, user-initiated.
+            assert bridge._terminal_kind == "stopped"
+            assert bridge._user_cancelled is True
+            assert bridge._scan_completed is True
+            assert bridge._last_error is None
+        finally:
+            release.set()
+            if bridge._thread is not None and bridge._thread.is_alive():
+                bridge._thread.join(timeout=10)
+            self._restore_global_report_state()
+
+        assert not bridge._thread.is_alive()
+        assert bridge.is_running is False
+
 
 class TestCleanupCountSingle:
     """Spec 8.9: the official runner owns cleanup; the bridge never calls
@@ -2268,6 +2337,8 @@ class TestCleanupCountSingle:
         mock_runtime.live_view = MagicMock()
         mock_runtime.live_view.events = []
         mock_runtime.live_view._next_event_id = 0
+        mock_runtime.prepare_and_start = AsyncMock()
+        mock_runtime.controller = MagicMock()
 
         async def immediate_complete():
             return None
@@ -2344,7 +2415,7 @@ class TestDiffScopeExactMetadata:
 
         from strix_telegram_bot.strix.runtime_bridge import StrixRuntimeBridge
         src = inspect.getsource(StrixRuntimeBridge._scan_thread)
-        assert "prepare_run(" in src
+        assert "prepare_and_start" in src
 
 
 class TestDiffScopeFailFast:
@@ -2370,6 +2441,11 @@ class TestDiffScopeFailFast:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            from strix_telegram_bot.strix import runtime_bridge as _rb
+            async def _pas():
+                _rb.prepare_run(args)
+            mock_runtime.prepare_and_start = _pas
+            mock_runtime.controller = MagicMock()
             import asyncio as _aio
             async def blocking():
                 await _aio.sleep(100)
@@ -2407,6 +2483,11 @@ class TestDiffScopeFailFast:
             mock_runtime.live_view = MagicMock()
             mock_runtime.live_view.events = []
             mock_runtime.live_view._next_event_id = 0
+            from strix_telegram_bot.strix import runtime_bridge as _rb
+            async def _pas():
+                _rb.prepare_run(args)
+            mock_runtime.prepare_and_start = _pas
+            mock_runtime.controller = MagicMock()
             import asyncio as _aio
             async def blocking():
                 await _aio.sleep(100)

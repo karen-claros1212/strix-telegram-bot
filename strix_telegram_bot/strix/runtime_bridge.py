@@ -30,6 +30,9 @@ _FINAL_FAILED = "failed"
 _FINAL_STOPPED = "stopped"
 
 _STARTUP_JOIN_TIMEOUT = 5.0
+# prepare_and_start() runs a real LLM preflight round-trip (up to llm.timeout)
+# before the scan task exists, so the startup guard must cover that window.
+_STARTUP_READY_TIMEOUT = 60.0
 
 SPANISH_DIRECTIVE = (
     "Todas las comunicaciones dirigidas al usuario deben estar en español.\n"
@@ -168,6 +171,7 @@ class StrixRuntimeBridge:
         self._start_time: float = 0.0
         self._scan_completed: bool = False
         self._scan_task: Optional[Any] = None
+        self._prep_task: Optional[Any] = None
         self._last_error: Optional[str] = None
         self._startup_ready: threading.Event = threading.Event()
         self._startup_error: Optional[str] = None
@@ -280,6 +284,7 @@ class StrixRuntimeBridge:
         scope_mode: str = "auto",
         diff_base: Optional[str] = None,
         local_sources: Optional[list[dict[str, str]]] = None,
+        workspace_files: Optional[list[dict[str, str]]] = None,
     ) -> tuple[bool, str]:
         if not _STRIX_AVAILABLE:
             return False, "STRIX no esta instalado (strix package not found)"
@@ -330,6 +335,7 @@ class StrixRuntimeBridge:
             scope_mode=scope_mode,
             diff_base=diff_base,
             local_sources=list(local_sources or []),
+            workspace_files=list(workspace_files or []),
             user_explicit_instruction="",
             max_budget_usd=None,
             max_turns=_normalize_max_turns(DEFAULT_MAX_TURNS),
@@ -346,7 +352,7 @@ class StrixRuntimeBridge:
             target=self._scan_thread, args=(args, local_sources), daemon=True)
         self._thread.start()
 
-        if not self._startup_ready.wait(timeout=5.0):
+        if not self._startup_ready.wait(timeout=_STARTUP_READY_TIMEOUT):
             return self._abort_startup()
         if self._startup_error:
             return False, self._startup_error
@@ -356,6 +362,17 @@ class StrixRuntimeBridge:
         self._startup_abort.set()
         self._startup_error = "STRIX no confirmó el inicio del escaneo (timeout de arranque)"
         if self._loop is not None and not self._loop.is_closed():
+            prep_task = self._prep_task
+            if prep_task is not None and not prep_task.done():
+                try:
+                    async def _cancel_prep_task() -> None:
+                        if self._prep_task is not None and not self._prep_task.done():
+                            self._prep_task.cancel()
+                    asyncio.run_coroutine_threadsafe(
+                        _cancel_prep_task(), self._loop).result(timeout=2.0)
+                except Exception as exc:
+                    logger.warning(
+                        "start_scan: prep task cancel after timeout failed: %s", exc)
             scan_task = self._scan_task
             if scan_task is not None and not scan_task.done():
                 try:
@@ -407,22 +424,6 @@ class StrixRuntimeBridge:
 
             args.max_turns = _normalize_max_turns(args.max_turns)
 
-            if prepare_run is not None:
-                try:
-                    prepare_run(args)
-                except Exception as exc:
-                    logger.error("prepare_run failed: %s", exc)
-                    self._startup_error = f"Preparación del escaneo falló: {exc}"
-                    self._scan_completed = True
-                    return
-                self._run_name = args.run_name
-                if args.local_sources is None:
-                    args.local_sources = []
-                for s in (user_local_sources or []):
-                    sp = s.get("source_path", "")
-                    if sp and not any(x.get("source_path") == sp for x in args.local_sources):
-                        args.local_sources.append(s)
-
             runtime = self._GoTuiRuntime(args)
             if self._startup_abort.is_set():
                 self._scan_completed = True
@@ -430,7 +431,39 @@ class StrixRuntimeBridge:
             self._runtime = runtime
             self._coordinator = runtime.coordinator
 
-            runtime.init_run_state()
+            # Delegate the whole preparation + start to the official 1.6.2
+            # choreography: preflight_model_connection -> persist_current ->
+            # prepare_run -> telemetry_start -> scan_state=running ->
+            # init_run_state -> start_scan.  The official prepare_run rebuilds
+            # args.local_sources from targets_info (collect_local_sources),
+            # which already derives the bot's local-dir / attachment targets,
+            # so no manual local_sources injection is needed here.
+            prep_task = asyncio.create_task(runtime.prepare_and_start())
+            self._prep_task = prep_task
+            try:
+                await prep_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("prepare_and_start failed: %s", exc)
+                self._startup_error = f"Preparación del escaneo falló: {exc}"
+                self._scan_completed = True
+                return
+            finally:
+                self._prep_task = None
+
+            self._run_name = args.run_name
+
+            ctrl = getattr(runtime, "controller", None)
+            scan_state = getattr(ctrl, "scan_state", None) if ctrl else None
+            if scan_state == "failed":
+                self._startup_error = (
+                    getattr(ctrl, "error", None)
+                    or "Preparación del escaneo falló"
+                )
+                self._scan_completed = True
+                return
+
             if self._startup_abort.is_set():
                 self._scan_completed = True
                 return
@@ -439,7 +472,6 @@ class StrixRuntimeBridge:
                 self._live_view = runtime.live_view
             self._root_agent_id = None
 
-            runtime.start_scan()
             self._scan_task = runtime.scan_task
             if self._startup_abort.is_set():
                 if self._scan_task is not None and not self._scan_task.done():
@@ -959,6 +991,35 @@ class StrixRuntimeBridge:
             return []
         return list(rs.vulnerability_reports)
 
+    def get_mcp_connections(self) -> list[dict[str, Any]]:
+        """Official MCP connection roster from the controller.
+
+        Populated by the engine via GoTuiRuntime.capture_mcp_status ->
+        controller.set_mcp_connections. Each entry is the non-secret snapshot
+        {name, tool_count, dead}. No synthetic values: an empty list means the
+        engine has not reported a roster yet.
+        """
+        if self._runtime is None:
+            return []
+        ctrl = getattr(self._runtime, "controller", None)
+        if ctrl is None:
+            return []
+        roster = getattr(ctrl, "mcp_connections", None)
+        if not isinstance(roster, list):
+            return []
+        return [dict(entry) for entry in roster if isinstance(entry, dict)]
+
+    def get_llm_usage(self) -> dict[str, Any]:
+        """Official LLM usage/cost from the per-run ReportState (no synthesis)."""
+        rs = self._report_state()
+        if rs is None:
+            return {}
+        try:
+            usage = rs.get_total_llm_usage()
+            return dict(usage) if isinstance(usage, dict) else {}
+        except Exception:
+            return {}
+
     def get_run_status(self) -> dict:
         status: dict[str, Any] = {
             "run_name": self._run_name, "is_running": self.is_running,
@@ -1018,6 +1079,15 @@ class StrixRuntimeBridge:
             except Exception:
                 pass
 
+        # Full Strix 1.6.2 projection: official MCP roster + LLM usage + agent
+        # count, all read from the engine (no synthetic values).
+        mcp_connections = self.get_mcp_connections()
+        llm_usage = self.get_llm_usage()
+        agent_tree = self.get_agent_tree()
+        agent_count = (
+            len(agent_tree["agents"]) if agent_tree else 0
+        )
+
         state: dict[str, Any] = {
             "run_name": status.get("run_name", "pending"),
             "target": self._current_targets,
@@ -1028,6 +1098,10 @@ class StrixRuntimeBridge:
             "is_active": self.is_running,
             "awaiting_input": awaiting_input,
             "input_prompt": "",
+            "mcp_connections": mcp_connections,
+            "mcp_count": len(mcp_connections),
+            "llm_usage": llm_usage,
+            "agent_count": agent_count,
         }
         if not self.is_running:
             state["is_active"] = False

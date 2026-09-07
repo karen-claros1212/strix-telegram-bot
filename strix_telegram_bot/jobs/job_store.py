@@ -7,6 +7,7 @@ from typing import Optional
 
 from strix_telegram_bot.config import settings
 from strix_telegram_bot.models import JobPhase, JobState
+from strix_telegram_bot.persistence import atomic_write_json
 
 
 class JobStore:
@@ -30,9 +31,7 @@ class JobStore:
 
     def save(self, job: JobState) -> None:
         self._cache[job.run_name] = job
-        self._path(job.run_name).write_text(
-            json.dumps(job.to_dict(), indent=2, default=str)
-        )
+        atomic_write_json(self._path(job.run_name), job.to_dict())
 
     def get(self, run_name: str) -> Optional[JobState]:
         return self._cache.get(run_name)

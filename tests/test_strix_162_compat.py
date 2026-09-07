@@ -262,3 +262,110 @@ def test_default_max_turns():
     from strix.config.settings import DEFAULT_MAX_TURNS
 
     assert DEFAULT_MAX_TURNS == 500
+
+
+# -------------------------- premium mirror contracts (A-F) --------------------------
+
+def test_a_prepare_and_start_is_async_lifecycle():
+    """Workstream A: the bridge delegates the whole start to GoTuiRuntime.
+    prepare_and_start must exist and be a coroutine (preflight -> prepare_run
+    -> init_run_state -> start_scan all live inside it)."""
+    from strix.interface.tui.runtime import GoTuiRuntime
+
+    assert hasattr(GoTuiRuntime, "prepare_and_start")
+    assert inspect.iscoroutinefunction(GoTuiRuntime.prepare_and_start)
+    # The pieces it orchestrates must also exist on the runtime.
+    assert hasattr(GoTuiRuntime, "init_run_state")
+    assert hasattr(GoTuiRuntime, "start_scan")
+    assert inspect.iscoroutinefunction(GoTuiRuntime.quit)
+
+
+def test_c_atomic_write_json_atomicity(tmp_path):
+    """Workstream C: the shared primitive writes atomically (temp sibling +
+    fsync + os.replace) and never leaves a partial file or a stray temp."""
+    import json as _json
+
+    from strix_telegram_bot.persistence import atomic_write_json
+
+    target = tmp_path / "sub" / "state.json"
+    atomic_write_json(target, {"a": 1, "b": [1, 2, 3]})
+    assert target.is_file()
+    assert _json.loads(target.read_text()) == {"a": 1, "b": [1, 2, 3]}
+    # No leftover temp files anywhere under the tree.
+    leftovers = [p for p in tmp_path.rglob("*.tmp*") if p.is_file()]
+    assert leftovers == [], f"stray temp files: {leftovers}"
+    # Overwrite is also atomic and correct.
+    atomic_write_json(target, {"a": 99})
+    assert _json.loads(target.read_text()) == {"a": 99}
+
+
+def test_d_mcp_roster_contract():
+    """Workstream D: the engine reports the MCP roster through
+    capture_mcp_status -> controller.set_mcp_connections -> mcp_connections,
+    normalizing each entry to {name, tool_count, dead}."""
+    from strix.interface.tui.backend.controller import TuiController
+
+    ctrl = TuiController.__new__(TuiController)
+    ctrl.mcp_connections = []
+    ctrl._on_change = None  # notify_changed() is a no-op without a subscriber
+    ctrl.set_mcp_connections([
+        {"name": "http", "tool_count": 12, "dead": False},
+        {"name": "fs", "tool_count": 4, "dead": True},
+        {"name": ""},  # dropped (no name)
+        "not-a-dict",  # dropped
+    ])
+    assert ctrl.mcp_connections == [
+        {"name": "http", "tool_count": 12, "dead": False},
+        {"name": "fs", "tool_count": 4, "dead": True},
+    ], ctrl.mcp_connections
+
+
+def test_e_read_workspace_files_contract(tmp_path):
+    """Workstream E: read_workspace_files turns {source_path, workspace_path}
+    into engine extra_files entries {workspace_path, content} (bytes)."""
+    from strix.interface.utils import read_workspace_files
+
+    src = tmp_path / "notes.txt"
+    src.write_bytes(b"hello world")
+    entries = read_workspace_files([
+        {"source_path": str(src), "workspace_path": "notes.txt"},
+    ])
+    assert len(entries) == 1
+    assert entries[0]["workspace_path"] == "notes.txt"
+    assert entries[0]["content"] == b"hello world"
+    # None / empty input yields no entries.
+    assert read_workspace_files(None) == []
+    assert read_workspace_files([]) == []
+
+
+def test_f_write_sarif_contract(tmp_path):
+    """Workstream F: the official SARIF emitter writes findings.sarif (2.1.0)
+    into the run dir — the bot reads it, never regenerates it."""
+    from strix.report.sarif import write_sarif
+
+    vulns = [
+        {
+            "id": "vuln-1",
+            "title": "SQLi",
+            "severity": "high",
+            "description": "desc",
+            "cwe": "CWE-89",
+            "cvss": 7.5,
+            "endpoint": "/api/x",
+            "method": "GET",
+            "parameter": "q",
+            "payload": "1' OR 1=1",
+            "evidence": "ev",
+            "recommendation": "fix",
+        }
+    ]
+    write_sarif(tmp_path, vulns, tool_version="1.6.2")
+    sarif = tmp_path / "findings.sarif"
+    assert sarif.is_file(), "findings.sarif must be produced by the official emitter"
+    import json as _json
+
+    doc = _json.loads(sarif.read_text())
+    assert doc.get("version", "").startswith("2.1"), doc.get("version")
+    # The finding must be reflected in the SARIF results.
+    results = doc.get("runs", [{}])[0].get("results", [])
+    assert any("SQLi" in str(r) for r in results), "vulnerability missing from SARIF"

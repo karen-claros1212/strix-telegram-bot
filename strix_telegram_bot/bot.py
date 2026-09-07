@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 import time
@@ -113,6 +112,10 @@ class StrixBot:
         self._delivery_tracker = ReportDeliveryTracker()
         self._delivery_tracker.recover()
 
+        # Reconcile jobs that were 'scanning' before a restart: the bridge is
+        # fresh (no live scan), so any active job is a phantom from a dead run.
+        self._reconcile_stale_jobs()
+
         self._command_handlers: dict[str, Callable] = {}
         self._callback_handlers: dict[str, Callable] = {}
         self._drain_thread: Optional[threading.Thread] = None
@@ -165,24 +168,46 @@ class StrixBot:
         return None
 
     def _save_offset(self) -> None:
-        """Persist the current Telegram updates offset atomically with fsync."""
+        """Persist the current Telegram updates offset via the shared atomic writer."""
         try:
             if self._updates_offset is not None:
-                import json as _json
-
                 from .config import settings
+                from .persistence import atomic_write_json
+
                 state_dir = settings.strix_runs_dir / ".bot-state"
-                state_dir.mkdir(parents=True, exist_ok=True)
                 offset_file = state_dir / "telegram_offset.json"
-                tmp_file = state_dir / ".telegram_offset.json.tmp"
-                payload = _json.dumps({"offset": self._updates_offset})
-                with open(tmp_file, "w") as f:
-                    f.write(payload)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(str(tmp_file), str(offset_file))
+                atomic_write_json(offset_file, {"offset": self._updates_offset})
         except Exception:
             pass
+
+    def _reconcile_stale_jobs(self) -> int:
+        """Mark jobs still 'active' after a restart as failed.
+
+        The bridge is freshly constructed at startup, so it owns no live scan.
+        Any job the store still marks as active therefore refers to a run that
+        died with the previous process. Reconciling them here prevents the UI
+        from showing a phantom running scan forever. Returns the count fixed.
+        """
+        from .models import JobPhase
+
+        reconciled = 0
+        for job in self._job_store.list_active():
+            is_live = (
+                self._bridge.is_running
+                and self._bridge.run_name == job.run_name
+            )
+            if is_live:
+                continue
+            job.phase = JobPhase.FAILED
+            job.error = (
+                "El servicio se reinició durante el escaneo; "
+                "el run quedó huérfano."
+            )
+            self._job_store.save(job)
+            reconciled += 1
+        if reconciled:
+            logger.info("Reconciled %d stale job(s) at startup", reconciled)
+        return reconciled
 
     def _register_slash_commands(self) -> None:
         from .telegram import _request
@@ -199,10 +224,12 @@ class StrixBot:
 
     def _handle_command(self, update: dict) -> None:
         msg = update.get("message", {})
-        chat_id = msg.get("chat", {}).get("id", 0)
+        chat = msg.get("chat", {})
+        chat_id = chat.get("id", 0)
         user_id = str(msg.get("from", {}).get("id", ""))
+        chat_type = chat.get("type", "")
 
-        if not is_authorized(user_id, str(chat_id)):
+        if not is_authorized(user_id, str(chat_id), chat_type):
             send_message(self, chat_id, "No autorizado.")
             return
 
@@ -511,11 +538,13 @@ class StrixBot:
     def _handle_callback(self, update: dict) -> None:
         cb = update.get("callback_query", {})
         data = cb.get("data", "")
-        chat_id = cb.get("message", {}).get("chat", {}).get("id", 0)
+        chat = cb.get("message", {}).get("chat", {})
+        chat_id = chat.get("id", 0)
         user_id = str(cb.get("from", {}).get("id", ""))
+        chat_type = chat.get("type", "")
         cb_id = cb.get("id", "")
 
-        if not data or not is_authorized(user_id, str(chat_id)):
+        if not data or not is_authorized(user_id, str(chat_id), chat_type):
             answer_callback(self, cb_id)
             return
 
@@ -619,27 +648,24 @@ class StrixBot:
                 "Usá el botón Escanear para iniciar un escaneo.",
             )
 
-    def _prepare_scan_targets(self, targets: list[str]) -> tuple[list[str], list[dict[str, str]]]:
+    def _prepare_scan_targets(
+        self, targets: list[str]
+    ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
         """Prepare targets for the official Strix flow.
 
         Strix owns target setup: ``build_targets_info`` classifies each target
         and ``prepare_run`` clones repositories and collects local sources.
         The bot only handles what the official flow cannot:
-          - resolve local directories to absolute paths
-          - wrap uploaded files in a directory (Telegram uploads are files,
-            but the official ``local_code`` target must be a directory)
+          - resolve local directories to absolute paths (code targets)
+          - route uploaded files through the official ``workspace_files``
+            mechanism (``read_workspace_files`` -> ``extra_files``) instead of
+            staging them into a bot-private wrap directory
         GitHub URLs are passed through UNCLONED — the official prepare_run
         clones them (no bot pre-clone).
         """
-        from strix_telegram_bot.config import settings
-
         final_targets: list[str] = []
         local_sources: list[dict[str, str]] = []
-        repos_dir = settings.strix_runs_dir / "repos"
-
-        def _add_local(path: Path, subdir: str) -> None:
-            sr = str(path.resolve())
-            local_sources.append({"source_path": sr, "workspace_subdir": subdir})
+        workspace_files: list[dict[str, str]] = []
 
         for t in targets:
             t = t.strip()
@@ -647,47 +673,21 @@ class StrixBot:
 
             if p.exists():
                 if p.is_dir():
+                    # Local code target: the official flow mounts it.
                     sr = str(p.resolve())
                     final_targets.append(sr)
-                    _add_local(p, p.name)
+                    local_sources.append(
+                        {"source_path": sr, "workspace_subdir": p.name}
+                    )
                 else:
-                    wrap_dir = repos_dir / "_attachments" / p.stem
-                    wrap_dir.mkdir(parents=True, exist_ok=True)
-                    target_path = wrap_dir / p.name
-                    import shutil
-
-                    source_path = p.resolve()
-
-                    try:
-                        # LocalDir no admite symlinks. El archivo entregado al sandbox
-                        # debe ser un archivo regular dentro del directorio montado.
-                        if target_path.is_symlink() or target_path.exists():
-                            target_path.unlink()
-
-                        shutil.copy2(source_path, target_path)
-
-                        if not target_path.is_file() or target_path.is_symlink():
-                            raise RuntimeError(
-                                f"Attachment was not materialized as a regular file: {target_path}"
-                            )
-
-                        logger.info(
-                            "Attachment prepared for sandbox: source=%s target=%s size=%d",
-                            source_path,
-                            target_path,
-                            target_path.stat().st_size,
-                        )
-
-                    except (OSError, shutil.Error, RuntimeError) as exc:
-                        logger.exception(
-                            "Failed to prepare attachment %s for sandbox: %s",
-                            source_path,
-                            exc,
-                        )
-                        final_targets.append(t)
-                        continue
-                    final_targets.append(str(wrap_dir))
-                    _add_local(wrap_dir, p.stem)
+                    # Uploaded file: hand it to the official workspace_files
+                    # mechanism (extra_files) — no bot-private wrap dir.
+                    workspace_files.append(
+                        {
+                            "source_path": str(p.resolve()),
+                            "workspace_path": p.name,
+                        }
+                    )
                 continue
 
             # GitHub URL, domain, IP, or anything else: pass through uncloned.
@@ -695,7 +695,7 @@ class StrixBot:
             # and cloning.
             final_targets.append(t)
 
-        return final_targets, local_sources
+        return final_targets, local_sources, workspace_files
 
     def _launch_scan(
         self,
@@ -711,7 +711,9 @@ class StrixBot:
             send_message(self, chat_id, "No se especificó objetivo.", reply_markup=back_to_menu())
             return
 
-        prepared_targets, local_sources = self._prepare_scan_targets(targets)
+        prepared_targets, local_sources, workspace_files = (
+            self._prepare_scan_targets(targets)
+        )
 
         exact_instruction = instruction.strip()
 
@@ -721,6 +723,7 @@ class StrixBot:
             instruction=exact_instruction,
             scope_mode="auto",
             local_sources=local_sources,
+            workspace_files=workspace_files,
         )
 
         if not ok:

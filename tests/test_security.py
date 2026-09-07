@@ -57,42 +57,70 @@ def _extract_callback_auth(update: dict) -> tuple[str, str]:
 
 
 class TestAccessPolicy:
-    """Direct AccessPolicy.is_authorized() tests."""
+    """Direct AccessPolicy.is_authorized() tests (fail-closed + group AND)."""
 
-    def test_allow_all_when_empty(self):
+    def test_deny_all_when_empty(self):
+        """Fail-closed: an empty user allowlist denies everyone."""
         policy = AccessPolicy()
         with patch.object(policy, "_allowed_users", frozenset()):
             with patch.object(policy, "_allowed_chats", frozenset()):
-                assert policy.is_authorized("111", "-100999") is True
-                assert policy.is_authorized("999", "-100000") is True
-
-    def test_allow_by_user_id(self):
-        policy = AccessPolicy()
-        with patch.object(policy, "_allowed_users", frozenset(["111"])):
-            with patch.object(policy, "_allowed_chats", frozenset()):
-                assert policy.is_authorized("111", "-100999") is True
-                assert policy.is_authorized("222", "-100999") is False
-
-    def test_allow_by_chat_id(self):
-        policy = AccessPolicy()
-        with patch.object(policy, "_allowed_users", frozenset()):
-            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
-                assert policy.is_authorized("111", "-100999") is True
-                assert policy.is_authorized("111", "-100888") is False
-
-    def test_allow_by_either_user_or_chat(self):
-        policy = AccessPolicy()
-        with patch.object(policy, "_allowed_users", frozenset(["111"])):
-            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
-                assert policy.is_authorized("111", "-100888") is True
-                assert policy.is_authorized("222", "-100999") is True
-                assert policy.is_authorized("222", "-100888") is False
-
-    def test_reject_when_both_set_and_not_matching(self):
-        policy = AccessPolicy()
-        with patch.object(policy, "_allowed_users", frozenset(["111"])):
-            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
+                assert policy.is_authorized("111", "-100999") is False
                 assert policy.is_authorized("999", "-100000") is False
+
+    def test_validate_flags_empty_user_allowlist(self):
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset()):
+            assert policy.validate() != []
+        with patch.object(policy, "_allowed_users", frozenset(["111"])):
+            assert policy.validate() == []
+
+    def test_allow_by_user_id_private(self):
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset(["111"])):
+            with patch.object(policy, "_allowed_chats", frozenset()):
+                assert policy.is_authorized("111", "-100999", "private") is True
+                assert policy.is_authorized("222", "-100999", "private") is False
+
+    def test_chat_alone_does_not_authorize(self):
+        """A chat in the allowlist does NOT authorize a user that is not."""
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset()):
+            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
+                assert policy.is_authorized("111", "-100999", "private") is False
+
+    def test_group_requires_user_and_chat(self):
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset(["111"])):
+            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
+                # allowed user + allowed group → True
+                assert policy.is_authorized("111", "-100999", "group") is True
+                # allowed user + NOT allowed group → False
+                assert policy.is_authorized("111", "-100888", "group") is False
+                # NOT allowed user + allowed group → False
+                assert policy.is_authorized("222", "-100999", "group") is False
+                # NOT allowed user + NOT allowed group → False
+                assert policy.is_authorized("222", "-100888", "group") is False
+
+    def test_supergroup_requires_user_and_chat(self):
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset(["111"])):
+            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
+                assert policy.is_authorized("111", "-100999", "supergroup") is True
+                assert policy.is_authorized("111", "-100888", "supergroup") is False
+
+    def test_private_ignores_chat_allowlist(self):
+        """In a private chat the chat allowlist is irrelevant; only the user matters."""
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset(["111"])):
+            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
+                # allowed user in a chat that is NOT allowlisted → still True (private)
+                assert policy.is_authorized("111", "-100888", "private") is True
+
+    def test_reject_when_user_not_matching(self):
+        policy = AccessPolicy()
+        with patch.object(policy, "_allowed_users", frozenset(["111"])):
+            with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
+                assert policy.is_authorized("999", "-100000", "private") is False
 
 
 class TestCommandAuthFieldResolution:
@@ -126,13 +154,14 @@ class TestCommandAuthFieldResolution:
             with patch.object(policy, "_allowed_chats", frozenset()):
                 assert policy.is_authorized(uid, cid) is False
 
-    def test_authorized_by_chat_works(self):
+    def test_chat_alone_does_not_authorize(self):
+        """New fail-closed: a chat in the allowlist does not authorize a user that is not."""
         upd = _message_update("/start", user_id="999")
         uid, cid = _extract_command_auth(upd)
         policy = AccessPolicy()
         with patch.object(policy, "_allowed_users", frozenset()):
             with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
-                assert policy.is_authorized(uid, cid) is True
+                assert policy.is_authorized(uid, cid) is False
 
 
 class TestCallbackAuthFieldResolution:
@@ -166,13 +195,14 @@ class TestCallbackAuthFieldResolution:
             with patch.object(policy, "_allowed_chats", frozenset()):
                 assert policy.is_authorized(uid, cid) is False
 
-    def test_authorized_by_chat_works(self):
+    def test_chat_alone_does_not_authorize(self):
+        """New fail-closed: a chat in the allowlist does not authorize a user that is not."""
         upd = _callback_update("menu:main", user_id="999")
         uid, cid = _extract_callback_auth(upd)
         policy = AccessPolicy()
         with patch.object(policy, "_allowed_users", frozenset()):
             with patch.object(policy, "_allowed_chats", frozenset(["-100999"])):
-                assert policy.is_authorized(uid, cid) is True
+                assert policy.is_authorized(uid, cid) is False
 
 
 class TestNoSilentRejection:

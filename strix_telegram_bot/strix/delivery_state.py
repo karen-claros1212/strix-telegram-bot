@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from strix_telegram_bot.config import settings
+from strix_telegram_bot.persistence import atomic_write_json
 
 
 def _default_store_dir() -> Path:
@@ -120,7 +121,7 @@ class ReportDeliveryTracker:
 
     def save(self, rec: DeliveryRecord) -> None:
         self._cache[rec.run_name] = rec
-        self._path(rec.run_name).write_text(json.dumps(rec.to_dict(), indent=2, default=str))
+        atomic_write_json(self._path(rec.run_name), rec.to_dict())
 
     def set_state(self, run_name: str, state: DeliveryState, chat_id: int = 0) -> DeliveryRecord:
         rec = self.get_or_create(run_name, chat_id)

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from strix_telegram_bot.config import settings
+from strix_telegram_bot.persistence import atomic_write_json
 
 _STATE_FILE = "bot_state.json"
 
@@ -30,9 +31,7 @@ class StateManager:
 
     def _save(self) -> None:
         try:
-            self._path().write_text(json.dumps(
-                self._state, indent=2, default=str,
-            ))
+            atomic_write_json(self._path(), self._state)
         except OSError:
             pass
 
