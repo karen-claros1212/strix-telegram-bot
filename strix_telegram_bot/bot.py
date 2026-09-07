@@ -28,6 +28,7 @@ from .ui.keyboards import (
     parse_callback,
 )
 from .ui.messages import (
+    describe_tool_activity,
     job_status_text,
 )
 from .ui.panels import get_panel_manager
@@ -92,6 +93,12 @@ class StrixBot:
         self._active_job_chat_id: Optional[int] = None
         self._active_job_message_id: Optional[int] = None
         self._active_job_run_name: Optional[str] = None
+        # The agent whose timeline the main chat mirrors (root initially).
+        # Selecting another agent in the tree switches this — like the TUI.
+        self._active_job_agent_id: Optional[str] = None
+        # Findings already notified to the user this run (anti-duplicate).
+        self._notified_findings: set[str] = set()
+        self._last_findings_count: int = 0
 
         # Chat fragmentation: event_id -> list of Telegram message_ids
         self._chat_fragments: dict[str, list[int]] = {}
@@ -573,6 +580,10 @@ class StrixBot:
             return
 
         self._bridge._preferred_agent_id = agent_id
+        # LIVE TUI MIRROR: the main chat now mirrors this agent's timeline
+        # (like the TUI's agent selection). The scan keeps running; only the
+        # projected timeline switches.
+        self._active_job_agent_id = agent_id
         name = agent.get("name", agent_id)
 
         # AWAITING_SELECTION: if the selected agent is waiting for a user
@@ -760,6 +771,11 @@ class StrixBot:
         self._active_job_chat_id = chat_id
         self._active_job_message_id = panel_msg_id
         self._active_job_run_name = run_name
+        # New run: the main chat mirrors the root agent's timeline again, and
+        # findings notifications restart from a clean slate for this run.
+        self._active_job_agent_id = self._bridge.root_agent_id
+        self._notified_findings.clear()
+        self._last_findings_count = 0
         self._chat_fragments.clear()
         self._chat_event_version.clear()
         self._tool_message_ids.clear()
@@ -877,6 +893,7 @@ class StrixBot:
                     self._active_job_chat_id = None
                     self._active_job_message_id = None
                     self._active_job_run_name = None
+                    self._active_job_agent_id = None
                     self._active_chat_agent_id = None
                     self._active_chat_message_id = None
 
@@ -915,11 +932,22 @@ class StrixBot:
         return content
 
     def _process_scan_events(self, events: list[dict]) -> None:
+        """Mirror the TUI: project the SELECTED agent's timeline (root initially).
+
+        The main chat is a faithful projection of TuiLiveView for the selected
+        agent — assistant chat, streaming, tool calls/outputs, and states. It is
+        NOT a reduced "root-only" view and does NOT discard tool events. Selecting
+        another agent in the tree switches the mirrored timeline (like the TUI);
+        the scan itself keeps running autonomously either way.
+        """
         if not events or self._active_job_chat_id is None:
             return
 
         chat_id = self._active_job_chat_id
         current_run = self._active_job_run_name
+        # The agent whose timeline the main chat mirrors. Root initially; the
+        # agent selector switches this. Falls back to root if not yet set.
+        selected = self._active_job_agent_id or self._bridge.root_agent_id
 
         for ev in events:
             ev_type = ev.get("type", "")
@@ -927,27 +955,27 @@ class StrixBot:
             ev_run = data.get("run_name", "")
             ev_id = ev.get("id", "")
             ev_version = int(ev.get("version", 0))
+            agent_id = ev.get("agent_id", "")
 
             if current_run and ev_run and ev_run != current_run:
+                continue
+
+            # Mirror the SELECTED agent's timeline (root initially). Other
+            # agents' activity is still visible by selecting them in the tree —
+            # this is a selection, not a global filter that drops information.
+            if selected and agent_id and agent_id != selected:
                 continue
 
             if ev_type == "chat":
                 role = data.get("role", "")
                 if role != "assistant":
                     continue
-                # Section 8.3: Only root agent messages in main chat
-                agent_id = ev.get("agent_id", "")
-                root_id = self._bridge.root_agent_id
-                if root_id and agent_id and agent_id != root_id:
-                    continue
                 streaming = data.get("metadata", {}).get("streaming", False)
                 content = data.get("content", "")
                 if not content:
                     continue
                 raw = self._sanitize_agent_content(content)
-
-                header = "STRIX:\n"
-                full_text = header + raw
+                full_text = self._agent_header(agent_id) + raw
 
                 if streaming:
                     self._update_chat_fragments(chat_id, ev_id, ev_version, full_text)
@@ -958,9 +986,10 @@ class StrixBot:
                         self._send_fragmented(chat_id, ev_id, ev_version, full_text)
 
             elif ev_type == "tool":
-                # Tool events are only visible in the menu tree/agent views,
-                # not in the main chat.  Skip silently.
-                pass
+                # Project tool activity compactly (not raw output). The same
+                # event id is reused as the tool goes running -> completed/failed,
+                # so the streaming mechanism edits the same message in place.
+                self._project_tool_event(chat_id, ev, data, agent_id)
 
             elif ev_type == "system":
                 event_name = data.get("event", "")
@@ -969,6 +998,77 @@ class StrixBot:
                     # already returns None.  In interactive mode, the status
                     # panel shows "esperando" — no chat bubble needed.
                     pass
+
+        # Findings update in real time (official ReportState), with a short
+        # notification per new finding (Telegram has no persistent sidebar).
+        self._mirror_findings(chat_id, current_run)
+
+    def _agent_header(self, agent_id: str) -> str:
+        """Identity header for a projected message: 'STRIX · <agent name>'."""
+        name = self._agent_name(agent_id)
+        return f"STRIX · {name}\n"
+
+    def _agent_name(self, agent_id: str) -> str:
+        """Human-readable name for an agent id (falls back to the id itself)."""
+        if not agent_id:
+            return "STRIX"
+        tree = self._bridge.get_agent_tree()
+        if tree and agent_id in tree.get("agents", {}):
+            return tree["agents"][agent_id].get("name", agent_id)
+        return agent_id
+
+    def _project_tool_event(self, chat_id: int, ev: dict, data: dict, agent_id: str) -> None:
+        """Project a tool event compactly (name + action), not raw output.
+
+        Uses the official describe_tool_activity() renderer. The event id is
+        stable across the running -> completed/failed transition, so the
+        streaming fragment mechanism edits the same message in place.
+        """
+        tool_name = data.get("tool_name", "") or data.get("name", "")
+        args = data.get("args", {}) or data.get("arguments", {}) or {}
+        status = data.get("status", "")
+        if status not in ("running", "completed", "failed"):
+            return
+        tool_label, action_label = describe_tool_activity(tool_name, args)
+        icon = {"running": "▶", "completed": "✓", "failed": "✗"}.get(status, "▶")
+        full_text = f"{self._agent_header(agent_id)}{icon} {tool_label}\n{action_label}"
+        ev_id = ev.get("id", "")
+        ev_version = int(ev.get("version", 0))
+        self._update_chat_fragments(chat_id, ev_id, ev_version, full_text)
+
+    def _mirror_findings(self, chat_id: int, current_run: Optional[str]) -> None:
+        """Reflect official findings in real time and notify on new ones.
+
+        Reads only the per-run ReportState (no synthesis). Emits a short
+        notification for each newly-appearing finding, using official data.
+        Anti-duplicate: each finding id is notified at most once per run.
+        """
+        if not current_run:
+            return
+        vulns = self._bridge.get_vulnerabilities()
+        new_ids = {v.get("id", "") for v in vulns if v.get("id")}
+        unseen = new_ids - self._notified_findings
+        if not unseen:
+            return
+        self._notified_findings |= new_ids
+        self._last_findings_count = len(vulns)
+        for v in vulns:
+            vid = v.get("id", "")
+            if vid not in unseen:
+                continue
+            title = v.get("title", "Hallazgo")
+            severity = str(v.get("severity", "")).upper()
+            agent = self._agent_name(v.get("agent_id", ""))
+            lines = ["Nuevo hallazgo STRIX", ""]
+            if severity:
+                lines.append(f"[{severity}] {title}")
+            else:
+                lines.append(title)
+            lines.append(f"Agente: {agent}")
+            send_message(
+                self, chat_id, "\n".join(lines),
+                parse_mode=None, disable_web_page_preview=True,
+            )
 
     def _send_long_message(self, chat_id: int, text: str, sender) -> Optional[dict]:
         """Split text into valid Telegram messages (max 4096 chars each)."""

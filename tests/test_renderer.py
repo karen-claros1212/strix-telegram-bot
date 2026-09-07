@@ -11,12 +11,13 @@ from strix_telegram_bot.telegram import SendOutcome
 
 
 def _make_chat_event(
-    event_id="chat_1", version=0, content="hello", streaming=False, run_name="test-run"
+    event_id="chat_1", version=0, content="hello", streaming=False,
+    run_name="test-run", agent_id="a1",
 ):
     return {
         "id": event_id,
         "type": "chat",
-        "agent_id": "a1",
+        "agent_id": agent_id,
         "timestamp": "2026-01-01T00:00:00Z",
         "version": version,
         "data": {
@@ -30,14 +31,14 @@ def _make_chat_event(
 
 def _make_tool_event(
     call_id="call_1", tool_name="test_tool", status="running",
-    args=None, result=None, run_name="test-run",
+    args=None, result=None, run_name="test-run", version=0,
 ):
     return {
         "id": f"tool_{call_id}",
         "type": "tool",
         "agent_id": "a1",
         "timestamp": "2026-01-01T00:00:00Z",
-        "version": 0,
+        "version": version,
         "data": {
             "tool_name": tool_name,
             "args": args or {},
@@ -161,47 +162,59 @@ class TestStreamingRenderer:
 
 
 class TestToolRenderer:
-    def test_tool_event_ignored_in_main_chat(self, bot, mock_telegram):
+    """LIVE TUI MIRROR: tool events are projected compactly in the main chat."""
+
+    def test_tool_event_projected_in_main_chat(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         ev = _make_tool_event(call_id="call_1", tool_name="nuclei_scan", status="running",
                               args={"url": "https://example.com"})
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 0
-        assert mock_edit.call_count == 0
+        # A running tool event creates one compact message (name + action).
+        assert mock_send.call_count == 1
+        sent = mock_send.call_args[0][2]
+        assert "STRIX" in sent  # agent identity header present
 
-    def test_tool_completed_ignored(self, bot, mock_telegram):
-        _, mock_edit, _ = mock_telegram
-        bot._tool_message_ids["call_1"] = 200
-        ev = _make_tool_event(call_id="call_1", tool_name="nuclei_scan", status="completed",
-                              result="Found CVE-2024-1234")
-        bot._process_scan_events([ev])
-        assert mock_edit.call_count == 0
+    def test_tool_completed_edits_existing(self, bot, mock_telegram):
+        mock_send, mock_edit, _ = mock_telegram
+        mock_send.return_value = {"message_id": 200}
+        # running (creates) then completed (edits the same message in place).
+        # The version increments on the transition (like TuiLiveView._bump_event).
+        ev_run = _make_tool_event(call_id="call_1", tool_name="nuclei_scan",
+                                  status="running", args={"url": "https://x"},
+                                  version=0)
+        bot._process_scan_events([ev_run])
+        ev_done = _make_tool_event(call_id="call_1", tool_name="nuclei_scan",
+                                   status="completed", result="Found CVE-2024-1234",
+                                   version=1)
+        bot._process_scan_events([ev_done])
+        assert mock_send.call_count == 1   # created once
+        assert mock_edit.call_count == 1   # edited on completion
 
-    def test_tool_failed_ignored(self, bot, mock_telegram):
-        _, mock_edit, _ = mock_telegram
-        bot._tool_message_ids["call_2"] = 201
+    def test_tool_failed_projected(self, bot, mock_telegram):
+        mock_send, mock_edit, _ = mock_telegram
         ev = _make_tool_event(call_id="call_2", tool_name="ffuf", status="failed",
                               result="connection refused")
         bot._process_scan_events([ev])
-        assert mock_edit.call_count == 0
+        assert mock_send.call_count == 1
+        sent = mock_send.call_args[0][2]
+        assert "✗" in sent  # failed icon present
 
-    def test_tool_no_messages_sent_for_any_status(self, bot, mock_telegram):
+    def test_tool_messages_sent_for_any_status(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 300}
         ev1 = _make_tool_event(call_id="call_x", tool_name="curl", status="running")
         bot._process_scan_events([ev1])
         ev2 = _make_tool_event(call_id="call_y", tool_name="subfinder", status="running")
         bot._process_scan_events([ev2])
-        assert mock_send.call_count == 0
+        assert mock_send.call_count == 2  # each tool call gets a message
 
-    def test_tool_orphan_completed_ignored(self, bot, mock_telegram):
+    def test_tool_orphan_completed_projected(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 400}
         ev = _make_tool_event(call_id="unknown", tool_name="tool", status="completed",
                               result="orphan")
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 0
-        assert mock_edit.call_count == 0
+        assert mock_send.call_count == 1
 
 
 class TestMessageSplitting:
@@ -277,20 +290,21 @@ class TestCallHistory:
         assert mock_send.call_count == 1  # first delta creates
         assert mock_edit.call_count == 3  # 2 deltas + 1 final
 
-    def test_tool_call_sequence_ignored(self, bot, mock_telegram):
+    def test_tool_call_sequence_projected(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 200}
 
         events = [
             _make_tool_event(call_id="c1", tool_name="nuclei", status="running",
-                             args={"url": "http://test"}),
+                             args={"url": "http://test"}, version=0),
             _make_tool_event(call_id="c1", tool_name="nuclei", status="completed",
-                             result="3 vulns found"),
+                             result="3 vulns found", version=1),
         ]
         bot._process_scan_events(events)
 
-        assert mock_send.call_count == 0
-        assert mock_edit.call_count == 0
+        # running creates the message; completed edits it in place (same id).
+        assert mock_send.call_count == 1
+        assert mock_edit.call_count == 1
 
 
 class TestOutputSanitization:
@@ -616,26 +630,24 @@ class TestShellRendererSDKString:
 
 
 class TestOrphanToolCompleted:
-    """Tool events are now ignored in main chat — rendered in menu tree instead."""
+    """LIVE TUI MIRROR: tool events are projected in the main chat (not ignored)."""
 
-    def test_orphan_completed_ignored(self, bot, mock_telegram):
+    def test_orphan_completed_projected(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 500}
         ev = _make_tool_event(call_id="orphan", tool_name="nuclei", status="completed",
                               result="found 3 vulns")
         bot._process_scan_events([ev])
-        assert mock_send.call_count == 0
-        assert mock_edit.call_count == 0
+        # A completed tool event still gets a compact message (no prior running).
+        assert mock_send.call_count == 1
 
-    def test_tracked_completed_ignored(self, bot, mock_telegram):
+    def test_tracked_completed_projected(self, bot, mock_telegram):
         mock_send, mock_edit, _ = mock_telegram
         mock_send.return_value = {"message_id": 500}
-        bot._tool_message_ids["tracked"] = 500
         ev = _make_tool_event(call_id="tracked", tool_name="curl", status="completed",
                               result="ok")
         bot._process_scan_events([ev])
-        assert mock_edit.call_count == 0
-        assert mock_send.call_count == 0
+        assert mock_send.call_count == 1
 
 
 class TestFallbackTruncation:
@@ -1115,3 +1127,135 @@ class TestSendFragmented:
         _send_fragmented(None, 12345, "Test content")
         for call in mock_reports_send.call_args_list:
             assert call.kwargs.get("parse_mode") is None
+
+
+class TestLiveTuiMirror:
+    """LIVE TUI MIRROR: the main chat mirrors the SELECTED agent's timeline.
+
+    Root initially; selecting another agent switches the mirrored timeline.
+    Tool events are projected (not discarded). Findings update in real time.
+    """
+
+    def _setup_multiagent(self, bot):
+        """Wire the bridge to a 2-agent run (root + subagent)."""
+        bot._bridge._root_agent_id = "root"
+        bot._bridge._run_name = "test-run"
+        tree = {
+            "agents": {
+                "root": {"id": "root", "name": "Root", "status": "running",
+                         "parent_id": None, "error": None},
+                "auth": {"id": "auth", "name": "Auth Analyst", "status": "running",
+                         "parent_id": "root", "error": None},
+            }
+        }
+        bot._bridge.get_agent_tree = lambda: tree
+        bot._bridge.get_vulnerabilities = lambda: []
+        return bot
+
+    def test_root_timeline_by_default(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        # Root chat event is projected (root is the default selected agent).
+        ev = _make_chat_event("chat_root", version=0, content="root says hi",
+                              streaming=False, agent_id="root")
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 1
+        sent = mock_send.call_args[0][2]
+        assert "Root" in sent  # agent identity header
+
+    def test_subagent_filtered_when_root_selected(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        bot._active_job_agent_id = "root"
+        # Subagent chat event is NOT projected while root is selected.
+        ev = _make_chat_event("chat_auth", version=0, content="auth says hi",
+                              streaming=False, agent_id="auth")
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 0
+
+    def test_subagent_projected_when_selected(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        bot._active_job_agent_id = "auth"
+        # Selecting the subagent switches the timeline to it.
+        ev = _make_chat_event("chat_auth", version=0, content="auth says hi",
+                              streaming=False, agent_id="auth")
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 1
+        sent = mock_send.call_args[0][2]
+        assert "Auth Analyst" in sent  # selected agent's name in header
+
+    def test_agent_selection_switches_timeline(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        # Start with root selected: root events projected, subagent filtered.
+        bot._active_job_agent_id = "root"
+        bot._process_scan_events([
+            _make_chat_event("c1", version=0, content="root msg",
+                             streaming=False, agent_id="root"),
+        ])
+        assert mock_send.call_count == 1
+        # Switch to subagent: now subagent events are projected.
+        bot._active_job_agent_id = "auth"
+        bot._process_scan_events([
+            _make_chat_event("c2", version=0, content="auth msg",
+                             streaming=False, agent_id="auth"),
+        ])
+        assert mock_send.call_count == 2
+        sent = mock_send.call_args_list[-1][0][2]
+        assert "Auth Analyst" in sent
+
+    def test_tool_projected_for_selected_agent(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        bot._active_job_agent_id = "auth"
+        # Tool event from the selected subagent is projected compactly.
+        ev = _make_tool_event(call_id="t1", tool_name="nuclei", status="running",
+                              args={"url": "http://x"})
+        ev["agent_id"] = "auth"
+        ev["data"]["agent_id"] = "auth"
+        bot._process_scan_events([ev])
+        assert mock_send.call_count == 1
+        sent = mock_send.call_args[0][2]
+        assert "Auth Analyst" in sent
+
+    def test_findings_notified_in_real_time(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        findings = [
+            {"id": "vuln_1", "title": "SQL Injection", "severity": "critical",
+             "agent_id": "auth"},
+        ]
+        bot._bridge.get_vulnerabilities = lambda: findings
+        bot._process_scan_events([
+            _make_chat_event("c1", version=0, content="scanning",
+                             streaming=False, agent_id="root"),
+        ])
+        # One message for the chat + one for the new finding.
+        assert mock_send.call_count == 2
+        finding_msg = mock_send.call_args_list[-1][0][2]
+        assert "SQL Injection" in finding_msg
+        assert "CRITICAL" in finding_msg
+        assert "Auth Analyst" in finding_msg
+
+    def test_findings_anti_duplicate(self, bot, mock_telegram):
+        mock_send, _, _ = mock_telegram
+        self._setup_multiagent(bot)
+        findings = [
+            {"id": "vuln_1", "title": "SQL Injection", "severity": "high",
+             "agent_id": "root"},
+        ]
+        bot._bridge.get_vulnerabilities = lambda: findings
+        # First pass: finding is notified.
+        bot._process_scan_events([
+            _make_chat_event("c1", version=0, content="a",
+                             streaming=False, agent_id="root"),
+        ])
+        first_count = mock_send.call_count
+        # Second pass (same findings): no new notification.
+        bot._process_scan_events([
+            _make_chat_event("c2", version=0, content="b",
+                             streaming=False, agent_id="root"),
+        ])
+        # Only the two chat messages; the finding was notified once.
+        assert mock_send.call_count == first_count + 1
